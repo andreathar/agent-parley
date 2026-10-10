@@ -28,6 +28,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `dialogs` | Recognition of the native dialogs held on that terminal, the answer the operator configured, capacity records and escalation, and the opt-in that carries approval of this bridge's own tools |
 | `worktrees` | Git in the base checkout, explicit opt-in stashing before registration, lane initialization and the base verification gate |
 | `preflight` | Read-only launch scope, configuration observations, native plugin records and effective supervision; never creates state or starts a client |
+| `console` | Loopback operator console: token sign-in, per-session request tokens and a fixed action allowlist dispatched through the command line |
 | `host_resources` | Cross-project and cross-home advisory host leases in a separate private atomic registry; explicit generation-bound release with no expiry |
 | `merges` | Merge refusals, preview and the merge itself, plus the readiness, dependency and group ordering that integration follows, and the durable record of an integration the base has not verified |
 | `server` | Authenticated MCP transport and bounded tool contracts |

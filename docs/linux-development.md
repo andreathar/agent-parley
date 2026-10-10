@@ -110,6 +110,67 @@ cannot prevent port binding or GPU use by external programs or older Parley
 builds. The untouched daily 0.18.0 installation does not gain these tools until
 a separately reviewed migration installs the fork for daily work.
 
+## Operator console
+
+```sh
+agent-parley-dev console --port 8890
+```
+
+The console serves a single page on the loopback interface only. It answers
+nothing before a caller presents the bearer token stored in that state home's
+`config.json`, which only the owner of the private state directory can read.
+A successful sign-in returns a session cookie marked `HttpOnly` and
+`SameSite=Strict`, plus a separate request token that every mutating call must
+echo in `X-Parley-Csrf`. Sessions expire after an hour.
+
+Every mutation is dispatched through the same command line an operator would
+type, so lane guards, operator refusals, deadlines and audit records apply
+unchanged. The console adds no authority of its own and holds a fixed action
+allowlist: a command absent from that list cannot be reached, and each argument
+is validated against its declared kind before the vector is built. Arguments
+are passed as a list and never through a shell. Serving the console is itself
+an operator action and is refused from a lane.
+
+The dashboard reads `status --json` and `host-resources list --json` and
+refreshes every fifteen seconds. It reports the service state, registered
+projects with their lanes, and advisory host holdings with their lease IDs.
+
+## Supported agents
+
+| Agent | Provider | Adapter | Launch |
+| --- | --- | --- | --- |
+| Codex | `codex` | `codex` | Native lane with lifecycle hooks |
+| Claude Code | `claude` | `claude` | Native lane with lifecycle hooks |
+| OpenCode | `opencode` | `opencode` | Native lane with lifecycle hooks |
+| Copilot CLI | `copilot` | `copilot` | Native lane; requires its own profile |
+| Antigravity | `antigravity` | `gemini` | Native lane through the `agy` command |
+
+Antigravity is reached by mapping its `agy` command onto the Gemini adapter,
+because that CLI reads the same settings document, `mcpServers` entries and
+hook event names the adapter already writes:
+
+```sh
+agent-parley-dev provider add antigravity --adapter gemini \
+  --executable agy --home-env GEMINI_CLI_HOME
+```
+
+Copilot requires a dedicated credential profile. Sharing one profile across
+lanes lets a retirement remove another project's hooks, because cleanup
+identifies ownership by participant name alone:
+
+```sh
+agent-parley-dev credentials add copilot-lane --config-home DIR
+```
+
+Sign in to each profile once with its own native CLI before launching a lane
+that uses it. A separate Parley state directory does not create a separate
+native account.
+
+An editor that cannot be launched headlessly can still join as a participant by
+placing the authenticated endpoint and its own bearer token in that editor's
+MCP configuration. Such a participant has the full coordination toolset but no
+native lifecycle hooks, so the supervisor cannot wake it or observe a stall.
+
 ## Validation and adoption
 
 Focused regressions exercise untouched dirty checkouts, shared mutation refusal,

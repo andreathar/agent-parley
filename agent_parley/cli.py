@@ -3131,6 +3131,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "problems",
             "doctor",
             "preflight",
+            "console",
             "notify",
         ),
     ),
@@ -3687,6 +3688,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     inspecting.add_argument("--provider")
     inspecting.add_argument("--credentials")
     inspecting.add_argument("--json", action="store_true", help=JSON_HELP)
+    controlling = commands.add_parser(
+        "console",
+        help="Serve the loopback operator console for this state home.",
+    )
+    controlling.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Loopback port to bind; zero selects a free one.",
+    )
     resources = commands.add_parser(
         "host-resources",
         help="Inspect or explicitly release shared host leases.",
@@ -5543,6 +5554,11 @@ def main() -> int:
                 )
             )
             return 0
+        if args.command == "console":
+            from agent_parley import console
+
+            roster.require_operator(home, "Serving the operator console")
+            return console.main(home, args.port)
         if args.command == "host-resources":
             from agent_parley import host_resources
 
