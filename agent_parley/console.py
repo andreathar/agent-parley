@@ -276,6 +276,8 @@ def run(home: Path, argv: list[str]) -> dict:
         "HOME": os.environ.get("HOME", ""),
         "NO_COLOR": "1",
     }
+    if resource_home := os.environ.get("AGENT_PARLEY_RESOURCE_HOME"):
+        environment["AGENT_PARLEY_RESOURCE_HOME"] = resource_home
     try:
         done = subprocess.run(
             argv,
@@ -388,8 +390,14 @@ class Console(BaseHTTPRequestHandler):
         Raises:
             BridgeError: If the body is oversized or not a JSON object.
         """
-        length = int(self.headers.get("Content-Length") or 0)
-        if length < 0 or length > MAX_BODY:
+        raw_length = self.headers.get("Content-Length") or "0"
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            raise BridgeError("Invalid request body length.")
+        try:
+            length = int(raw_length)
+        except ValueError as error:
+            raise BridgeError("Invalid request body length.") from error
+        if length > MAX_BODY:
             raise BridgeError("The request body is too large.")
         if not length:
             return {}
@@ -477,8 +485,10 @@ class Console(BaseHTTPRequestHandler):
             return
         if self.path == "/api/login":
             supplied = payload.get("token")
-            if not isinstance(supplied, str) or not secrets.compare_digest(
-                supplied, self.secret
+            if (
+                not isinstance(supplied, str)
+                or not supplied.isascii()
+                or not secrets.compare_digest(supplied, self.secret)
             ):
                 time.sleep(0.5)
                 self._send(401, {"error": "That token was refused."})
@@ -494,13 +504,15 @@ class Console(BaseHTTPRequestHandler):
         if session is None:
             self._send(401, {"error": "Sign in with the state token."})
             return
+        presented = self.headers.get("X-Parley-Csrf", "")
+        if not presented.isascii() or not secrets.compare_digest(
+            presented, session["csrf"]
+        ):
+            self._send(403, {"error": "The request token did not match."})
+            return
         if self.path == "/api/logout":
             self.sessions.discard(session["id"])
             self._send(200, {"ok": True}, clear=True)
-            return
-        presented = self.headers.get("X-Parley-Csrf", "")
-        if not secrets.compare_digest(presented, session["csrf"]):
-            self._send(403, {"error": "The request token did not match."})
             return
         if self.path == "/api/snapshot":
             self._send(200, snapshot(self.home))
@@ -554,7 +566,9 @@ def snapshot(home: Path) -> dict:
     Returns:
         Decoded status and host resource readings with any failure text.
     """
-    result: dict = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    result: dict = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    }
     for key, argv in (
         ("status", ["status", "--json"]),
         ("hosts", ["host-resources", "list", "--json"]),

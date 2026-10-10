@@ -102,7 +102,9 @@ def category(path: str) -> str | None:
         return WSL
     if matches(path, FULL_PATHS):
         return FULL
-    if matches(path, LIGHT_PATHS) or ("/" not in path and path.endswith(".md")):
+    if matches(path, LIGHT_PATHS) or (
+        "/" not in path and path.endswith((".md", ".mmd"))
+    ):
         return LIGHT
     return None
 

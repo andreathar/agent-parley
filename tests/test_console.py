@@ -1,6 +1,8 @@
+import http.client
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -178,3 +180,55 @@ def test_a_malformed_body_is_refused(served):
 def test_serve_refuses_a_privileged_port(tmp_path):
     with pytest.raises(BridgeError, match="between 1024"):
         console.serve(tmp_path, 80, "secret")
+
+
+def test_non_ascii_credentials_are_refused(served):
+    assert call(served, "/api/login", {"token": "inválido"})[0] == 401
+    cookie, _ = sign_in(served)
+    assert call(served, "/api/snapshot", {}, cookie, "inválido")[0] == 403
+
+
+def test_logout_requires_csrf_and_preserves_session_on_refusal(served):
+    cookie, csrf = sign_in(served)
+    assert call(served, "/api/logout", {}, cookie)[0] == 403
+    assert call(served, "/api/session", cookie=cookie, method="GET")[0] == 200
+    assert call(served, "/api/logout", {}, cookie, csrf)[0] == 200
+
+
+@pytest.mark.parametrize("length", ["invalid", "-1"])
+def test_invalid_content_length_is_refused(served, length):
+    address = urllib.parse.urlsplit(served)
+    connection = http.client.HTTPConnection(address.hostname, address.port)
+    try:
+        connection.request(
+            "POST", "/api/login", headers={"Content-Length": length}
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert "length" in json.loads(response.read())["error"].lower()
+    finally:
+        connection.close()
+
+
+def test_snapshot_timestamp_uses_utc(tmp_path, monkeypatch):
+    expected = console.time.gmtime(0)
+    monkeypatch.setattr(console.time, "gmtime", lambda: expected)
+    monkeypatch.setattr(
+        console, "run", lambda home, argv: {"stdout": "{}", "stderr": ""}
+    )
+    assert console.snapshot(tmp_path)["generated_at"] == "1970-01-01T00:00:00Z"
+
+
+def test_commands_preserve_the_selected_host_registry(tmp_path, monkeypatch):
+    resource_home = tmp_path / "isolated resources"
+    monkeypatch.setenv("AGENT_PARLEY_RESOURCE_HOME", str(resource_home))
+    result = console.run(
+        tmp_path / "state",
+        [
+            console.sys.executable,
+            "-c",
+            "import os; print(os.getenv('AGENT_PARLEY_RESOURCE_HOME', ''))",
+        ],
+    )
+    assert result["status"] == 0
+    assert result["stdout"].strip() == str(resource_home)

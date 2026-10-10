@@ -38,6 +38,7 @@ def test_every_tracked_path_falls_into_a_category():
     "paths",
     [
         ["README.md"],
+        ["flowchart TB.mmd"],
         ["CHANGELOG.md", "docs/operations.md", "docs/assets/demo.svg"],
         [".github/ISSUE_TEMPLATE/bug.yml", ".github/PULL_REQUEST_TEMPLATE.md"],
         [".github/DISCUSSION_TEMPLATE/q-a.yml"],

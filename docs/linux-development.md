@@ -121,7 +121,9 @@ nothing before a caller presents the bearer token stored in that state home's
 `config.json`, which only the owner of the private state directory can read.
 A successful sign-in returns a session cookie marked `HttpOnly` and
 `SameSite=Strict`, plus a separate request token that every mutating call must
-echo in `X-Parley-Csrf`. Sessions expire after an hour.
+echo in `X-Parley-Csrf`, including sign-out. Invalid credential text and
+malformed body lengths receive explicit refusals instead of dropped
+connections. Sessions expire after an hour.
 
 Every mutation is dispatched through the same command line an operator would
 type, so lane guards, operator refusals, deadlines and audit records apply
@@ -134,6 +136,9 @@ an operator action and is refused from a lane.
 The dashboard reads `status --json` and `host-resources list --json` and
 refreshes every fifteen seconds. It reports the service state, registered
 projects with their lanes, and advisory host holdings with their lease IDs.
+Snapshot timestamps use UTC. Console commands preserve an explicitly selected
+`AGENT_PARLEY_RESOURCE_HOME`, so an isolated registry does not silently fall
+back to the daily registry.
 
 ```mermaid
 flowchart TB
