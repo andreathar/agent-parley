@@ -809,14 +809,21 @@ function drawLanes(projects) {
       html += "<p class='muted'>No lanes yet.</p>";
       return;
     }
-    html += "<table><tr><th>Lane</th><th>State</th><th>Claims</th></tr>";
+    html += "<table><tr><th>Lane</th><th>Provider</th>"
+      + "<th>State</th><th>Claims</th></tr>";
     lanes.forEach(function (l) {
-      var state = (l.condition && l.condition.state) || l.state || "-";
+      var state = (l.condition && l.condition.state) || l.lane_state || "-";
       var good = state === "working" || state === "ready";
-      html += "<tr><td>" + esc(l.name || l.display)
+      var bad = state === "dead" || state === "stopped";
+      var claims = (l.claims || []).map(function (c) {
+        return typeof c === "object" ? (c.issue || c.number || "?") : c;
+      });
+      html += "<tr><td>" + esc(l.participant || l.identity)
+        + "</td><td class='muted'>" + esc(l.provider || "-")
         + "</td><td><span class='pill "
-        + (good ? "ok" : "") + "'>" + esc(state) + "</span></td><td>"
-        + esc((l.claims || []).join(", ") || "-") + "</td></tr>";
+        + (good ? "ok" : (bad ? "bad" : "")) + "'>" + esc(state)
+        + "</span></td><td>"
+        + esc(claims.join(", ") || "-") + "</td></tr>";
     });
     html += "</table>";
   });
