@@ -297,6 +297,12 @@ then release your reservations. Avoid repeated empty inbox polling.
 Edit only your worktree. Do not reset, clean, switch, merge, or modify a peer
 worktree or the main checkout. Preserve existing work on your branch. Shared
 ports/databases need coordination; worktrees do not isolate those resources.
+For resources shared across repositories or installations, use
+reserve_host_resources with canonical keys such as gpu:0 or port:5432.
+These host leases are advisory and never expire; release their exact IDs
+through release_host_resources after use. File reservations and their named
+resource keys coordinate only within this project. Older installations and
+programs that do not use the host registry do not participate.
 Follow repository commit rules. Attribution of any kind is refused: a commit,
 merge, tag or pull request that credits an assistant, names a vendor or model in
 an authorship position, or carries a generator signature is denied before it

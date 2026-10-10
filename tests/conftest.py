@@ -21,7 +21,12 @@ def native_config_homes(tmp_path, monkeypatch):
     removed because it makes help text carry colour codes, so a developer
     shell that exports it would fail every test that reads plain help.
     """
-    for variable in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "AGENT_PARLEY_HOME"):
+    for variable in (
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "AGENT_PARLEY_HOME",
+        "AGENT_PARLEY_RESOURCE_HOME",
+    ):
         monkeypatch.setenv(variable, str(tmp_path / variable.lower()))
     monkeypatch.delenv("AGENT_PARLEY_TOKEN", raising=False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)

@@ -308,11 +308,12 @@ class BridgeCore:
             directory.mkdir(parents=True, exist_ok=True)
         return root, directory
 
-    def setup(self, repo: Path) -> dict:
+    def setup(self, repo: Path, *, stash: bool = False) -> dict:
         """Creates or verifies the project manifest for a repository.
 
         Args:
             repo: Main checkout or linked worktree of the target repository.
+            stash: Explicit consent to stash pending base-checkout changes.
 
         Returns:
             Manifest containing the common root, base, and participants.
@@ -324,7 +325,9 @@ class BridgeCore:
 
         root, directory = self.project(repo)
         with lock(directory / "setup.lock"):
-            return roster.expand(self._project(root, directory, preserve=True))
+            return roster.expand(
+                self._project(root, directory, preserve=True, stash=stash)
+            )
 
     def _project(
         self,
@@ -332,6 +335,7 @@ class BridgeCore:
         directory: Path,
         verify: set[str] | None = None,
         preserve: bool = False,
+        stash: bool = False,
     ) -> dict:
         """Reads or creates the manifest while the setup lock is held.
 
@@ -340,7 +344,8 @@ class BridgeCore:
             directory: Private state directory for the repository.
             verify: Participants whose branch must match, or None for all.
             preserve: Whether creation is allowed, preserving pending work
-                in a stash first. False requires an existing manifest.
+                only with explicit consent. False requires a manifest.
+            stash: Whether to stash pending work during initial creation.
 
         Returns:
             Manifest using the participant roster layout.
@@ -386,7 +391,7 @@ class BridgeCore:
             return data
         if not preserve:
             return roster.read(directory)
-        preserved = preserve_pending(root)
+        preserved = preserve_pending(root, stash=stash)
         if preserved:
             print(preserved, file=sys.stderr, flush=True)
         data = {

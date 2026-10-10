@@ -16,6 +16,7 @@ from typing import Any
 from agent_parley import (
     attachments,
     forecast,
+    host_resources,
     issues,
     protocol,
     recommend,
@@ -90,6 +91,7 @@ SCHEDULE_FIELDS = (
 )
 PREVIEW_CHARACTERS = 240
 READ_ONLY = (
+    "list_host_resources",
     "fetch_inbox",
     "list_participants",
     "next_issues",
@@ -2871,14 +2873,26 @@ def _observe(
     """
     with contextlib.suppress(sqlite3.Error):
         with connect(home, write=True, timeout=0) as db:
+            if (
+                tool in host_resources.TOOLS
+                and tool not in READ_ONLY
+                and outcome != "error"
+            ):
+                db.execute(
+                    "UPDATE agents SET last_active_ts=CURRENT_TIMESTAMP "
+                    "WHERE id=?",
+                    (actor["id"],),
+                )
             _event(db, actor, tool, outcome, started, result_bytes)
 
 
 def call(home: Path, actor: dict, tool: str, args: dict) -> dict:
     """Executes a validated MCP operation under one atomic transaction.
 
-    A writing tool records its event inside that transaction, so an event
-    exists exactly when the effect it describes was committed.
+    Project writing tools record their events inside that transaction. Host
+    resource tools use their shared registry transaction instead and attempt
+    separate best-effort telemetry; a local event failure cannot undo a host
+    grant or change its ownership.
 
     Args:
         home: Private bridge state root.
@@ -2894,7 +2908,19 @@ def call(home: Path, actor: dict, tool: str, args: dict) -> dict:
     """
     started = time.monotonic()
     try:
-        result = _dispatch(home, actor, tool, args, started)
+        if tool in host_resources.TOOLS:
+            result = host_resources.call(home, actor, tool, args)
+            if tool not in READ_ONLY:
+                _observe(
+                    home,
+                    actor,
+                    tool,
+                    "conflict" if result.get("conflicts") else "ok",
+                    started,
+                    len(json.dumps(result).encode()),
+                )
+        else:
+            result = _dispatch(home, actor, tool, args, started)
     except (BridgeError, sqlite3.OperationalError) as exc:
         _observe(home, actor, tool, "error", started, 0)
         if isinstance(exc, BridgeError):

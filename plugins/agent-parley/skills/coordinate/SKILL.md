@@ -241,7 +241,7 @@ every recipient has read are released first, and `--full` then says the body
 was released.
 
 `file_reservation_paths` and `release_file_reservations` manage advisory path
-reservations. They are not filesystem locks. Reserve a named resource instead
+reservations within one project. They are not filesystem locks. Reserve a named resource instead
 of a path when the contested thing is not a file — `port:5432`, `db:local`,
 `suite:integration`, `device:android-1` — because a worktree isolates none of
 those and a named resource conflicts on an exact match. A granted reservation
@@ -249,6 +249,19 @@ may carry `forecast`: files that habitually change together with a reserved
 path and that a peer holds now, each with `path`, `peer` and `count`. It is
 advisory; message the peer to sequence the work rather than editing the
 forecast path.
+
+For resources shared across projects or Parley installations, use
+`reserve_host_resources` with a `resources` list of canonical names such as
+`gpu:0`, `port:5432` or `device:android-1`. The entire request succeeds or
+returns conflicts without acquiring anything new. `list_host_resources`
+reads the shared registry; `release_host_resources` takes the exact returned
+`lease_ids` and releases only your holdings. Host leases have no expiry and
+remain held across service restarts. Explicitly release after use; if the
+owner cannot do so, the operator can recover exact IDs with
+`agent-parley host-resources release ID`. These reservations remain advisory.
+All cooperating installations must share `AGENT_PARLEY_RESOURCE_HOME`
+(default `~/.local/state/agent-parley-host`) and resource names. Older builds
+and external programs do not participate automatically.
 
 `request_reservation` takes the same keys and is the call to use when you mean
 to take a contested one next. Free keys are granted exactly as

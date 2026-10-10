@@ -57,8 +57,8 @@ def has_branch(repo: Path, branch: str) -> bool:
     )
 
 
-def preserve_pending(root: Path) -> str | None:
-    """Stashes pending base-checkout work so lanes can start from HEAD.
+def preserve_pending(root: Path, *, stash: bool = False) -> str | None:
+    """Requires a clean base or explicit consent to stash pending work.
 
     Registration reads committed HEAD, so pending changes would otherwise
     never reach a lane. The changes are stashed rather than discarded. The
@@ -71,16 +71,28 @@ def preserve_pending(root: Path) -> str | None:
 
     Args:
         root: Common repository root, which is always the base checkout.
+        stash: Explicit operator consent to move pending work into a stash.
 
     Returns:
         An account of the preserved entry, or None if nothing was pending.
 
     Raises:
-        BridgeError: If Git leaves changes in the checkout after stashing.
+        BridgeError: If work is pending without consent, or Git leaves
+            changes in the checkout after an explicitly authorized stash.
         subprocess.TimeoutExpired: If Git exceeds the command timeout.
     """
     if not git(root, "status", "--porcelain"):
         return None
+    if not stash:
+        raise BridgeError(
+            f"The checkout at {root} has uncommitted changes. Registration "
+            "starts at committed HEAD. Commit them first, or explicitly "
+            "allow setup to stash tracked and untracked work with --stash. "
+            "No pending work was moved.",
+            next_command=(
+                f"agent-parley setup {shlex.quote(str(root))} --stash"
+            ),
+        )
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     git(
         root,

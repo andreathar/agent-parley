@@ -1,6 +1,9 @@
 # agent-parley
 
-Shared operating guidance remains authoritative at `~/.claude/CLAUDE.md`.
+This repository's operating guidance is self-contained. User-global agent
+configuration belongs to the operator and must not be changed by repository
+setup, development installation, or tests. Keep development state and its
+executable separate from the daily Agent Parley installation.
 
 Follow `CONTRIBUTING.md` for Google Python style guidance, the project's explicit
 tooling adaptations, and coordination invariants. New production APIs require

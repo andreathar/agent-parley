@@ -1,0 +1,191 @@
+Linux fork audit validation, 2026-10-10
+Baseline commit: 6a4d0572c2544023fe6a50e439b953b2915187e2
+Command: PYTEST_XDIST_AUTO_NUM_WORKERS=4 make check
+Exit code: 0
+Test interpreter: CPython 3.14.7
+Result: 2798 passed, 2 skipped, 14 warnings in 437.38s (0:07:17)
+Ruff lint and formatting: passed
+Mypy: passed (84 source files)
+Repository policy: passed; repeated after audit documentation edits
+Wheel and source distribution build: passed
+Additional checks: JSON parse, report links, trailing whitespace, git diff --check
+
+Skip reasons independently confirmed with the two named tests and pytest -rs:
+tests/test_shell_completion.py::test_the_zsh_script_parses_as_zsh: zsh not installed
+tests/test_shell_completion.py::test_the_fish_script_parses_as_fish: fish not installed
+
+Four disposable boundary probes matched the observed source behavior:
+- Cross-project reservations: identical host resource keys granted independently.
+- Dirty initial setup: tracked/untracked work stashed and base made clean.
+- Shared Copilot profile: retiring one same-named lane removed both hook sets.
+- Provider registry: provider add accepted a process carrying the lane marker.
+These reproduce audit findings; they are not production fixes.
+
+Static configuration paths monitored: 15 (15 present, 0 absent)
+Changed configuration paths: []
+Installed/source Python module differences: []
+Doctor consistent: True
+Doctor approval setup gap retained: unattended Claude bridge approval was not enabled.
+Runtime after validation: {"existing_lane_processes_present": {"3308757": true, "3397128": true}, "recorded_service_pid": 3297457, "service_process_exists": true, "supervision_poll_age_seconds": 3.5, "supervision_poll_failed_count": 0, "supervision_poll_seconds": 0.213}
+
+Changes in this checkout: local audit documents only, not staged or committed.
+Local build activity created .venv, caches and dist artifacts ignored by Git.
+No installation replacement, service restart, native agent launch, remote write,
+external message, global configuration change or production state migration.
+Real local MCP and temporary Git tests do not verify a new live model response.
+
+Full make check log follows:
+
+uv sync --locked
+Using CPython 3.14.7
+Creating virtual environment at: .venv
+Resolved 58 packages in 2ms
+   Building agent-parley @ file:///mnt/data/Projects_SSD/agent-parley
+Downloading ruff (9.8MiB)
+Downloading mypy (14.5MiB)
+Downloading ast-serialize (1.2MiB)
+Downloading virtualenv (5.1MiB)
+ Downloaded ast-serialize
+      Built agent-parley @ file:///mnt/data/Projects_SSD/agent-parley
+ Downloaded virtualenv
+ Downloaded ruff
+ Downloaded mypy
+Prepared 13 packages in 1.30s
+Installed 55 packages in 99ms
+ + agent-parley==0.18.0 (from file:///mnt/data/Projects_SSD/agent-parley)
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + ast-serialize==0.9.0
+ + attrs==26.1.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + cfgv==3.5.0
+ + click==8.5.0
+ + cryptography==50.0.1
+ + distlib==0.4.3
+ + execnet==2.1.2
+ + filelock==3.32.5
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + identify==2.6.19
+ + idna==3.19
+ + iniconfig==2.3.0
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + librt==0.15.0
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + mypy==2.3.1
+ + mypy-extensions==1.1.0
+ + nodeenv==1.10.0
+ + opentelemetry-api==1.44.0
+ + packaging==26.3
+ + pathspec==1.1.1
+ + platformdirs==4.11.7
+ + pluggy==1.6.0
+ + pre-commit==4.6.2
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pygments==2.21.0
+ + pyjwt==2.13.0
+ + pytest==9.1.1
+ + pytest-xdist==3.8.0
+ + python-discovery==1.6.0
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + rpds-py==2026.6.3
+ + ruff==0.16.8
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + truststore==0.10.4
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + uvicorn==0.52.4
+ + virtualenv==21.7.8
+uv run --locked ruff check .
+All checks passed!
+uv run --locked ruff format --check .
+243 files already formatted
+uv run --locked mypy
+Success: no issues found in 84 source files
+uv run --locked python scripts/check_policy.py
+Policy: documented code, no inline comments, stdlib runtime, aligned versions, directory-ready manifests, portable README links
+make build
+make[1]: Entering directory '/mnt/data/Projects_SSD/agent-parley'
+uv build --no-sources
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/agent_parley-0.18.0.tar.gz
+Successfully built dist/agent_parley-0.18.0-py3-none-any.whl
+make[1]: Leaving directory '/mnt/data/Projects_SSD/agent-parley'
+uv run --locked pytest -q -n auto
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 15%]
+........................................................................ [ 18%]
+........................................................................ [ 20%]
+........................................................................ [ 23%]
+........................................................................ [ 25%]
+........................................................................ [ 28%]
+........................................................................ [ 30%]
+........................................................................ [ 33%]
+........................................................................ [ 36%]
+........................................................................ [ 38%]
+........................................................................ [ 41%]
+........................................................................ [ 43%]
+........................................................................ [ 46%]
+........................................................................ [ 48%]
+........................................................................ [ 51%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 66%]
+........................................................................ [ 69%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 77%]
+........................................................................ [ 79%]
+..........ss............................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 87%]
+........................................................................ [ 90%]
+........................................................................ [ 92%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+................................................................         [100%]
+=============================== warnings summary ===============================
+tests/test_dialogs.py::test_an_attached_answer_waits_for_the_operator_to_finish_a_line
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[O]
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[<35;12;7M]
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[24;80R]
+tests/test_dialogs.py::test_an_operator_digit_still_answers_a_held_dialog
+  /home/athar/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/pty.py:66: DeprecationWarning: This process (pid=2890252) is multi-threaded, use of forkpty() may lead to deadlocks in the child.
+    pid, fd = os.forkpty()
+
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_cursor_report
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[\x1b[200~fix the bug\n\x1b[201~]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\x1b\r]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\\r]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\n]
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line[\x1b]
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line[x\x7f]
+tests/test_terminal.py::test_attached_launcher_relays_the_lane_title[True]
+tests/test_terminal.py::test_attached_launcher_relays_the_lane_title[False]
+  /home/athar/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/pty.py:66: DeprecationWarning: This process (pid=2890226) is multi-threaded, use of forkpty() may lead to deadlocks in the child.
+    pid, fd = os.forkpty()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2798 passed, 2 skipped, 14 warnings in 437.38s (0:07:17)

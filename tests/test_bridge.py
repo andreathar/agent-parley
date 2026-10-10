@@ -93,7 +93,7 @@ def test_isolation_identity_and_idempotent_setup(bridge, repo, paired):
 def test_dirty_source_is_preserved_as_a_stash_entry(bridge, repo, capsys):
     (repo / "shared.txt").write_text("uncommitted work\n")
     (repo / "untracked.txt").write_text("untracked work\n")
-    data = bridge.setup(repo)
+    data = bridge.setup(repo, stash=True)
     assert data["base"] == git(repo, "rev-parse", "--verify", "HEAD")
     assert not git(repo, "status", "--porcelain")
     assert (repo / "shared.txt").read_text() == "original\n"

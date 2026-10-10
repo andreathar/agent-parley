@@ -7,11 +7,7 @@ install:
 	uv tool install --python 3.12 . --with-requirements "$$bridge_requirements"
 
 install-dev:
-	@set -eu; \
-	bridge_requirements=$$(mktemp); \
-	trap 'rm -f "$$bridge_requirements"' EXIT; \
-	uv export --locked --no-dev --no-emit-project --no-hashes > "$$bridge_requirements"; \
-	uv tool install --python 3.12 --editable . --with-requirements "$$bridge_requirements"
+	uv run --locked python -m scripts.install_dev
 
 install-system:
 	@test "$$(id -u)" -eq 0 || { echo 'Run sudo env "PATH=$$PATH" make install-system'; exit 1; }

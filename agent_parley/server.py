@@ -163,6 +163,40 @@ RETRY_KEY = {
 }
 TOOLS = [
     _tool(
+        "reserve_host_resources",
+        "Reserve host resources across projects and state homes, all or none. "
+        "Advisory, exclusive, no expiry. Use canonical names; explicitly "
+        "release after use. Older installations do not participate.",
+        {
+            "resources": {
+                "type": "array",
+                "items": TEXT,
+                "minItems": 1,
+                "maxItems": 16,
+            }
+        },
+        ["resources"],
+    ),
+    _tool(
+        "release_host_resources",
+        "Release only your own exact host lease IDs; stale IDs do nothing.",
+        {
+            "lease_ids": {
+                "type": "array",
+                "items": TEXT,
+                "minItems": 1,
+                "maxItems": 16,
+            }
+        },
+        ["lease_ids"],
+    ),
+    _tool(
+        "list_host_resources",
+        "Inspect the shared host registry. Does not inspect device usage.",
+        {},
+        [],
+    ),
+    _tool(
         "send_message",
         "Send a concise update. Reuse the key only on retries.",
         {

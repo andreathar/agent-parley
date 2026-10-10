@@ -3677,6 +3677,28 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         parser: Root parser whose epilog carries the command listing.
         commands: Index the subcommands are declared through.
     """
+    inspecting = commands.add_parser(
+        "preflight",
+        help="Read launch scope and settings without initializing state.",
+    )
+    inspecting.add_argument("--repo", type=Path, default=Path.cwd())
+    inspecting.add_argument("--provider")
+    inspecting.add_argument("--credentials")
+    inspecting.add_argument("--json", action="store_true", help=JSON_HELP)
+    resources = commands.add_parser(
+        "host-resources",
+        help="Inspect or explicitly release shared host leases.",
+    )
+    host_actions = resources.add_subparsers(dest="action", required=True)
+    host_list = host_actions.add_parser(
+        "list", help="Read the shared registry."
+    )
+    host_list.add_argument("--json", action="store_true", help=JSON_HELP)
+    host_release = host_actions.add_parser(
+        "release", help="Operator recovery: release these exact lease IDs."
+    )
+    host_release.add_argument("lease_ids", nargs="+")
+    host_release.add_argument("--json", action="store_true", help=JSON_HELP)
     completing = commands.add_parser(
         "completion",
         help="Print a shell completion script for this command.",
@@ -4076,6 +4098,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Register a repository for coordination from committed HEAD.",
     )
     setup.add_argument("repo", type=Path)
+    setup.add_argument(
+        "--stash",
+        action="store_true",
+        help="Explicitly stash pending tracked and untracked base work.",
+    )
     setup.add_argument("--json", action="store_true", help=JSON_HELP)
     run = commands.add_parser(
         "run", help="Launch one participant's native CLI in this terminal."
@@ -5489,6 +5516,11 @@ def main() -> int:
         if args.action == "status":
             print("\n".join(plugins.status()))
             return 0
+        try:
+            roster.require_operator(home, "Installing user-global plugins")
+        except BridgeError as error:
+            print(str(error), file=sys.stderr)
+            return 1
         outcome, succeeded = plugins.install()
         print("\n".join(outcome))
         return 0 if succeeded else 1
@@ -5497,6 +5529,37 @@ def main() -> int:
 
         return demo.main()
     try:
+        if args.command == "preflight":
+            from agent_parley import preflight
+
+            print(
+                json.dumps(
+                    preflight.inspect(
+                        home, args.repo, args.provider, args.credentials
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "host-resources":
+            from agent_parley import host_resources
+
+            if args.action == "release":
+                roster.require_operator(
+                    home, "Releasing another lane's host resources"
+                )
+                result = host_resources.release(args.lease_ids, owner_id="")
+            else:
+                result = host_resources.inspect()
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command in {"provider", "credentials"} and (
+            args.action in {"add", "remove"}
+            or (args.action == "budget" and budget_changes(args) is not None)
+        ):
+            roster.require_operator(
+                home, "Changing shared provider or account settings"
+            )
         bridge = Bridge(args.home)
         if args.command == "up":
             bridge.up()
@@ -5681,7 +5744,7 @@ def main() -> int:
         elif args.command == "state":
             print(bridge.state_archive(args))
         elif args.command == "setup":
-            registered = bridge.setup(args.repo.resolve())
+            registered = bridge.setup(args.repo.resolve(), stash=args.stash)
             print(
                 views.render("setup", registered)
                 if args.json
