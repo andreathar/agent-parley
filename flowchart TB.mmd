@@ -1,0 +1,56 @@
+flowchart TB
+    OP([Operator])
+    BROWSER["Browser<br/>127.0.0.1:8890"]
+
+    subgraph CONSOLE["Operator console (console.py)"]
+        AUTH{"Sign in<br/>state-home bearer token"}
+        SESSION["Session cookie<br/>HttpOnly, SameSite=Strict"]
+        CSRF{"X-Parley-Csrf<br/>per-session token"}
+        ALLOW{"Action allowlist<br/>+ argument kind validation"}
+        VIEW["Dashboard<br/>refresh every 15s"]
+    end
+
+    CLI["agent-parley-dev CLI<br/>argv list, never a shell"]
+    GUARD{"require_operator<br/>refused from a lane"}
+
+    subgraph HOME["Development state home :8877"]
+        SVC["Coordination service"]
+        DB[("SQLite<br/>mail, claims, identities, events")]
+        MAN[("Project manifest<br/>roster, supervision")]
+    end
+
+    HOST[("Host resource registry<br/>shared across state homes")]
+    FORGE[("GitHub issues")]
+
+    subgraph LANES["Lanes, one Git worktree each"]
+        L1["codex"]
+        L2["claude"]
+        L3["opencode"]
+        L4["copilot"]
+        L5["antigravity (agy)"]
+    end
+
+    OP --> BROWSER
+    BROWSER --> AUTH
+    AUTH -->|accepted| SESSION
+    SESSION --> VIEW
+    VIEW -->|POST /api/action| CSRF
+    VIEW -->|POST /api/snapshot| CSRF
+    CSRF -->|matched| ALLOW
+    ALLOW -->|rendered argv| CLI
+    CLI --> GUARD
+    GUARD -->|allowed| SVC
+
+    SVC --> DB
+    SVC --> MAN
+    SVC <-->|advisory leases| HOST
+    SVC <-->|claim, offer, accept| FORGE
+
+    L1 -->|MCP over loopback| SVC
+    L2 -->|MCP over loopback| SVC
+    L3 -->|MCP over loopback| SVC
+    L4 -->|MCP over loopback| SVC
+    L5 -->|MCP over loopback| SVC
+
+    SVC -->|hooks: wake, checkpoints| LANES
+    SVC -->|status JSON| VIEW
