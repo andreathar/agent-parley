@@ -1,0 +1,294 @@
+{
+  "recorded_at": "2026-10-10T07:35:49.901376+00:00",
+  "branch": "work/linux-isolation",
+  "baseline": "6a4d0572c2544023fe6a50e439b953b2915187e2",
+  "full_gate": {
+    "command": "PYTEST_XDIST_AUTO_NUM_WORKERS=4 make check",
+    "status": "passed",
+    "passed": 2825,
+    "skipped": 2,
+    "warnings": 14,
+    "pytest_seconds": 403.24,
+    "python": "3.14.7",
+    "skip_reason": "zsh and fish are not installed",
+    "warning_reason": "Existing Python 3.14 multithreaded forkpty deprecation warnings",
+    "log": "2026-10-10-customization-check.txt"
+  },
+  "focused_regressions": {
+    "passed": 29,
+    "seconds": 6.78
+  },
+  "mcp_schema": {
+    "bytes": 8955,
+    "limit_bytes": 9000
+  },
+  "native_acceptance": {
+    "live_model_sessions": false,
+    "hook_trust_modified": false,
+    "status": "Separate native-session acceptance remains before daily migration.",
+    "coordinate_skill": "Native hooks require separate user terminals; do not launch nested interactive agents from a tool call."
+  },
+  "scope": {
+    "daily_installation_replaced": false,
+    "native_plugins_reinstalled": false,
+    "daily_service_restarted": false,
+    "development_service_left_running": false
+  },
+  "installed_acceptance": {
+    "scope": "Installed wheel, two disposable repositories/services",
+    "cross_home_conflict": true,
+    "atomic_conflict_without_partial_grant": true,
+    "host_lease_survives_service_restart": true,
+    "owner_release_then_other_project_grant": true,
+    "mail_received_and_acknowledged": true,
+    "issue_claim_offer_accept_release": true,
+    "resource_registry_empty_after_test": true,
+    "live_model_sessions": false
+  },
+  "development_wrapper": {
+    "snapshot": "/home/athar/.local/share/agent-parley-dev/snapshot-rk0p5bjm",
+    "wheel_sha256": "142066aaac4d3b5974ba981d56c4ac6efe4a665c735971792595522754e4b71a",
+    "installed_modules": 72,
+    "source_differences": [],
+    "state_override_refused": {
+      "--h": true,
+      "--ho": true,
+      "--hom": true,
+      "--home": true
+    },
+    "environment_override_ignored": true,
+    "development_service_stopped": true,
+    "development_port_free": true
+  },
+  "native_codex_inspection": {
+    "native": "codex",
+    "policy": {
+      "approval_policy": "never",
+      "sandbox_mode": "danger-full-access",
+      "model": "gpt-6-astra"
+    },
+    "hook_count": 9,
+    "hooks": [
+      {
+        "eventName": "sessionStart",
+        "source": "user",
+        "enabled": false,
+        "isManaged": false,
+        "trustStatus": "trusted",
+        "needsApproval": null
+      },
+      {
+        "eventName": "stop",
+        "source": "user",
+        "enabled": false,
+        "isManaged": false,
+        "trustStatus": "trusted",
+        "needsApproval": null
+      },
+      {
+        "eventName": "preToolUse",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "permissionRequest",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "postToolUse",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "sessionStart",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "sessionEnd",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "userPromptSubmit",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      },
+      {
+        "eventName": "stop",
+        "source": "sessionFlags",
+        "enabled": true,
+        "isManaged": false,
+        "trustStatus": "modified",
+        "needsApproval": null
+      }
+    ],
+    "response_top_keys": [
+      "data"
+    ],
+    "evidence": "Native config/read and hooks/list only. No model turn, execution or trust write."
+  },
+  "preserved_configuration": [
+    {
+      "path": "/home/athar/.codex/config.toml",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.codex/hooks.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.claude/settings.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.claude/plugins/installed_plugins.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.claude/plugins/known_marketplaces.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.gemini/settings.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.copilot/settings.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.copilot/mcp-config.json",
+      "unchanged": false
+    },
+    {
+      "path": "/home/athar/.config/opencode/opencode.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.hermes/config.yaml",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.bashrc",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.profile",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.gitconfig",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.local/state/agent-parley/config.json",
+      "unchanged": true
+    },
+    {
+      "path": "/home/athar/.local/state/agent-parley/projects/7d5e3e71ffde7f47/project.json",
+      "unchanged": true
+    }
+  ],
+  "preservation_final": {
+    "configuration_files": [
+      {
+        "path": "/home/athar/.codex/config.toml",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.codex/hooks.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.claude/settings.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.claude/plugins/installed_plugins.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.claude/plugins/known_marketplaces.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.gemini/settings.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.copilot/settings.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.copilot/mcp-config.json",
+        "unchanged": false
+      },
+      {
+        "path": "/home/athar/.config/opencode/opencode.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.hermes/config.yaml",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.bashrc",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.profile",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.gitconfig",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.local/state/agent-parley/config.json",
+        "unchanged": true
+      },
+      {
+        "path": "/home/athar/.local/state/agent-parley/projects/7d5e3e71ffde7f47/project.json",
+        "unchanged": true
+      }
+    ],
+    "daily_modules_checked": 70,
+    "daily_module_differences": [],
+    "daily_ready": true,
+    "daily_service_identity": {
+      "pid": 3297457,
+      "start_ticks": "3312877"
+    },
+    "original_lane_processes_present": {
+      "3308757": true,
+      "3397128": true
+    }
+  },
+  "concurrent_change": {
+    "path": "/home/athar/.copilot/mcp-config.json",
+    "detected": true,
+    "writer": "not identified",
+    "action": "Preserved as found; no Copilot configuration was edited by this task."
+  },
+  "git_head_at_validation": "b0c501a4877a481a9fa7d8ec4001b5bc1ab8f292"
+}

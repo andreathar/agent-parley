@@ -126,7 +126,8 @@ def test_corrupt_registry_fails_closed(tmp_path):
 
 def test_host_registry_refuses_nonprivate_directory_without_chmod():
     directory = host_resources.home()
-    directory.mkdir(mode=0o755)
+    directory.mkdir()
+    directory.chmod(0o755)
     with pytest.raises(BridgeError, match="private"):
         host_resources.inspect()
     assert directory.stat().st_mode & 0o777 == 0o755
