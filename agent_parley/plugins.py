@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 MARKETPLACE = "agent-parley"
-SOURCE = "suneel944/agent-parley"
+SOURCE = "/mnt/data/Projects_SSD/agent-parley"
 PLUGIN = "agent-parley@agent-parley"
 TIMEOUT = 300.0
 
