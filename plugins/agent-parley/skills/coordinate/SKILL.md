@@ -94,6 +94,17 @@ launcher exports `AGENT_PARLEY_PARTICIPANT` and `AGENT_PARLEY_PROJECT_ROOT`;
 a project may read them to identify the lane. Reservations remain advisory and
 an acknowledgement is not approval.
 
+## Roles and permissions
+
+`agent-parley role show` prints the rules the operator set for this project,
+and `agent-parley wiring` reports their hash. A refused tool call names its
+role; do not retry it by another route. If a task needs a refused capability,
+send the operator the reason and the exact command that would grant it, for
+example `agent-parley role enable <lane> shell`, and wait. The operator alone
+changes roles; running `role define`, `assign`, `apply`, `enable` or `disable`
+from a lane is refused. The templates are `review`, `research` and `edit-qc`.
+Rules are an operational barrier, not a sandbox.
+
 ## Claim, work, and hand off
 
 - Before choosing an issue, run `agent-parley issue next`, or call the

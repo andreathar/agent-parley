@@ -16,8 +16,9 @@ import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
-from agent_parley import start
+from agent_parley import roles, start
 from agent_parley.preflight import _document
+from agent_parley.state import BridgeError
 
 URL_PATTERN = re.compile(r'mcp_servers\.agent_parley\.url="([^"]+)"')
 
@@ -35,6 +36,43 @@ def _check(scope: str, name: str, state: str, detail: str) -> dict:
         The finding as a JSON-ready mapping.
     """
     return {"scope": scope, "name": name, "state": state, "detail": detail}
+
+
+def _rules(directory: Path, manifest: dict) -> dict:
+    """Reports the role rules a project's hooks will apply.
+
+    Args:
+        directory: Common project state directory.
+        manifest: Project manifest naming the participants.
+
+    Returns:
+        A finding naming the rules hash and the lanes it restricts, a
+        warning for an assignment that names no participant, or a failure
+        for a rules file that cannot be read.
+    """
+    try:
+        spec = roles.load(directory)
+    except BridgeError as exc:
+        return _check("project", "role rules", "fail", str(exc))
+    if spec is None:
+        return _check("project", "role rules", "pass", "none; no lane limited")
+    unknown = sorted(
+        set(spec["assign"]) - set(manifest.get("participants", {}))
+    )
+    if unknown:
+        return _check(
+            "project",
+            "role rules",
+            "warn",
+            f"{roles.digest(spec)} assigns unregistered {', '.join(unknown)}",
+        )
+    detail = ", ".join(
+        f"{lane}={entry['role']}"
+        for lane, entry in sorted(spec["assign"].items())
+    )
+    return _check(
+        "project", "role rules", "pass", f"{roles.digest(spec)} {detail}"
+    )
 
 
 def _port(home: Path) -> int | None:
@@ -250,15 +288,18 @@ def inspect(home: Path, repo: Path, expected: list[str] | None = None) -> dict:
             )
         )
     manifest = {}
+    directory = home
     for path in (home / "projects").glob("*/project.json"):
         data = _document(path)
         if data.get("root") == str(repo):
             manifest = data
+            directory = path.parent
             break
     if not manifest:
         results.append(_check("project", "registered", "fail", str(repo)))
     else:
         results.append(_check("project", "registered", "pass", str(repo)))
+        results.append(_rules(directory, manifest))
         for name, record in sorted(manifest.get("participants", {}).items()):
             results.extend(_participant(home, name, record, port, expected))
     return {

@@ -80,7 +80,7 @@ DIAGNOSTIC_TOOLS = frozenset(
     {"Glob", "Grep", "NotebookRead", "Read", "ToolSearch"}
 )
 READ_ONLY_TOOLS = DIAGNOSTIC_TOOLS | {"WebFetch", "WebSearch"}
-PATH_FIELDS = ("file_path", "notebook_path", "path")
+PATH_FIELDS = ("file_path", "filePath", "notebook_path", "path")
 OFFER_REPLY_SECONDS = 120.0
 DIGEST_HEADER_BYTES = 120
 BRIDGE_COMMAND = "agent-parley"
@@ -2244,15 +2244,11 @@ def role_refusal(
     Returns:
         The refusal reason, or None when the call may proceed.
     """
-    if reason := roles.broken(directory, payload):
-        return reason
     try:
         spec = roles.load(directory)
-    except BridgeError:
-        return None
-    if spec is None:
-        return None
-    return roles.decide(spec, agent, payload, lane)
+    except BridgeError as exc:
+        return roles.broken(exc, payload)
+    return roles.decide(spec, agent, payload, lane) if spec else None
 
 
 def outage(home: Path, cause: str) -> str:

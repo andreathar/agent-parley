@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         protocol,
         reclaim,
         recommend,
+        roles,
         roster,
         state,
         store,
@@ -162,6 +163,7 @@ DEFERRED_MODULES = (
     "reclaim",
     "recommend",
     "retries",
+    "roles",
     "roster",
     "state",
     "store",
@@ -3112,6 +3114,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "forge",
             "deadlines",
             "budget",
+            "role",
             "resources",
             "host-resources",
             "provider",
@@ -3702,6 +3705,54 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Environment variable every lane process must export.",
     )
     wiring.add_argument("--json", action="store_true", help=JSON_HELP)
+    from agent_parley import roles as role_rules
+
+    roling = commands.add_parser(
+        "role",
+        help="Show or change the role rules that limit what a lane may do.",
+    )
+    roling.add_argument("--repo", type=Path, default=Path.cwd())
+    role_actions = roling.add_subparsers(dest="action", required=True)
+    shown = role_actions.add_parser("show", help="Print the rules in force.")
+    shown.add_argument("--json", action="store_true", help=JSON_HELP)
+    defined = role_actions.add_parser(
+        "define", help="Create or replace a role."
+    )
+    defined.add_argument("name")
+    defined.add_argument("--description", default="")
+    defined.add_argument("--read-only", action="store_true")
+    defined.add_argument("--no-shell", action="store_true")
+    for flag in ("write-path", "deny-path", "deny-command", "deny-tool"):
+        defined.add_argument(
+            f"--{flag}", action="append", default=[], metavar="PATTERN"
+        )
+    imported = role_actions.add_parser(
+        "import", help="Add the roles of a rules file; assignments are ignored."
+    )
+    imported.add_argument("file", type=Path)
+    removed = role_actions.add_parser("remove", help="Delete an unused role.")
+    removed.add_argument("name")
+    applied = role_actions.add_parser(
+        "apply", help="Define a built-in template and assign it to a lane."
+    )
+    applied.add_argument("template", choices=sorted(role_rules.TEMPLATES))
+    applied.add_argument("--to", dest="lane", required=True)
+    assigned = role_actions.add_parser(
+        "assign", help="Assign a role to a lane."
+    )
+    assigned.add_argument("lane")
+    assigned.add_argument("name")
+    role_actions.add_parser(
+        "unassign", help="Remove a lane's restrictions."
+    ).add_argument("lane")
+    for verb in ("enable", "disable"):
+        toggled = role_actions.add_parser(
+            verb, help=f"{verb.capitalize()} write or shell for one lane."
+        )
+        toggled.add_argument("lane")
+        toggled.add_argument(
+            "capability", choices=sorted(role_rules.CAPABILITIES)
+        )
     controlling = commands.add_parser(
         "console",
         help="Serve the loopback operator console for this state home.",
@@ -6314,6 +6365,45 @@ def main() -> int:
                         budget_changes(args) if args.action == "set" else None,
                     )
                 )
+        elif args.command == "role":
+            _, directory = bridge.project(args.repo.resolve(), create=False)
+            current = roles.load(directory)
+            if args.action == "show":
+                print(
+                    json.dumps(current, indent=2)
+                    if args.json
+                    else roles.render(current, directory)
+                )
+            else:
+                operator_only(f"role {args.action}")
+                fields = {
+                    "name": getattr(args, "name", ""),
+                    "lane": getattr(args, "lane", ""),
+                    "role": getattr(args, "name", ""),
+                    "template": getattr(args, "template", ""),
+                    "capability": getattr(args, "capability", ""),
+                }
+                if args.action == "import":
+                    try:
+                        document = json.loads(args.file.read_text())
+                    except (OSError, ValueError) as exc:
+                        raise BridgeError(f"Cannot read {args.file}.") from exc
+                    if not isinstance(document, dict):
+                        raise BridgeError("The file must hold a JSON object.")
+                    fields["roles"] = document.get("roles")
+                if args.action == "define":
+                    fields.update(
+                        description=args.description,
+                        write=False if args.read_only else None,
+                        shell=False if args.no_shell else None,
+                        write_paths=args.write_path,
+                        deny_paths=args.deny_path,
+                        deny_commands=args.deny_command,
+                        deny_tools=args.deny_tool,
+                    )
+                updated, summary = roles.change(current, args.action, **fields)
+                roles.save(directory, updated)
+                print(f"{summary} Rules {roles.digest(updated)}.")
         elif args.command == "resources":
             repository = args.repo.resolve()
             if getattr(args, "json", False):

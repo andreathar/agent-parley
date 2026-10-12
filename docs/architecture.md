@@ -29,6 +29,7 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `worktrees` | Git in the base checkout, explicit opt-in stashing before registration, lane initialization and the base verification gate |
 | `preflight` | Read-only launch scope, configuration observations, native plugin records and effective supervision; never creates state or starts a client |
 | `wiring` | Read-only check that registered lanes' running clients use the service port and state home, that the service rejects tokenless requests, and that required environment variables are present; no tool call is exercised |
+| `roles` | Operator-defined role rules in the project's `roles.json` (outside every repository): capabilities, write and deny paths, shell patterns and tool globs, lane assignments and the built-in templates. The checkpoint refuses a matching `PreToolUse` call and records `role_refused`; an unreadable file refuses writes and shell calls. An operational barrier, not a sandbox |
 | `console` | Loopback operator console: token sign-in, per-session request tokens and a fixed action allowlist dispatched through the command line |
 | `host_resources` | Cross-project and cross-home advisory host leases in a separate private atomic registry; explicit generation-bound release with no expiry |
 | `merges` | Merge refusals, preview and the merge itself, plus the readiness, dependency and group ordering that integration follows, and the durable record of an integration the base has not verified |

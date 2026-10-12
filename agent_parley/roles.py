@@ -35,9 +35,10 @@ WRITE_TOOLS = frozenset(
         "create",
         "str_replace_editor",
         "apply_patch",
+        "patch",
     }
 )
-PATH_FIELDS = ("file_path", "notebook_path", "path")
+PATH_FIELDS = ("file_path", "filePath", "notebook_path", "path")
 COMMAND_FIELDS = ("command", "cmd")
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.M)
 CAPABILITIES = frozenset({"write", "shell"})
@@ -54,7 +55,7 @@ ROLE_KEYS = frozenset(
 )
 ASSIGNMENT_KEYS = frozenset({"role", "disabled"})
 MAX_PATTERNS = 64
-MAX_PATTERN_BYTES = 256
+MAX_PATTERN_BYTES = 1024
 
 
 def location(directory: Path) -> Path:
@@ -108,7 +109,9 @@ def validate(spec: object) -> dict:
             is invalid, or an assignment names an undefined role.
     """
     if not isinstance(spec, dict) or spec.get("version") != VERSION:
-        raise BridgeError(f"roles.json must be an object with version {VERSION}.")
+        raise BridgeError(
+            f"roles.json must be an object with version {VERSION}."
+        )
     roles = spec.get("roles", {})
     assign = spec.get("assign", {})
     if not isinstance(roles, dict) or not isinstance(assign, dict):
@@ -136,7 +139,9 @@ def validate(spec: object) -> dict:
             raise BridgeError(f"Assignment for {lane} names an unknown role.")
         disabled = entry.get("disabled", [])
         if not isinstance(disabled, list) or set(disabled) - CAPABILITIES:
-            raise BridgeError(f"Assignment for {lane} disables an unknown capability.")
+            raise BridgeError(
+                f"Assignment for {lane} disables an unknown capability."
+            )
     return {"version": VERSION, "roles": roles, "assign": assign}
 
 
@@ -239,7 +244,9 @@ def _paths(tool_input: object, lane: Path) -> list[str | None]:
         if not target.is_absolute():
             target = lane / target
         try:
-            found.append(target.resolve().relative_to(lane.resolve()).as_posix())
+            found.append(
+                target.resolve().relative_to(lane.resolve()).as_posix()
+            )
         except (OSError, ValueError):
             found.append(None)
     return found
@@ -258,26 +265,22 @@ def _matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
-def broken(directory: Path, payload: dict) -> str | None:
+def broken(error: BridgeError, payload: dict) -> str | None:
     """Refuses mutating calls while the rules file cannot be read.
 
     Args:
-        directory: Common project state directory.
+        error: The failure `load` raised.
         payload: Native ``PreToolUse`` hook payload.
 
     Returns:
-        A reason when the file is unreadable and the call can mutate, else
-        None.
+        A reason when the call can mutate, else None.
     """
-    try:
-        load(directory)
-    except BridgeError as exc:
-        tool = str(payload.get("tool_name", "")).lower()
-        if tool in WRITE_TOOLS or tool in SHELL_TOOLS:
-            return (
-                f"Role rules are unreadable ({exc}). Writes and shell calls "
-                "stay refused until the operator repairs roles.json."
-            )
+    tool = str(payload.get("tool_name", "")).lower()
+    if tool in WRITE_TOOLS or tool in SHELL_TOOLS:
+        return (
+            f"Role rules are unreadable ({error}). Writes and shell calls "
+            "stay refused until the operator repairs roles.json."
+        )
     return None
 
 
@@ -328,3 +331,125 @@ def decide(spec: dict, lane_name: str, payload: dict, lane: Path) -> str | None:
         if allowed is not None and not _matches(path, allowed):
             return f"{who} may write only {', '.join(allowed)}; not {path}."
     return None
+
+
+TEMPLATES: dict[str, dict[str, object]] = {
+    "review": {
+        "description": "Reads and reports; writes only under reviews/.",
+        "write_paths": ["reviews/*"],
+        "deny_commands": [
+            r"\bgit\s+(push|commit|merge|rebase|reset|checkout|switch)\b",
+            r"\brm\s",
+        ],
+    },
+    "research": {
+        "description": "Gathers information; writes only notes and research.",
+        "write_paths": ["research/*", "notes/*"],
+        "deny_commands": [r"\bgit\s+(push|commit|merge|rebase|reset)\b"],
+    },
+    "edit-qc": {
+        "description": "Inspects results and runs checks; never edits files.",
+        "write": False,
+        "deny_commands": [
+            r"\bgit\s+(push|commit|merge|rebase|reset|checkout|switch)\b",
+            r"\brm\s",
+        ],
+    },
+}
+
+
+def render(spec: dict | None, directory: Path) -> str:
+    """Describes the rules in force for the operator.
+
+    Args:
+        spec: Validated document, or None.
+        directory: Common project state directory.
+
+    Returns:
+        Plain text naming each role, each assignment and the rules hash.
+    """
+    if spec is None:
+        return f"No role rules at {location(directory)}; no lane is restricted."
+    lines = [f"Rules {digest(spec)} at {location(directory)}"]
+    for name, role in sorted(spec["roles"].items()):
+        lines.append(f"role {name}: {json.dumps(role, sort_keys=True)}")
+    for lane, entry in sorted(spec["assign"].items()):
+        lines.append(f"lane {lane}: {json.dumps(entry, sort_keys=True)}")
+    return "\n".join(lines)
+
+
+def change(
+    spec: dict | None, action: str, **fields: object
+) -> tuple[dict, str]:
+    """Applies one operator change to a copy of the rules.
+
+    Args:
+        spec: Current document, or None for a project without rules.
+        action: One of ``define``, ``import``, ``remove``, ``apply``,
+            ``assign``, ``unassign``, ``enable`` or ``disable``.
+        **fields: Values the action needs: ``name``, ``role``, ``lane``,
+            ``template``, ``capability`` and the role keys for ``define``.
+
+    Returns:
+        The new document, validated, and a one-line summary.
+
+    Raises:
+        BridgeError: If the action or its values are invalid.
+    """
+    document = json.loads(
+        json.dumps(spec or {"version": VERSION, "roles": {}, "assign": {}})
+    )
+    roles_map, assign = document["roles"], document["assign"]
+    lane = str(fields.get("lane") or "")
+    if action == "define":
+        name = str(fields["name"])
+        role = {
+            key: fields[key]
+            for key in ROLE_KEYS
+            if fields.get(key) not in (None, [], "")
+        }
+        roles_map[name] = role
+        summary = f"Defined role {name}."
+    elif action == "import":
+        incoming = fields["roles"]
+        if not isinstance(incoming, dict) or not incoming:
+            raise BridgeError("The file defines no roles.")
+        roles_map.update(incoming)
+        summary = f"Imported role(s) {', '.join(sorted(incoming))}."
+    elif action == "remove":
+        name = str(fields["name"])
+        if any(entry["role"] == name for entry in assign.values()):
+            raise BridgeError(f"Role {name} is still assigned to a lane.")
+        roles_map.pop(name, None)
+        summary = f"Removed role {name}."
+    elif action == "apply":
+        template = str(fields["template"])
+        if template not in TEMPLATES:
+            raise BridgeError(
+                f"Unknown template {template}; use {', '.join(TEMPLATES)}."
+            )
+        roles_map[template] = dict(TEMPLATES[template])
+        assign[lane] = {"role": template}
+        summary = f"Applied {template} to {lane}."
+    elif action == "assign":
+        assign[lane] = {"role": str(fields["role"])}
+        summary = f"Assigned {fields['role']} to {lane}."
+    elif action == "unassign":
+        assign.pop(lane, None)
+        summary = f"{lane} is no longer restricted."
+    elif action in ("enable", "disable"):
+        entry = assign.get(lane)
+        if entry is None:
+            raise BridgeError(f"{lane} has no role to change.")
+        capability = str(fields["capability"])
+        disabled = set(entry.get("disabled", []))
+        disabled.add(capability) if action == "disable" else disabled.discard(
+            capability
+        )
+        entry["disabled"] = sorted(disabled)
+        if not entry["disabled"]:
+            del entry["disabled"]
+        summary = f"{action.capitalize()}d {capability} for {lane}."
+    else:
+        raise BridgeError(f"Unknown role action {action}.")
+    return validate(document), summary
