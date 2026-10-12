@@ -1,15 +1,17 @@
 """Shared isolated state and Git repository fixtures."""
 
 import socket
+from collections.abc import Iterator
+from pathlib import Path
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from agent_parley.cli import Bridge, git
 from agent_parley.state import write_json
 
 
 @pytest.fixture(autouse=True)
-def native_config_homes(tmp_path, monkeypatch):
+def native_config_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keeps every state read inside each test's own directory.
 
     The command line falls back to ``AGENT_PARLEY_HOME`` when a test drives
@@ -33,7 +35,7 @@ def native_config_homes(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def bridge(tmp_path):
+def bridge(tmp_path: Path) -> Iterator[Bridge]:
     """Allocates private coordination state and tears down its own service."""
     instance = Bridge(tmp_path / "state")
     with socket.socket() as sock:
@@ -47,14 +49,14 @@ def bridge(tmp_path):
 
 
 @pytest.fixture
-def paired(bridge, repo):
+def paired(bridge: Bridge, repo: Path) -> dict[str, object]:
     """Registers the two-participant roster most coordination tests assume."""
     bridge.add_participant(repo, "claude", "claude")
     return bridge.add_participant(repo, "codex", "codex")
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path: Path) -> Path:
     """Creates a committed repository whose path exercises spaces."""
     path = tmp_path / "project with spaces"
     path.mkdir()

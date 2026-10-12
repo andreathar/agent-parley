@@ -14,11 +14,11 @@
       "description": "Run several coding agents side by side on one repository. Each participant works in its own Git worktree, claims numbered issues before editing, announces advisory file reservations to the others, and hands work over explicitly with a summary and evidence instead of overwriting a peer.",
       "version": "0.18.0",
       "author": {
-        "name": "Suneel Kaushik S",
-        "email": "suneel944@gmail.com"
+        "name": "Andre Athar",
+        "email": "andreabenathar@gmail.com"
       },
-      "homepage": "https://github.com/suneel944/agent-parley",
-      "repository": "https://github.com/suneel944/agent-parley",
+      "homepage": "https://github.com/andreathar/agent-parley",
+      "repository": "https://github.com/andreathar/agent-parley",
       "license": "MIT",
       "category": "productivity",
       "keywords": [
