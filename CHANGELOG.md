@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.1](https://github.com/suneel944/agent-parley/compare/v0.18.0...v0.18.1) (2026-10-12)
+
+
+### Features
+
+* deny git worktree add outside the lane's -wt directory (#1012)
+
+### Bug fixes
+
+* relocate every unattributed stray worktree by safety (#1011)
+* relocate stray lane worktrees and survive moved paths (#1007)
+
 ## [0.18.0](https://github.com/suneel944/agent-parley/compare/v0.17.0...v0.18.0) (2026-10-05)
 
 
