@@ -401,12 +401,17 @@ def aged(path, seconds=3600):
 
 @pytest.fixture
 def idle(bridge, repo, paired, monkeypatch):
-    """Leaves the codex lane stopped, empty, clean and long untouched."""
+    """Leaves the codex lane stopped, empty, clean and long untouched.
+
+    The relocation grace period is lifted, so a worktree a test has just
+    made can be moved; the grace period has its own test.
+    """
     directory = bridge.project(repo, create=False)[1]
     manifest = roster.read(directory)
     lane = Path(paired["lanes"]["codex"])
     aged(lane)
     completion(monkeypatch, None)
+    monkeypatch.setattr(reclaim, "RELOCATE_AFTER", 0)
     return {
         "directory": directory,
         "lane": lane,
@@ -771,6 +776,90 @@ def test_a_stray_under_the_repository_claude_worktrees_moves(
     assert (strayed(idle, "pr-kyc") / ".git").exists()
 
 
+def test_a_worktree_in_use_stays_until_its_grace_period_passes(
+    bridge, repo, idle, monkeypatch
+):
+    monkeypatch.setattr(reclaim, "RELOCATE_AFTER", 3600)
+    folder = repo / ".claude" / "worktrees"
+    folder.mkdir(parents=True)
+    path = made(repo, folder, "1015-sweep-record")
+    (path / "shared.txt").write_text("in progress\n")
+    aged(path)
+    gitdir = Path(git(path, "rev-parse", "--absolute-git-dir"))
+
+    fresh = bridge.relocate_worktrees(repo, apply=True)
+    aged(gitdir / "index")
+    aged(gitdir / "HEAD")
+    moved = bridge.relocate_worktrees(repo, apply=True)
+
+    row = worktree_of(fresh, path)
+    assert row["reason"] == reclaim.FRESH
+    assert row["relocate"] is False
+    assert "moved" not in row
+    assert worktree_of(moved, path)["moved"] is True
+    destination = strayed(idle, "1015-sweep-record")
+    assert (destination / "shared.txt").read_text() == "in progress\n"
+
+
+def test_a_worktree_holding_another_worktree_is_not_moved_over_it(
+    bridge, repo, idle, tmp_path
+):
+    outer = made(repo, tmp_path, "review")
+    folder = outer / ".claude" / "worktrees"
+    folder.mkdir(parents=True)
+    inner = made(repo, folder, "feat")
+
+    first = bridge.relocate_worktrees(repo, apply=True)
+    second = bridge.relocate_worktrees(repo, apply=True)
+
+    row = worktree_of(first, outer)
+    assert row["reason"] == reclaim.NESTED
+    assert row["relocate"] is False
+    assert "moved" not in row
+    assert worktree_of(first, inner)["moved"] is True
+    assert worktree_of(second, outer)["moved"] is True
+    moved = strayed(idle, "feat")
+    assert git(moved, "rev-parse", "--abbrev-ref", "HEAD") == "feat"
+
+
+@pytest.fixture
+def untemporary(tmp_path, monkeypatch):
+    """Points the temporary directories away from the test's own folder."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(reclaim, "TEMPORARY", ())
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    return scratch
+
+
+def test_an_operator_worktree_outside_scratch_places_is_only_reported(
+    bridge, repo, idle, tmp_path, untemporary
+):
+    service = made(repo, tmp_path, "tm-arena")
+    aged(service)
+    scratch = made(repo, untemporary, "kyc-in-temp")
+    folder = repo / ".claude" / "worktrees"
+    folder.mkdir(parents=True)
+    inside = made(repo, folder, "pr-kyc")
+    lane_made = made(repo, tmp_path, "codex-pr-30")
+
+    moved = bridge.relocate_worktrees(repo, apply=True)
+    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    row = worktree_of(moved, service)
+    assert row["reason"] == reclaim.FOREIGN
+    assert row["relocate"] is False
+    assert "moved" not in row
+    kept = worktree_of(swept, service)
+    assert kept["reason"] == reclaim.FOREIGN
+    assert not kept.get("removed")
+    assert (service / ".git").exists()
+    assert worktree_of(moved, scratch)["moved"] is True
+    assert worktree_of(moved, inside)["moved"] is True
+    assert worktree_of(moved, lane_made)["reason"] == reclaim.STRAYED
+    assert worktree_of(moved, lane_made)["moved"] is True
+
+
 def test_a_worktree_nested_under_the_state_directory_moves_to_strays(
     bridge, repo, idle
 ):
@@ -1105,6 +1194,16 @@ def test_a_lane_worktree_moved_by_the_operator_is_never_retired(
     )
 
 
+def test_a_vanished_lane_branch_checked_out_in_the_base_is_not_moved(
+    repo, idle
+):
+    shutil.rmtree(idle["lane"])
+    git(repo, "worktree", "prune")
+    git(repo, "switch", idle["branch"])
+
+    assert reclaim.relocated(str(repo), idle["lane"], idle["branch"]) == ""
+
+
 def test_restore_names_where_a_moved_lane_worktree_went(
     bridge, repo, idle, tmp_path
 ):
@@ -1308,6 +1407,38 @@ def test_the_sweep_publishes_the_worktrees_it_reclaimed(bridge, repo, idle):
         str(strayed(idle, "pr-4"))
     ]
     assert row_of(published["lanes"], "codex")["reason"] == reclaim.STOPPED
+
+
+def test_the_sweep_logs_what_it_moved_and_removed_for_later_reading(
+    bridge, repo, idle, capsys
+):
+    store.initialize(bridge.home)
+    path = made(repo, idle["directory"], "pr-5")
+    aged(path)
+
+    supervision.poll(bridge.home, idle["directory"])
+    first = capsys.readouterr().out
+    publication = idle["directory"] / supervision.RECLAIM_PUBLICATION
+    published = json.loads(publication.read_text())
+    published["swept"] -= supervision.RECLAIM_INTERVAL
+    publication.write_text(json.dumps(published))
+    supervision.poll(bridge.home, idle["directory"])
+    second = capsys.readouterr().out
+
+    entries = [line for line in first.splitlines() if " reclaim " in line]
+    name = idle["directory"].name
+    assert any(
+        f"reclaim {name}: worktree {path.resolve()}: moved to "
+        f"{strayed(idle, 'pr-5')}" in line
+        for line in entries
+    )
+    assert any(
+        f"worktree {strayed(idle, 'pr-5')}: reclaimed" in line
+        for line in entries
+    )
+    assert any(" codex: reclaimed " in line for line in entries)
+    assert " reclaim " not in second
+    assert not json.loads(publication.read_text())["relocations"]
 
 
 def test_a_missing_project_root_is_retired_within_one_interval(

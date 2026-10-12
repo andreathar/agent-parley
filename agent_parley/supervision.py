@@ -2436,8 +2436,11 @@ def _waiting_claims(ledger: dict, held: list[str]) -> list[str]:
 
     Returns:
         One phrase per held claim with no action the lane can take now, in
-        the order held: ready work waits on CI and review before verified
-        integration, blocked work on its recorded condition, and work whose
+        the order held: ready work waits on CI and review of its pull
+        request before verified integration, and the lane is told to open
+        one or release the claim when none is open, since the ledger cannot
+        tell that apart; blocked work waits on its recorded condition, and
+        work whose
         dependency is unfinished on that dependency. A claim whose issue
         closed waits on nothing, so it is left out.
     """
@@ -2456,7 +2459,11 @@ def _waiting_claims(ledger: dict, held: list[str]) -> list[str]:
             != lifecycle.COMPLETE
         ]
         if execution["state"] == lifecycle.READY:
-            reason = "ready, waits on CI and review before integration"
+            reason = (
+                "ready, waits on CI and review of its pull request before "
+                "integration; if none is open, open one, or release the "
+                "claim when its work already merged"
+            )
         elif pending:
             reason = "waits on dependency " + ", ".join(pending)
         else:
@@ -6847,7 +6854,11 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     next attempt and gives the operator the account of what was removed and
     what was kept. Before either sweep, every worktree a lane made outside
     its `<lane>-wt` directory is moved there, never deleted, and the moves
-    and refusals are published under `relocations`. The worktrees lanes
+    and refusals are published under `relocations`. The publication only
+    describes the latest pass, so every move, every move Git refused and
+    every removal is also written to the service log as a `reclaim` entry,
+    whose rotation keeps the record after later sweeps find nothing left.
+    The worktrees lanes
     made for themselves are swept in the
     same pass and published beside the lanes, without their sizes, because
     measuring them walks every file they hold. The files retired lanes no
@@ -6868,7 +6879,7 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
         directory: Private project state directory holding the lanes.
         manifest: Project manifest naming the root and the participants.
     """
-    from agent_parley import cli
+    from agent_parley import cli, server
 
     now = time.time()
     if not reclaim_due(directory, now, RECLAIM_INTERVAL):
@@ -6905,6 +6916,13 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     "bundles_pruned": len(bundles),
                 },
             )
+    acted = [
+        row
+        for row in moved
+        if row.get("moved") or row["reason"] == reclaim.REFUSED
+    ] + [row for row in rows + made if row.get("removed")]
+    for line in reclaim.lines(acted):
+        server.log(home, "reclaim", f"{directory.name}: {line}")
     removed = [row["participant"] for row in rows if row.get("removed")]
     if removed:
         with store.connect(home, write=True) as db:
@@ -7907,6 +7925,12 @@ def _work_backlog(
     polls that publish no offer, so the same text is never delivered again;
     only a change to the text gives the lane a new offer to answer.
 
+    A continue offer whose `lead` names queued, unowned work is not
+    waiting-only: the lane can claim that lead now. While the lead stays
+    free and the lane stays fit, the offer is delivered again on the usual
+    backoff, so one delivered wake the lane did not act on never silences
+    the next claim it could make.
+
     The offer is derived again the way `work` derived it: the leads the
     lanes before this one in name order publish are the issues taken
     earlier in that sweep, so an unchanged sweep reproduces the same offer.
@@ -7948,12 +7972,13 @@ def _work_backlog(
     stretches = {
         peer: idle_seconds(directory, peer) for peer in manifest["participants"]
     }
+    free = lifecycle.actionable(pool)
     current = _work_offer(
         name,
         results,
         stretches,
         owned,
-        _first_untaken(lifecycle.actionable(pool), taken),
+        _first_untaken(free, taken),
         pool,
         config["stalled_after"],
         share_recipients(
@@ -7988,6 +8013,7 @@ def _work_backlog(
             or current["id"] in (record.get("delivered") or [])
         )
         and not lifecycle.actionable(ledger, name)
+        and not (results[name]["fit"] and current.get("lead") in free)
     ):
         return None
     return (
@@ -8129,6 +8155,28 @@ def _write_work_dispatch(
             ]
         current["dispatch"] = dispatch
         write_json(path, current)
+
+
+def forget_delivered(directory: Path, name: str) -> None:
+    """Forgets which work offers reached a lane's previous native session.
+
+    A rotation starts a fresh native session that never read the offers the
+    old one was given, so the `delivered` list and the dispatch mark no
+    longer describe what the lane knows. Clearing them lets `_work_backlog`
+    deliver the current offer once more to the new session.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose lane is rotating.
+    """
+    path = directory / f"{name}-work.json"
+    with lock(directory / f"{name}-work.lock", timeout=1):
+        current = published_work(directory, name)
+        dispatch = current.get("dispatch") or {}
+        listed = current.pop("delivered", None)
+        marked = dispatch.pop("delivered", None)
+        if listed or marked:
+            write_json(path, current)
 
 
 def _wake_flags(home: Path, directory: Path, name: str) -> dict:
@@ -8427,6 +8475,36 @@ def _defer_wake(
         )
 
 
+def _clear_block(home: Path, directory: Path, root: str, name: str) -> None:
+    """Clears a recorded block once the lane's state no longer holds it.
+
+    A blocked lane parks its wake record under a `blocked: <cause>` label
+    and may gain `escalated_at` and `exhausted_at` while it waits. A lane
+    that leaves the blocked state is often working, or idle with nothing
+    owed, and the wake path returns before any attempt for both, so the
+    stale label, escalation and exhaustion would outlive the block. They
+    are cleared here as soon as the recorded state is no longer blocked. A
+    block held by a refused tool call is left in place while that denial
+    still waits, because the denial, not the lane state, holds it.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        root: Canonical project key.
+        name: Participant that owns the lane.
+    """
+    if denials.waiting(directory, name):
+        return
+    with lock(directory / f"{name}-wake.lock"):
+        record = wake_record(home, root, name, directory)
+        if not str(record.get("blocked") or "").startswith("blocked:"):
+            return
+        record.pop("escalated_at", None)
+        record.pop("exhausted_at", None)
+        record.update(blocked="", next_at=None)
+        store_wake(home, directory, root, name, record)
+
+
 def _escalate_blocked(
     home: Path,
     directory: Path,
@@ -8641,8 +8719,10 @@ def wake(
     is due, and spends nothing, so the budget is not consumed while nothing
     could have answered. A lane recorded blocked past
     `BLOCKED_ESCALATE_AFTER` is escalated once by `_escalate_blocked`
-    instead, because its deferred wakes never reach the attempt bound. When
-    the cause clears, the next attempt is due one
+    instead, because its deferred wakes never reach the attempt bound. A
+    lane whose recorded state leaves blocked has that block, escalation and
+    exhaustion cleared by `_clear_block` before anything else is decided.
+    When the cause clears, the next attempt is due one
     doubling window after the last one, or at the provider reset the capacity
     observation named, whichever is later. A lane that has actually spent its
     whole budget is recorded as exhausted and escalated once, and waking then
@@ -8742,6 +8822,8 @@ def wake(
             }
     else:
         session = recorded["session"]
+    if (recorded or {}).get("state") != lanes.BLOCKED:
+        _clear_block(home, directory, root, name)
     if not lanes.wakes(recorded):
         return
     observed = recorded_presence(recorded, observed)

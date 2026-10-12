@@ -54,6 +54,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
@@ -62,6 +63,7 @@ from agent_parley.lanes import extras
 from agent_parley.state import BridgeError, LockBusy, lock
 
 GIT_SECONDS = 5
+RELOCATE_AFTER = 3600
 MAX_REPORTED_PATHS = 10
 RENAMED_HOMES = {"agent-parley": "agent-bridge"}
 RETIRED_FILES = ("-work.json", "-wake-work.json", "-mcp.json", "-wake.log")
@@ -107,8 +109,15 @@ UNLANDED = "nothing shows its branch landed"
 MOVED = "its worktree moved to another path Git registers"
 STRAYED = "it sits outside its lane and the lane's -wt directory"
 ADRIFT = "no lane made it and it sits outside the project's strays directory"
+FOREIGN = (
+    "no lane made it and it sits outside the repository, the state "
+    "directory and temporary directories"
+)
 REFUSED = "Git refused to move it"
+FRESH = "it changed within the relocation grace period"
+NESTED = "another registered worktree sits inside it"
 STRAYS = "strays"
+TEMPORARY = ("/tmp", "/var/tmp", "/dev/shm")
 REMOVABLE = frozenset(
     {
         MERGED,
@@ -471,6 +480,33 @@ def _changed(path: Path) -> float:
         return 0.0
 
 
+def _used(path: Path) -> float:
+    """Reads when a worktree was last in use, as far as the disk records.
+
+    A session working from the base checkout never keeps its working
+    directory inside the worktree, and editing a file in a subdirectory
+    leaves the worktree directory's own time alone. Git rewrites the
+    worktree's index on status, add and commit, and its HEAD on every
+    commit or checkout, so the latest of the three times marks recent use.
+
+    Args:
+        path: Linked worktree whose `.git` file names its Git directory.
+
+    Returns:
+        The latest modification time of the worktree directory, its index
+        and its HEAD, or the directory's alone when its `.git` file cannot
+        be read.
+    """
+    try:
+        pointer = (path / ".git").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return _changed(path)
+    gitdir = path / pointer.removeprefix("gitdir:").strip()
+    return max(
+        _changed(path), _changed(gitdir / "index"), _changed(gitdir / "HEAD")
+    )
+
+
 def _quiet(directory: Path, name: str, lane: Path, after: float) -> bool:
     """Reports whether a lane stopped and stayed untouched past a threshold.
 
@@ -597,7 +633,10 @@ def relocated(root: str, lane: Path, branch: str) -> str:
     A worktree moved with `git worktree move`, by the sweep or by the
     operator, keeps its branch and its registration under a new path, so a
     recorded path that no longer exists is read against the registrations
-    by branch before anything treats it as gone.
+    by branch before anything treats it as gone. The main worktree, which
+    Git always lists first, is skipped: a lane worktree cannot be moved
+    onto the base checkout, so that branch match means the operator checked
+    the branch out there after the lane vanished.
 
     Args:
         root: Base checkout the worktree is registered with.
@@ -605,13 +644,13 @@ def relocated(root: str, lane: Path, branch: str) -> str:
         branch: The branch that worktree has checked out.
 
     Returns:
-        The existing path Git registers that branch at, or an empty string
-        when the recorded path still exists, the branch is empty, or no
-        other existing registration carries it.
+        The existing linked worktree path Git registers that branch at, or
+        an empty string when the recorded path still exists, the branch is
+        empty, or no other existing linked registration carries it.
     """
     if not branch or lane.exists():
         return ""
-    for entry in _entries(root) or []:
+    for entry in (_entries(root) or [])[1:]:
         if entry["branch"] == branch and Path(entry["path"]).exists():
             return entry["path"]
     return ""
@@ -705,6 +744,36 @@ def owned_roots(directory: Path) -> list[Path]:
         legacy = (home.parent / renamed / "projects").resolve()
         found.extend(sorted(path for path in legacy.glob("*") if path.is_dir()))
     return found
+
+
+def _disposable(path: Path, directory: Path, root: str) -> bool:
+    """Reports whether a worktree sits where throwaway checkouts are made.
+
+    Agent Parley and the agents it runs make their scratch worktrees inside
+    the repository, such as under `.claude/worktrees`, under the state
+    root and in temporary directories. A worktree no lane accounts for
+    anywhere else, such as one a system service runs from, belongs to the
+    operator, so a sweep reports it and neither moves nor removes it.
+
+    Args:
+        path: Resolved worktree path.
+        directory: Private project state directory.
+        root: Base checkout of the project repository.
+
+    Returns:
+        Whether the worktree lies inside the repository, the state root,
+        a directory `owned_roots` names or a temporary directory.
+    """
+    places = [
+        Path(root).resolve(),
+        directory.parent.parent.resolve(),
+        *owned_roots(directory),
+        *(
+            Path(folder).resolve()
+            for folder in (*TEMPORARY, tempfile.gettempdir())
+        ),
+    ]
+    return any(_within(path, place) for place in places)
 
 
 def _unpushed(root: str, entry: dict, ahead: list[str]) -> list[str] | None:
@@ -997,14 +1066,15 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     which `pool.sweep` assesses by their own rule. Each is attributed to a
     lane by path or branch. Git records no creator, so one no lane
     accounts for is assessed by the same rule wherever it sits, as one
-    Git refused to move into the project's `strays` directory is. A
-    worktree is removed only when Git holds no lock on it, no
-    session runs in its lane, no process works inside an unattributed one
-    outside `owned_roots`, it is clean, it holds no file Git ignores,
-    every commit beyond the base is on its upstream, and the base holds its
-    head, its lane retired, or it has not changed within the inactivity
-    threshold. A registration whose directory is already gone is reclaimed
-    by dropping that registration.
+    Git refused to move into the project's `strays` directory is, except
+    one outside the places throwaway checkouts are made, which is kept as
+    `FOREIGN` because the operator owns it. A worktree is removed only
+    when Git holds no lock on it, no session runs in its lane, no process
+    works inside an unattributed one outside `owned_roots`, it is clean,
+    it holds no file Git ignores, every commit beyond the base is on its
+    upstream, and the base holds its head, its lane retired, or it has not
+    changed within the inactivity threshold. A registration whose
+    directory is already gone is reclaimed by dropping that registration.
 
     Args:
         directory: Private project state directory holding the lanes.
@@ -1033,15 +1103,20 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
     for entry in _lane_made(directory, manifest, entries):
         path = Path(entry["path"])
         owner = _owner(path, entry["branch"], lanes, prefixes)
-        reason, paths = _stray(
-            manifest["root"],
-            entry,
-            busy=_busy(directory, owner)
-            if owner
-            else path.parent not in owned and _occupied(path),
-            retired=bool(owner) and bool(participants[owner].get("retired")),
-            after=after,
-        )
+        paths: list[str]
+        if not owner and not _disposable(path, directory, manifest["root"]):
+            reason, paths = FOREIGN, []
+        else:
+            reason, paths = _stray(
+                manifest["root"],
+                entry,
+                busy=_busy(directory, owner)
+                if owner
+                else path.parent not in owned and _occupied(path),
+                retired=bool(owner)
+                and bool(participants[owner].get("retired")),
+                after=after,
+            )
         row = {
             "worktree": entry["path"],
             "branch": entry["branch"],
@@ -1082,16 +1157,24 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
     its work lands. One a lane made elsewhere, in the operator's home, beside
     the repository or in a temporary directory, is attributed by its branch
     and planned into `<lane>-wt/<name>`. Git records no creator, so one no
-    lane accounts for, wherever it sits, including under the repository's
-    `.claude/worktrees`, is planned into the project's `strays` directory,
-    which `strays` treats as the project's own. A taken name gets a numeric
+    lane accounts for that sits where throwaway checkouts are made, inside
+    the repository, including its `.claude/worktrees`, the state root or a
+    temporary directory, is planned into the project's `strays` directory,
+    which `strays` treats as the project's own. One anywhere else, such as
+    a worktree a system service runs from, is reported as `FOREIGN` and
+    never moved. A taken name gets a numeric
     suffix. A move never deletes anything: Git renames the directory,
     so uncommitted edits, unpushed commits and ignored files travel with it.
     The base checkout, the lanes themselves, spares, a worktree already
     inside a lane, its `-wt` directory or the `strays` directory, and one
-    whose directory is gone are not planned at all. A locked worktree, one
-    whose lane runs a session and one any process works inside are planned
-    but refused.
+    whose directory is gone are not planned at all. One whose directory
+    holds another registered worktree is planned but refused, because the
+    move would carry the nested one away from its registration and a later
+    sweep would drop that registration as gone. A locked worktree, one
+    whose lane runs a session, one any process works inside and one whose
+    directory, index or HEAD changed within `RELOCATE_AFTER` seconds are
+    planned but refused, the last because a session working from the base
+    checkout edits it without ever entering it.
 
     Args:
         directory: Private project state directory holding the lanes.
@@ -1108,6 +1191,7 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
     lanes, prefixes = _owner_index(manifest)
     homes = {name: Path(lane) for lane, name in lanes.items()}
     unclaimed = directory.resolve() / STRAYS
+    registered = [Path(entry["path"]) for entry in entries]
     taken: set[Path] = set()
     rows = []
     for entry in _lane_made(directory, manifest, entries):
@@ -1126,10 +1210,18 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
             folder, outside = unclaimed, ADRIFT
         destination = _free(folder, path.name, taken)
         taken.add(destination)
-        if entry["locked"]:
+        if not owner and not _disposable(path, directory, manifest["root"]):
+            reason = FOREIGN
+        elif any(
+            other != path and _within(other, path) for other in registered
+        ):
+            reason = NESTED
+        elif entry["locked"]:
             reason = LOCKED
         elif (owner and _busy(directory, owner)) or _occupied(path):
             reason = SESSION
+        elif time.time() - _used(path) < RELOCATE_AFTER:
+            reason = FRESH
         elif _within(destination, path):
             reason = REFUSED
         else:
