@@ -26,6 +26,7 @@ from agent_parley import (
     policy,
     process,
     protocol,
+    roles,
     roster,
     store,
 )
@@ -198,6 +199,7 @@ class Reason(StrEnum):
     WAKE_REQUESTED = "wake_requested"
     ATTRIBUTION_REFUSED = "attribution_refused"
     BUDGET_REFUSED = "budget_refused"
+    ROLE_REFUSED = "role_refused"
     OPERATOR_PAUSED = "operator_paused"
     OPERATOR_RESUMED = "operator_resumed"
     OPERATOR_STOPPED = "operator_stopped"
@@ -2225,6 +2227,34 @@ def unscanned_hazard(
     return (mail, danger) if danger else None
 
 
+def role_refusal(
+    directory: Path, agent: str, payload: dict, lane: Path
+) -> str | None:
+    """Applies the operator's role rules to one tool call.
+
+    A project without ``roles.json`` and a lane without an assignment are not
+    restricted. An unreadable rules file refuses writes and shell calls.
+
+    Args:
+        directory: Common project state directory.
+        agent: Assigned native lane name.
+        payload: Native ``PreToolUse`` hook payload.
+        lane: Resolved lane worktree the call runs in.
+
+    Returns:
+        The refusal reason, or None when the call may proceed.
+    """
+    if reason := roles.broken(directory, payload):
+        return reason
+    try:
+        spec = roles.load(directory)
+    except BridgeError:
+        return None
+    if spec is None:
+        return None
+    return roles.decide(spec, agent, payload, lane)
+
+
 def outage(home: Path, cause: str) -> str:
     """Describes a coordination outage in terms the operator can act on.
 
@@ -3372,6 +3402,18 @@ def checkpoint(
             }
         }
         record(directory, agent, payload, Reason.BUDGET_REFUSED, refused)
+        return refused
+    if event == "PreToolUse" and (
+        why := role_refusal(directory, agent, payload, lane)
+    ):
+        refused = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": why,
+            }
+        }
+        record(directory, agent, payload, Reason.ROLE_REFUSED, refused)
         return refused
     if payload.get("agent_id"):
         record(directory, agent, payload, Reason.OBSERVED, None)
