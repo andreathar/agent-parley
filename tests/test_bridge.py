@@ -928,7 +928,9 @@ def test_native_launch_preserves_task_and_passes_shared_configuration(
         "import json, os, sys\n"
         "with open(os.environ['CAPTURE'], 'w') as f:\n"
         " json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(), "
-        "'has_token': bool(os.environ.get('AGENT_PARLEY_TOKEN'))}, f)\n"
+        "'has_token': bool(os.environ.get('AGENT_PARLEY_TOKEN')), "
+        "'participant': os.environ.get('AGENT_PARLEY_PARTICIPANT'), "
+        "'root': os.environ.get('AGENT_PARLEY_PROJECT_ROOT')}, f)\n"
     )
     executable.chmod(0o755)
     capture = tmp_path / "capture.json"
@@ -945,6 +947,8 @@ def test_native_launch_preserves_task_and_passes_shared_configuration(
     result = json.loads(capture.read_text())
     assert result["cwd"] == bridge.setup(repo)["lanes"][agent]
     assert result["has_token"]
+    assert result["participant"] == agent
+    assert result["root"] == str(bridge.setup(repo)["root"])
     assert task in result["argv"][-1]
     assert bridge.config["token"] not in json.dumps(result)
     assert str(repo) in " ".join(result["argv"])

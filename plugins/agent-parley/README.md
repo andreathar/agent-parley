@@ -19,7 +19,8 @@ curl -LsSf https://github.com/suneel944/agent-parley/releases/latest/download/in
 The installer adds uv only when it is missing, runs `uv tool install
 agent-parley` and adds this plugin to each of `claude` and `codex` on PATH.
 `uv tool install agent-parley` or `pipx install agent-parley` installs the tool
-alone. Launch each agent session in its
+alone. On this fork use `make install` from the checkout instead; both
+commands fetch the upstream release and replace the fork. Launch each agent session in its
 own terminal with `agent-parley run <participant>`, for example
 `agent-parley run claude`. The tool gives each session its own worktree and
 connects it to the local coordination server.

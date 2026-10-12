@@ -52,6 +52,13 @@ an operator shell in the base checkout: it refuses inside an assigned worktree
 and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
 a command every later lane runs. `init show` stays readable from a lane.
 
+A launched lane process also receives `AGENT_PARLEY_PARTICIPANT`, its
+participant name, and `AGENT_PARLEY_PROJECT_ROOT`, the registered base
+checkout. They identify the lane to project hooks; they are not credentials and
+grant no authority. Check what running lanes carry with `agent-parley wiring
+--repo PATH --require-env NAME`, which needs lanes launched after the
+variable was introduced.
+
 Each launch records how long `run` took to reach the native CLI, split into
 worktree creation, `init` and CLI start (registration, the service and the
 native configuration). `participant show` prints it as `Last launch:`, and

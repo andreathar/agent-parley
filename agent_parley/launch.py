@@ -606,6 +606,8 @@ reported.
                 **account,
                 "AGENT_PARLEY_TOKEN": identity["registration_token"],
                 "AGENT_PARLEY_HOME": str(self.home),
+                "AGENT_PARLEY_PARTICIPANT": agent,
+                "AGENT_PARLEY_PROJECT_ROOT": str(data["root"]),
             }
             if entry["adapter"] == "claude":
                 config = lane.parent / f"{agent}-mcp.json"

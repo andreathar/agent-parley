@@ -18,9 +18,10 @@ all participants must use the same private state root.
 
 Start with `agent-parley status`, `agent-parley participant list`, and
 `agent-parley issue list` in the current repository. These show ownership separately from activity and reported outcomes.
-If installation is part of the task, use `uv tool install agent-parley`.
-Contributors can use `make install` from a checkout. Do not install software
-merely to answer a status question.
+If installation is part of the task, use `make install` from the fork
+checkout. Never run `uv tool install agent-parley` or `pipx install
+agent-parley`: they fetch the upstream release and replace the fork. Do not
+install software merely to answer a status question.
 
 ## Select the correct lane
 
@@ -57,6 +58,13 @@ sources moved under a running process; an inconsistent store means this build
 queries columns the store does not have. Neither is fixed by retrying the
 call.
 
+`agent-parley wiring --repo REPOSITORY` is a second read: it confirms the
+service answers on the saved port and refuses a tokenless request, and that
+each running lane client carries that URL and state home. Add
+`--require-env NAME` for each variable the project's hooks need. It reports
+any mismatch as a failure and proves no tool call, so a pass means the wiring
+is consistent, not that a peer replied.
+
 Example situation: "My reservation call just failed with something about a
 column, and my peer says theirs works. Find out whether my installation is the
 odd one out before I touch the code."
@@ -73,6 +81,18 @@ that it is the same work, and no match is a recorded reason to open one.
 
 Example situation: "Before I file anything, check whether the slow status
 command is already tracked, and tell me if someone is holding it."
+
+## Projects without a forge
+
+When the project's own instructions say no forge issue is required, or `issue
+list` shows none, do not invent issue numbers and do not open one to satisfy
+this workflow. Read the project's coordination protocol first; its roles,
+ownership table and close-out format take precedence over the issue steps
+below. Coordinate through `send_message` threads, advisory file reservations
+and handoff documents, and report with `agent-parley report`. The lane
+launcher exports `AGENT_PARLEY_PARTICIPANT` and `AGENT_PARLEY_PROJECT_ROOT`;
+a project may read them to identify the lane. Reservations remain advisory and
+an acknowledgement is not approval.
 
 ## Claim, work, and hand off
 
