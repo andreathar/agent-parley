@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 from agent_parley import (
     cli,

@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 from agent_parley import cli, protocol, roster, store, views
 
@@ -191,7 +191,9 @@ def test_missing_argument_prints_the_command_usage(
 
 def test_every_subcommand_action_carries_help():
     parser, _ = cli.root_parser(None)
-    pending = [((), parser)]
+    pending: list[tuple[tuple[str, ...], argparse.ArgumentParser]] = [
+        ((), parser)
+    ]
     bare = []
     while pending:
         path, current = pending.pop()

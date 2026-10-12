@@ -11,13 +11,13 @@ from agent_parley.state import write_json
 
 
 @pytest.fixture(autouse=True)
-def native_config_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def native_config_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: E501
     """Keeps every state read inside each test's own directory.
 
     The command line falls back to ``AGENT_PARLEY_HOME`` when a test drives
     ``cli.main()`` without ``--home``, so that variable is pinned as well;
-    otherwise such a test reads the developer's live store and fails
-    whenever that store is behind the checked-out code. A lane's own
+    otherwise such a test reads the developer's live store and fails whenever
+    that store is behind the checked-out code. A lane's own
     ``AGENT_PARLEY_TOKEN`` is removed, so a suite run from inside a lane
     still drives operator-only commands as the operator. ``FORCE_COLOR`` is
     removed because it makes help text carry colour codes, so a developer
