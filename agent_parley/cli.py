@@ -3131,6 +3131,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "problems",
             "doctor",
             "preflight",
+            "wiring",
             "console",
             "notify",
         ),
@@ -3688,6 +3689,19 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     inspecting.add_argument("--provider")
     inspecting.add_argument("--credentials")
     inspecting.add_argument("--json", action="store_true", help=JSON_HELP)
+    wiring = commands.add_parser(
+        "wiring",
+        help="Check that running lanes use the service, port and state home.",
+    )
+    wiring.add_argument("--repo", type=Path, default=Path.cwd())
+    wiring.add_argument(
+        "--require-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Environment variable every lane process must export.",
+    )
+    wiring.add_argument("--json", action="store_true", help=JSON_HELP)
     controlling = commands.add_parser(
         "console",
         help="Serve the loopback operator console for this state home.",
@@ -5554,6 +5568,10 @@ def main() -> int:
                 )
             )
             return 0
+        if args.command == "wiring":
+            from agent_parley import wiring
+
+            return wiring.main(home, args.repo, args.require_env, args.json)
         if args.command == "console":
             from agent_parley import console
 

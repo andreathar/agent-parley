@@ -107,8 +107,9 @@ MCP event store; event telemetry is best effort and never decides a grant.
 
 These are advisory reservations, not OS locks or a device-use detector. They
 cannot prevent port binding or GPU use by external programs or older Parley
-builds. The untouched daily 0.18.0 installation does not gain these tools until
-a separately reviewed migration installs the fork for daily work.
+builds. A daily installation gains these tools only when the fork is installed for
+daily work; check `uv tool` receipts, since a directory-sourced install is a
+snapshot that drifts from later checkout edits.
 
 ## Operator console
 
@@ -279,3 +280,15 @@ The audit in `audits/2026-10-10-linux-fork-audit.md` is a historical baseline;
 its settings inventory describes the pre-customization 0.18.0 checkout. This
 document describes the changes in the development branch. Publishing, changing
 marketplace ownership, release automation and daily migration are separate work.
+
+## Wiring check
+
+```sh
+agent-parley wiring --repo /path/to/project --require-env NAME --json
+```
+
+Read-only and exits non-zero on any failure. It confirms the saved port is
+served, a tokenless MCP request is refused, the project is registered, and each
+running lane client carries the service URL on that port, the expected state
+home and every `--require-env` variable. Lane processes are read from `/proc`;
+output never includes tokens. It does not prove tool calls or model behavior.

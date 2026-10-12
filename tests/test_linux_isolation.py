@@ -208,3 +208,31 @@ def test_dev_installer_refuses_mismatched_saved_port(tmp_path):
             8877,
         )
     assert not (tmp_path / "build").exists()
+
+
+def test_wiring_reports_unregistered_project_without_creating_state(
+    tmp_path, repo
+):
+    from agent_parley import wiring
+
+    home = tmp_path / "absent"
+    report = wiring.inspect(home, repo, ["NAME"])
+    assert report["ok"] is False
+    assert not home.exists()
+    assert any(
+        item["name"] == "registered" and item["state"] == "fail"
+        for item in report["checks"]
+    )
+
+
+def test_wiring_url_binding_is_read_from_codex_and_claude_arguments(tmp_path):
+    from agent_parley import wiring
+
+    config = tmp_path / "mcp.json"
+    config.write_text(
+        json.dumps({"mcpServers": {"agent_parley": {"url": "http://x:1/"}}})
+    )
+    codex = ["-c", 'mcp_servers.agent_parley.url="http://127.0.0.1:9/mcp/"']
+    assert wiring._bound_url(codex) == "http://127.0.0.1:9/mcp/"
+    assert wiring._bound_url(["--mcp-config", str(config)]) == "http://x:1/"
+    assert wiring._bound_url(["other"]) is None
