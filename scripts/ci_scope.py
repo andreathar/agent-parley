@@ -38,6 +38,7 @@ WSL_PATHS = (
     "tests/test_wsl.py",
     "pyproject.toml",
     "uv.lock",
+    ".python-version",
     ".github/workflows/check.yml",
 )
 FULL_PATHS = (
