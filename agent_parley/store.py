@@ -1365,6 +1365,52 @@ def _ack_window(directory: Path | None) -> float:
     return float(DEFAULT_ACK_SECONDS)
 
 
+def _operator_reply(
+    db: sqlite3.Connection, actor: dict, args: dict, thread: str
+) -> bool:
+    """Authorizes a private reply to an operator request this lane received.
+
+    The operator remains a CLI-only identity with no bearer credential. Its
+    local mailbox accepts only ordinary, individually addressed replies to
+    a request delivered to this authenticated lane in this project. A known
+    thread alone grants nothing to a peer that never received the request.
+
+    Args:
+        db: Open transaction owned by the caller.
+        actor: Authenticated sender and canonical project.
+        args: Validated send arguments, including explicit correlation.
+        thread: Resolved thread of the proposed reply.
+
+    Returns:
+        Whether the reply can reach the operator's local mailbox without
+        issuing a credential or accepting arbitrary inactive recipients.
+    """
+    if (
+        actor["name"] == OPERATOR
+        or args.get("to") != [OPERATOR]
+        or args.get("ack_required", False)
+        or args.get("decision", False)
+        or not ("reply_to" in args or args.get("thread_id"))
+    ):
+        return False
+    parameters = [actor["project_id"], OPERATOR, actor["id"], thread]
+    answered = ""
+    if "reply_to" in args:
+        answered = " AND m.id=?"
+        parameters.append(args["reply_to"])
+    return (
+        db.execute(
+            "SELECT 1 FROM messages m JOIN agents sender "
+            "ON sender.id=m.sender_id JOIN message_recipients recipient "
+            "ON recipient.message_id=m.id WHERE m.project_id=? "
+            "AND sender.name=? AND recipient.agent_id=? AND m.thread_id=? "
+            "AND m.decision=0 AND m.feed=0" + answered,
+            parameters,
+        ).fetchone()
+        is not None
+    )
+
+
 def _send(
     db: sqlite3.Connection,
     actor: dict,
@@ -1401,6 +1447,11 @@ def _send(
     A repeated send with a key that already names a delivered message
     returns that message before any recipient's credential is judged, so a
     retry succeeds even after a recipient has since been retired.
+
+    The tokenless CLI operator accepts only private correlated replies to a
+    request delivered to this lane. These replies bypass relevance routing,
+    carry no acknowledgement demand or shared-decision marking, and confer
+    no operator authority on their sender.
     """
     subject = _text(args.get("subject"), "subject", 160)
     body = _text(
@@ -1489,13 +1540,22 @@ def _send(
             "thread_id": existing["thread_id"],
             "duplicate": True,
         }
-    if inactive:
+    operator_reply = inactive == [OPERATOR] and _operator_reply(
+        db, actor, args, thread
+    )
+    if inactive and not operator_reply:
+        if OPERATOR in inactive:
+            raise BridgeError(
+                "Reply to operator only with reply_to or thread_id naming "
+                "an operator request you received; address operator alone "
+                "without ack_required or decision."
+            )
         raise BridgeError(
             f"Recipient {inactive[0]!r} cannot receive mail: "
             "operator or retired participant has no active credential."
         )
     delivered = set(ids)
-    if route and not ack and not decision:
+    if route and not ack and not decision and not operator_reply:
         delivered = _routed(
             db, actor, addressed, f"{subject}\n{body}", topic, claim, directory
         )

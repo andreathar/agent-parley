@@ -36,7 +36,7 @@ completion; missing correlated protocol receipts remain unknown.
 | `unattended` | The operator-recorded unattended integration policy, its eligibility checks, and the durable decision and refusal records of each attempt |
 | `blueprints` | Operator-recorded blueprints of deterministic and agent nodes, label defaults, their validation, and the per-claim runs that execute deterministic nodes in the lane's worktree, open the pull request through the self-service path, judge CI from the supervision poll's `pull-requests.json` reading, hand agent nodes to the lane and record progress in `blueprint-runs.json`; the supervision poll moves runs on daemon threads |
 | `claims` | The issue commands: claims, handoffs, recovery, assignment, resolution, the next-issue ranking and the recorded work plan |
-| `mail` | Operator mail: steering a lane, acknowledgements, the mailbox, and recorded decisions |
+| `mail` | Operator mail: steering a lane, acknowledgements, lane mail readers, the local `--as operator` reply reader, and operator-only recorded decisions |
 | `reports` | Ready reports, their review, the event export, the state archive and ownership history |
 | `status` | The `status`, `problems` and `doctor` readings, lane liveness and the per-lane status rows |
 | `problems` | Every condition an operator should act on, derived from one status reading, each with a command to paste or the actor already handling it |

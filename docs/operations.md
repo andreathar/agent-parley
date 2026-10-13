@@ -322,6 +322,24 @@ never launched and so has no registered identity.
 credential profile name, it never holds a coordination credential, and no MCP
 tool sends as it, so a served agent cannot write in the operator's name.
 
+A lane can answer an operator request with `send_message`, addressing only
+`operator` and setting `reply_to` to the received message ID. An explicit
+`thread_id` also works only when that lane received an operator request in
+that same project and thread. Omit `ack_required` and `decision`: the reply
+is private mail, not a shared decision or an acknowledgement demand. It is
+delivered directly even when its topic would otherwise select the project
+feed. No operator token is created, no retired lane becomes addressable, and
+a peer cannot reply by guessing a thread it never received.
+
+The operator reads the result through the existing local CLI with
+`mail thread ID --as operator --repo ROOT --json`, or `mail list --as operator`.
+These reads use the local operator's access to the private state directory;
+there is no tokenless MCP reader. A launched lane's environment is refused
+for this reader and for CLI `decide`, which writes under the operator name.
+That environment guard is an operational check, not an OS sandbox.
+A failed reply remains a blocker; recording a ready report or public decision
+does not replace it, acknowledge the request, or complete its task.
+
 `mail thread ID` prints one thread in send order and `mail search QUERY` reports
 the messages matching it. Both read as the lane whose worktree they run in, the
 same way reports and issue transitions do, so they answer for one participant's
@@ -341,7 +359,8 @@ checkout that the operator then has to open, and changing directory into a lane
 worktree to read one is the wrong price. The flag selects a reader and nothing
 more: no message is sent, acknowledged or marked read for that lane, and the
 write verbs keep the lane identity path they always had. A name that is not a
-participant of this project is refused.
+participant of this project is refused, except for the reserved local
+`operator` reader described above.
 
 `issue list` prints each owner's session state and the age of its last
 checkpoint, so a quiet lane is visible. Reclaiming that work still needs the

@@ -336,7 +336,7 @@ participant or project. Reservations are advisory, not filesystem locks.
 
 | Tool | Purpose |
 | --- | --- |
-| `send_message` | Send to peers using an idempotency key; optionally join a thread or require acknowledgement. |
+| `send_message` | Send to peers using an idempotency key; optionally join a thread or require acknowledgement. A private reply to `operator` must answer an operator request this lane received, address only `operator`, and omit `ack_required` and `decision`. |
 | `fetch_inbox` | Page inbox metadata and optional bodies; filter with `unread` or `unacknowledged`. |
 | `wait_for_message` | Wait up to `timeout_seconds` for the next mail matching the same filters, plus `thread_id`; an expired wait is empty. |
 | `mark_message_read` | Explicitly mark a received message read; takes an optional `idempotency_key`. |

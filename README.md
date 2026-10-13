@@ -254,6 +254,13 @@ prints the version and state directory. Single records read through `show`:
 `--as NAME`, so you can open a lane's mail from the main checkout without
 acknowledging or marking anything for it.
 
+A lane answers an operator request with `send_message` to `operator` and
+`reply_to` set to the received message ID, without an acknowledgement demand
+or shared-decision marking. Read that private conversation locally with
+`mail thread ID --as operator --repo ROOT --json`. The operator remains a
+CLI-only identity with no MCP credential; unrelated peers and retired lanes
+gain no access.
+
 Mail never blocks work: it arrives as context, most relevant first. A tool call
 is refused only when it is unsafe now, such as a write to a path a peer
 reserved or a `git worktree add` outside the lane's `<lane>-wt/` directory.

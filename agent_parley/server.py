@@ -210,7 +210,8 @@ TOOLS = [
     ),
     _tool(
         "send_message",
-        "Send mail; reuse key only on retries.",
+        "Send mail; reuse key only on retries. Answer an operator request "
+        "with to=[operator] and reply_to; no ack_required or decision.",
         {
             "to": {
                 "type": "array",

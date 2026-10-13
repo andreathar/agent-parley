@@ -181,6 +181,8 @@ class MailMixin(BridgeCore):
         the problems report cites from the main checkout without changing
         directory into a lane. It stays a read: naming a participant sends
         nothing, acknowledges nothing and marks nothing read on their behalf.
+        The reserved ``operator`` reader selects its local reply mailbox and
+        is refused from a launched lane's environment.
         Pending operator items belong to the project rather than to one lane,
         so listing and cancelling them need no lane.
 
@@ -198,7 +200,8 @@ class MailMixin(BridgeCore):
             identifier: Pending item to cancel, or message to show.
             full: Whether a shown message's attachment is read whole.
             participant: Lane whose mail is read, for an operator reading from
-                the main checkout. Without one the worktree selects the reader.
+                the main checkout, or ``operator`` for its local reply mailbox.
+                Without one the worktree selects the reader.
 
         Returns:
             One thread page, the matching messages, the most recent messages,
@@ -209,7 +212,13 @@ class MailMixin(BridgeCore):
             BridgeError: If the lane, the named participant or its registered
                 identity is unknown.
         """
-        from agent_parley.cli import attachments, git, roster, store
+        from agent_parley.cli import (
+            attachments,
+            git,
+            operator_only,
+            roster,
+            store,
+        )
 
         _, directory = self.project(repo)
         data = roster.read(directory)
@@ -220,7 +229,10 @@ class MailMixin(BridgeCore):
             }
         if action == "cancel":
             return store.cancel_schedule(self.home, data["root"], identifier)
-        if participant:
+        if participant == roster.OPERATOR:
+            operator_only("Read the operator mailbox")
+            name = roster.OPERATOR
+        elif participant:
             if participant not in data["participants"]:
                 raise BridgeError(
                     f"{participant} is not a participant in this project; "
@@ -228,10 +240,11 @@ class MailMixin(BridgeCore):
                     next_command="agent-parley participant list",
                 )
             agent = participant
+            name = data["participants"][agent]["display"]
         else:
             lane = Path(git(repo, "rev-parse", "--show-toplevel")).resolve()
             agent = roster.resolve(data, lane, mail_reader=True)
-        name = data["participants"][agent]["display"]
+            name = data["participants"][agent]["display"]
         if action == "thread":
             return store.read_thread(
                 self.home, data["root"], name, thread, after
@@ -291,7 +304,8 @@ class MailMixin(BridgeCore):
         The decision is recorded against the project rather than sent to an
         inbox, so a lane that joins later, or that was never party to the
         discussion, still finds it by searching the log. Ordinary mail keeps
-        the scope it always had.
+        the scope it always had. A launched lane must record its own decisions
+        through MCP, not adopt the operator's CLI sender identity.
 
         Args:
             repo: Any checkout of the repository the project covers.
@@ -305,11 +319,12 @@ class MailMixin(BridgeCore):
             key already named exactly this decision.
 
         Raises:
-            BridgeError: If the repository has no project or the decision
-                fails validation.
+            BridgeError: If the caller is a launched lane, the repository has
+                no project, or the decision fails validation.
         """
-        from agent_parley.cli import operator_key, roster, store
+        from agent_parley.cli import operator_key, operator_only, roster, store
 
+        operator_only("Record an operator decision")
         _, directory = self.project(repo)
         data = roster.read(directory)
         heading = subject or "Operator decision"

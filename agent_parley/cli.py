@@ -3423,9 +3423,9 @@ def add_reader_argument(command: argparse.ArgumentParser) -> None:
         default="",
         metavar="PARTICIPANT",
         help=(
-            "Read this lane's mail from the main checkout instead of its "
-            "worktree. It reads only: nothing is sent, acknowledged or "
-            "marked read for that lane."
+            "Read this lane's mail from the main checkout, or use operator "
+            "for the local operator mailbox. It reads only: nothing is "
+            "sent, acknowledged or marked read."
         ),
     )
 
