@@ -3096,6 +3096,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "decision",
             "report",
             "participant",
+            "agents",
             "approve",
             "reject",
         ),
@@ -3684,6 +3685,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         parser: Root parser whose epilog carries the command listing.
         commands: Index the subcommands are declared through.
     """
+    from agent_parley import agents_cli
+
+    agents_cli.declare(commands)
     inspecting = commands.add_parser(
         "preflight",
         help="Read launch scope and settings without initializing state.",
@@ -4194,7 +4198,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Provider definition; defaults to the participant name.",
     )
     run.add_argument(
-        "--credentials", help="Credential profile selecting one account."
+        "--credentials",
+        help="Credential profile selecting one account. Copilot requires "
+        "a profile with its own config home; inspect credentials list first.",
     )
     run.add_argument("--repo", type=Path, default=Path.cwd())
     run.add_argument("--resume", action="store_true")
@@ -4528,17 +4534,20 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Add the plugin to each supported native CLI on PATH.",
     )
     plugin_actions = plugging.add_subparsers(dest="action", required=True)
-    plugin_actions.add_parser(
+    plugin_install = plugin_actions.add_parser(
         "install",
         help=(
             "Add the marketplace and plugin to claude and codex where "
             "missing, refreshing what is already present."
         ),
     )
-    plugin_actions.add_parser(
+    plugin_install.add_argument("--preview", action="store_true")
+    plugin_install.add_argument("--json", action="store_true", help=JSON_HELP)
+    plugin_status = plugin_actions.add_parser(
         "status",
         help="Report whether each supported CLI has the plugin; writes none.",
     )
+    plugin_status.add_argument("--json", action="store_true", help=JSON_HELP)
     triaging = commands.add_parser(
         "problems",
         help=(
@@ -5431,7 +5440,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "add", help="Define a config home and environment requirements."
     )
     profile.add_argument("name")
-    profile.add_argument("--config-home", default="")
+    profile.add_argument(
+        "--config-home",
+        default="",
+        help="Absolute private native configuration directory. Creates it "
+        "if absent; does not sign in or copy authentication. Copilot needs "
+        "one separate from your default configuration directory.",
+    )
     profile.add_argument("--env", action="append", default=[])
     profile.add_argument("--require-env", action="append", default=[])
     parser.epilog = command_help(commands)
@@ -5592,21 +5607,52 @@ def main() -> int:
         from agent_parley import plugins
 
         if args.action == "status":
+            if args.json:
+                plugin_reading = plugins.inspection()
+                print(views.render("plugins_status", plugin_reading))
+                return 1 if plugin_reading["warnings"] else 0
             print("\n".join(plugins.status()))
+            return 0
+        if args.preview:
+            plugin_plan = plugins.preview()
+            print(
+                views.render("plugins_install", plugin_plan)
+                if args.json
+                else json.dumps(plugin_plan, indent=2)
+            )
             return 0
         try:
             roster.require_operator(home, "Installing user-global plugins")
         except BridgeError as error:
             print(str(error), file=sys.stderr)
+            if args.json:
+                print(_error_document(error))
             return 1
         outcome, succeeded = plugins.install()
-        print("\n".join(outcome))
+        print(
+            views.render(
+                "plugins_install",
+                {"preview": False, "succeeded": succeeded, "results": outcome},
+            )
+            if args.json
+            else "\n".join(outcome)
+        )
         return 0 if succeeded else 1
     if args.command == "demo":
         from agent_parley import demo
 
         return demo.main()
     try:
+        if args.command == "agents":
+            from agent_parley import agents_cli
+
+            result = agents_cli.execute(home, args)
+            print(
+                views.render(f"agents_{args.action}", result)
+                if args.json
+                else agents_cli.render(result)
+            )
+            return 1 if result.get("warnings") else 0
         if args.command == "preflight":
             from agent_parley import preflight
 

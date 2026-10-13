@@ -21,6 +21,14 @@ from agent_parley.preflight import _document
 from agent_parley.state import BridgeError
 
 URL_PATTERN = re.compile(r'mcp_servers\.agent_parley\.url="([^"]+)"')
+CLIENTS = {"claude", "codex", "copilot", "gemini", "opencode", "amp"}
+VISIBLE_ENV = {
+    "AGENT_PARLEY_HOME",
+    "OPENCODE_CONFIG_DIR",
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+    "COPILOT_HOME",
+    "AMP_SETTINGS_FILE",
+}
 
 
 def _check(scope: str, name: str, state: str, detail: str) -> dict:
@@ -133,14 +141,16 @@ def _processes(lane: Path) -> list[dict]:
                 .decode(errors="replace")
                 .split("\0")
             )
-            environment = dict(
-                item.split("=", 1)
-                for item in (entry / "environ")
+            environment = {}
+            for item in (
+                (entry / "environ")
                 .read_bytes()
                 .decode(errors="replace")
                 .split("\0")
-                if "=" in item
-            )
+            ):
+                if "=" in item:
+                    key, value = item.split("=", 1)
+                    environment[key] = value if key in VISIBLE_ENV else ""
         except OSError:
             continue
         found.append(
@@ -171,6 +181,66 @@ def _bound_url(arguments: list[str]) -> str | None:
     return None
 
 
+def _client(arguments: list[str]) -> bool:
+    """Identifies native clients independently of their MCP configuration."""
+    return any(
+        Path(argument).name.removesuffix(".exe") in CLIENTS
+        for argument in arguments[:2]
+    )
+
+
+def _binding(item: dict) -> tuple[str, str | None, str]:
+    """Reads only the MCP binding from native launch configuration.
+
+    Missing or unreadable evidence is unknown. An inspected configuration
+    explicitly lacking an enabled server is absent. Headers and credential
+    values are never included in the result.
+
+    Args:
+        item: Process evidence with arguments and filtered environment.
+
+    Returns:
+        Evidence state, URL when configured, and a secret-free explanation.
+    """
+    try:
+        if url := _bound_url(item["arguments"]):
+            return "configured", url, "Native command-line configuration."
+        environment = item["env"]
+        candidates = [
+            ("OPENCODE_CONFIG_DIR", "opencode.json", "mcp"),
+            ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "", "mcpServers"),
+            ("COPILOT_HOME", "mcp-config.json", "mcpServers"),
+            ("AMP_SETTINGS_FILE", "", "amp.mcpServers"),
+        ]
+        for variable, filename, key in candidates:
+            if not environment.get(variable):
+                continue
+            path = Path(environment[variable])
+            if filename:
+                path /= filename
+            if not path.is_file():
+                return "unknown", None, "Native configuration unavailable."
+            servers = _document(path).get(key, {})
+            if not isinstance(servers, dict):
+                return "unknown", None, "Invalid native MCP configuration."
+            server = servers.get("agent_parley")
+            if not isinstance(server, dict) or not server:
+                return "absent", None, "No agent_parley MCP binding."
+            if server.get("enabled") is False:
+                return "absent", None, "agent_parley MCP binding is disabled."
+            url = (
+                server.get("httpUrl")
+                if variable == "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
+                else server.get("url")
+            )
+            if isinstance(url, str) and url:
+                return "configured", url, "Native configuration file."
+            return "unknown", None, "No observable remote MCP URL."
+    except (BridgeError, OSError, ValueError, TypeError, AttributeError):
+        return "unknown", None, "Cannot inspect native MCP configuration."
+    return "unknown", None, "MCP binding not observable in launch evidence."
+
+
 def _participant(
     home: Path,
     name: str,
@@ -195,45 +265,66 @@ def _participant(
     if not lane.is_dir():
         return [_check(scope, "worktree", "fail", f"{lane} is missing.")]
     results = [_check(scope, "worktree", "pass", str(lane))]
-    live = [
-        item
-        for item in _processes(lane)
-        if "AGENT_PARLEY_TOKEN" in item["env"]
-        and _bound_url(item["arguments"]) is not None
-    ]
+    live = [item for item in _processes(lane) if _client(item["arguments"])]
     if not live:
         return results + [
             _check(scope, "process", "warn", "No running lane client found.")
         ]
     for item in live:
         label = f"pid {item['pid']}"
-        url = _bound_url(item["arguments"])
+        results.append(
+            _check(scope, f"{label} process", "pass", "Native client found.")
+        )
+        results.append(
+            _check(
+                scope,
+                f"{label} service token environment",
+                "pass" if "AGENT_PARLEY_TOKEN" in item["env"] else "unknown",
+                "Variable name present; authentication was not exercised."
+                if "AGENT_PARLEY_TOKEN" in item["env"]
+                else "No observable token variable; binding remains separate.",
+            )
+        )
+        binding, url, detail = _binding(item)
         if url is None:
             results.append(
                 _check(
-                    scope, f"{label} mcp url", "unknown", "Not in arguments."
+                    scope,
+                    f"{label} mcp url",
+                    "fail" if binding == "absent" else "unknown",
+                    detail,
                 )
             )
         else:
-            parsed = urlparse(url)
-            loopback = parsed.hostname == "127.0.0.1"
-            state = "pass" if loopback and parsed.port == port else "fail"
+            try:
+                parsed = urlparse(url)
+                observed_port = parsed.port
+                loopback = parsed.hostname == "127.0.0.1"
+                state = "pass" if loopback and observed_port == port else "fail"
+                detail = (
+                    f"{parsed.hostname}:{observed_port}, "
+                    f"expected 127.0.0.1:{port}"
+                )
+            except ValueError:
+                state, detail = "fail", "Invalid native MCP URL."
             results.append(
                 _check(
                     scope,
                     f"{label} mcp url",
                     state,
-                    f"{parsed.hostname}:{parsed.port}, "
-                    f"expected 127.0.0.1:{port}",
+                    detail,
                 )
             )
         bound = item["env"].get("AGENT_PARLEY_HOME")
+        home_state = "pass" if bound == str(home) else "fail"
+        if bound is None:
+            home_state = "unknown"
         results.append(
             _check(
                 scope,
                 f"{label} state home",
-                "pass" if bound == str(home) else "fail",
-                f"bound to {bound}",
+                home_state,
+                f"bound to {bound}" if bound else "State home not observable.",
             )
         )
         missing = [key for key in expected if key not in item["env"]]

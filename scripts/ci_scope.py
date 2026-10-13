@@ -33,6 +33,7 @@ FULL = "full"
 LIGHT = "light"
 VERSION_LINE = re.compile(r'(__version__|version) = "[^"]*"')
 WSL_PATHS = (
+    ".claude/",
     "agent_parley/",
     "tests/test_wsl.py",
     "pyproject.toml",

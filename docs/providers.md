@@ -149,6 +149,25 @@ sessions use.
 
 ### Run a second account of the same provider
 
+For Copilot, inspect profiles first with `agent-parley credentials list --json`.
+An existing profile with a separate absolute configuration home can be selected
+with `agent-parley run copilot --repo /path/to/repo --credentials PROFILE`.
+Keep `--repo` and its path on the same command line, or use an explicit shell
+continuation. A profile records isolation metadata, not proof of authentication.
+
+If no suitable profile exists, the operator can explicitly authorize this setup:
+
+```sh
+agent-parley credentials add copilot-lane --config-home "$HOME/.copilot-parley"
+COPILOT_HOME="$HOME/.copilot-parley" copilot login
+agent-parley run copilot --repo /path/to/repo --credentials copilot-lane
+```
+
+Choose a new private directory if that path is already used by another account.
+Do not point it at the default `.copilot` directory or copy authentication files.
+The native login is interactive and may require OAuth consent; defining a
+profile does not perform it. No additional permission flags are needed here.
+
 Define the profile, sign in to it once with the native CLI, then launch a new
 participant that names both the provider and the profile:
 
@@ -241,8 +260,68 @@ reveals the native preset again.
 configuration directory, selected with `OPENCODE_CONFIG_DIR`, that adds the MCP
 server under `mcp` and one plugin under `plugin/` that runs the checkpoint hook
 command for each supported plugin event. The launch path is verified against a
-stub executable and the exact hook command; a live OpenCode session has not been
-exercised, see [Operations](operations.md#other-agent-clis).
+stub executable and the exact hook command. Executable Node contract tests cover
+context insertion, isolation between sessions and duplicate lifecycle events.
+These tests do not verify a live model response, see
+[Operations](operations.md#other-agent-clis).
+
+OpenCode's `chat.message` hook receives persisted `Part` objects, unlike the
+input parts accepted by its session prompt API. Injected text therefore carries
+its own `prt_` ID and the owning session and message IDs. The installed local
+OpenCode 1.18.34 contract and embedded save path confirm that validation happens
+after this hook without regenerating those IDs. An incomplete text part
+reproduces the contract violation; this alone does not prove that a particular
+unanswered mailbox message failed for that reason.
+
+The plugin accepts both `session.status` idle and legacy `session.idle`, with
+one continuation per observed idle period. A busy status or a new message/tool
+boundary starts a new period. A failed continuation is reported without an
+automatic retry; a reconnect event alone neither resends mail nor proves its
+acceptance. Context held by the plugin remains in memory until a supported
+message or tool-result boundary consumes it in older installations. New
+launches use a lane-private context journal outside the replaceable overlay.
+The helper atomically records `held` context before attaching it and records
+`attempted` before modifying native output. Reloading the plugin recovers only
+held entries of the same native session and configuration generation.
+Interrupted attempts, tool output without a receipt, session deletion and a
+new configuration generation retain `uncertain` evidence without automatic
+replay. A matching `message.part.updated` is only `part_update_observed`;
+it does not prove a committed native transaction, model acceptance or task
+completion. The journal preserves only Parley context and correlation IDs,
+never native prompts or tool responses. Its 512-entry/4-MiB bound and storage
+failures stop new attachments rather than silently trimming evidence.
+
+The checkpoint transport receipt can precede journaling, and a native commit
+can follow an attachment attempt. These cross-process windows remain
+uncertain: there is no transaction joining the store, the journal and native
+persistence. Mailbox bodies remain recoverable, but a formerly read message
+like 59 is not retrospectively replayed by installing this helper.
+
+`wiring` identifies the native client independently of whether its arguments
+contain an MCP URL. For file-based adapters it reads the lane's selected native
+configuration and reports binding evidence separately. An unreadable or
+unobservable binding is `unknown`; an inspected configuration without an
+enabled `agent_parley` server is absent. A consistent URL and a living process
+do not verify MCP connectivity or a model acknowledgement. Reports omit tokens,
+authorization headers and URL credentials.
+
+The Gemini overlay uses `httpUrl`; its binding reader follows that actual
+configuration shape. `plugins status --json` covers every existing adapter
+while distinguishing marketplace plugins from launch overlays. It reports
+installation observations and lifecycle gaps, never runtime activation.
+Native listing probes have a five-second timeout. `plugins install --preview
+--json` describes the existing install/refresh commands without executing
+them or changing native permissions.
+
+Prepared launches write a sanitized receipt containing hook IDs, explicit
+skill IDs, protocol and a digest of that public declaration, never native
+configuration or credentials. Its launch generation is stored with activity.
+The Agents tab associates configuration with that exact generation; a receipt
+does not prove that spawn or loading succeeded. A correlated recent native
+hook observation is labelled separately from historical evidence. Shipped
+skills, a protocol prompt and installed plugin records do not prove that the
+model loaded or acted on a skill. Copilot still requires a private credential
+profile; Amp still cannot meet the required start/idle guards.
 
 ## Amp
 

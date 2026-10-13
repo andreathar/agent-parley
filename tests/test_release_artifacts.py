@@ -87,7 +87,15 @@ def test_release_without_the_codex_archive_fails(release_bundle):
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
 def test_package_description_shows_the_video_as_a_still_frame(tmp_path):
     subprocess.run(
-        ["uv", "build", "--wheel", "--quiet", "--out-dir", str(tmp_path)],
+        [
+            "uv",
+            "build",
+            "--offline",
+            "--wheel",
+            "--quiet",
+            "--out-dir",
+            str(tmp_path),
+        ],
         cwd=ROOT,
         check=True,
     )
@@ -101,9 +109,12 @@ def test_package_description_shows_the_video_as_a_still_frame(tmp_path):
     readme = (ROOT / "README.md").read_text()
     assert "https://github.com/user-attachments/" in readme
     assert "user-attachments" not in description
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    repository = project["urls"]["Repository"].rstrip("/")
+    slug = repository.removeprefix("https://github.com/")
     assert re.search(
-        r'<a href="https://github\.com/suneel944/agent-parley#readme">'
-        r'<img src="https://cdn\.jsdelivr\.net/gh/suneel944/agent-parley@v[\d.]+'
+        rf'<a href="{re.escape(repository)}#readme">'
+        rf'<img src="https://cdn\.jsdelivr\.net/gh/{re.escape(slug)}@v[\d.]+'
         r'/docs/assets/launch\.webp"',
         description,
     )

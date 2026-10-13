@@ -22,6 +22,49 @@ from agent_parley.core import BridgeCore
 if TYPE_CHECKING:
     from agent_parley.cli import Bridge
 
+
+def launch_receipt(
+    directory: Path,
+    participant: str,
+    adapter: str,
+    hooks: dict,
+    session: str | None,
+) -> dict:
+    """Records the hook declarations actually prepared by this adapter.
+
+    No command, credential, environment value or native configuration is
+    copied into the receipt. Prepared declarations do not prove a successful
+    spawn, runtime loading or task acceptance.
+
+    Args:
+        directory: Existing private project state directory.
+        participant: Stable participant ID.
+        adapter: Native adapter that prepared the command.
+        hooks: Shared hook definitions used by the launch.
+        session: Existing native session ID during an explicit resume.
+
+    Returns:
+        Sanitized declaration with a new launch generation.
+    """
+    from agent_parley import adapter_evidence, amp, gemini, opencode, roster
+    from agent_parley.cli import COPILOT_EVENTS
+
+    supported = {
+        "gemini": set(gemini.EVENTS.values()),
+        "opencode": set(opencode.EVENTS.values()),
+        "amp": set(amp.EVENTS.values()),
+        "copilot": set(COPILOT_EVENTS),
+    }.get(adapter, set(roster.HOOK_EVENTS))
+    return adapter_evidence.record_launch(
+        directory,
+        participant,
+        adapter,
+        configured_hooks=[event for event in hooks if event in supported],
+        configured_skills=[],
+        session_generation=session,
+    )
+
+
 ISSUE_BUDGET = 6000
 ISSUE_COMMENTS = 3
 ISSUE_COMMENT_BYTES = 600
@@ -713,10 +756,13 @@ reported.
                         "a lane needs a credential profile that gives it one "
                         "of its own. Without that, this lane's hooks would "
                         "run in every session started from your own "
-                        "configuration directory. Define a profile with "
+                        "configuration directory. Inspect existing profiles "
+                        "with `agent-parley credentials list --json` first. "
+                        "If none has an isolated config home, define one with "
                         "`agent-parley credentials add NAME --config-home "
                         "DIR`, sign in to it once, and launch with "
-                        "--credentials NAME."
+                        "--credentials NAME.",
+                        next_command="agent-parley credentials list --json",
                     )
                 configure_copilot(
                     Path(config_home),
@@ -823,6 +869,15 @@ reported.
                     else:
                         command[1:1] = ["--resume", session]
                 previous.update(
+                    launch_generation=launch_receipt(
+                        lane.parent,
+                        agent,
+                        entry["adapter"],
+                        hooks,
+                        previous["resumable_session"]
+                        if resume and not rotating
+                        else None,
+                    )["generation"],
                     activity=supervision.STARTING,
                     launcher_managed=True,
                     task=task,

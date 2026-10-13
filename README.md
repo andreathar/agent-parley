@@ -66,6 +66,12 @@ https://github.com/user-attachments/assets/1de399fc-4078-49da-a4f9-116789bccb7d
 
 ## See it
 
+The loopback operator console includes an Agents tab for availability, tasks,
+hook/skill evidence and audited display-name/function preferences. The same
+reading and preview-first configuration are available through `agents list`,
+`agents status` and `agents configure`; see
+[commands](https://github.com/andreathar/agent-parley/blob/main/docs/commands.md).
+
 Every terminal frame in the launch video at the top is captured command output
 from the shipped coordination path; only the native client is a stand-in, so
 no model runs. It is re-cut with

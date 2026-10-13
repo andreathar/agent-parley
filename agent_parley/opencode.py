@@ -9,14 +9,25 @@ that runs the configured hook command for each supported native event.
 
 The service marks coordination text delivered on every event, but only
 ``chat.message`` and ``tool.execute.after`` can carry text into the session.
-The plugin therefore holds context returned to any other event and adds it,
-per session, to the next message or tool result.
+The plugin therefore journals returned Parley context outside its replaceable
+configuration overlay. Only held context in the same native session and
+configuration generation can reach the next message or tool result. An attempt
+is durable before native output changes, and interrupted attempts are retained
+as uncertain rather than replayed. A correlated native part update is an
+observation, not a task acknowledgement or a guarantee of storage commit.
+
+The checkpoint and journal are separate transactions. A failure after the
+service returns context but before the private hold is durable remains a
+delivery uncertainty in the service history; this journal cannot recover
+context that never reached it.
 """
 
 import json
 import os
 import shlex
 import shutil
+import sys
+import uuid
 from pathlib import Path
 
 from agent_parley import protocol
@@ -32,8 +43,10 @@ EVENTS = {
 }
 CONFIG = "opencode.json"
 PLUGIN = """import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 const COMMAND = __COMMAND__;
+const JOURNAL_COMMAND = __JOURNAL_COMMAND__;
 
 function decide(payload) {
   const result = spawnSync(COMMAND[0], COMMAND.slice(1), {
@@ -55,7 +68,30 @@ function decide(payload) {
 }
 
 export const AgentParley = async ({ client, directory }) => {
-  const pending = new Map();
+  const instance = randomUUID();
+  const journal = (operation, fields) => {
+    const result = spawnSync(JOURNAL_COMMAND[0], JOURNAL_COMMAND.slice(1), {
+      input: JSON.stringify({ operation, instance, ...fields }),
+      encoding: "utf8",
+      timeout: 3000,
+    });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || "Agent Parley context journal failed; "
+        + "no native output or automatic replay is authorized.");
+    }
+    try {
+      return JSON.parse(result.stdout);
+    } catch {
+      throw new Error("Agent Parley context journal returned invalid evidence; "
+        + "no native output or automatic replay is authorized.");
+    }
+  };
+  const recovered = journal("recover", {});
+  const receiptKeys = new Set(
+    recovered.receipt_keys.map((key) => JSON.stringify(key))
+  );
+  const idle = new Set();
+  const started = new Set();
   const payload = (name, sessionID, fields) => ({
     hook_event_name: name,
     session_id: sessionID,
@@ -64,41 +100,88 @@ export const AgentParley = async ({ client, directory }) => {
   });
   const hold = (sessionID, reply) => {
     if (reply.context) {
-      const held = pending.get(sessionID) || [];
-      pending.set(sessionID, [...held, reply.context]);
+      journal("hold", { session_id: sessionID, context: reply.context });
     }
     return reply;
   };
-  const take = (sessionID) => {
-    const held = pending.get(sessionID) || [];
-    pending.delete(sessionID);
-    return held.join("\\n\\n");
-  };
   return {
     event: async ({ event }) => {
-      if (event.type === "session.created") {
+      if (event.type === "message.part.updated") {
+        const part = event.properties.part;
+        const key = JSON.stringify([
+          part?.sessionID, part?.messageID, part?.id,
+        ]);
+        if (receiptKeys.has(key)) {
+          const result = journal("receipt", {
+            session_id: part.sessionID,
+            message_id: part.messageID,
+            native_part_id: part.id,
+          });
+          if (result.confirmed) receiptKeys.delete(key);
+        }
+      } else if (event.type === "session.created") {
         const id = event.properties.info.id;
-        hold(id, decide(payload("session.created", id, {})));
-      } else if (event.type === "session.idle") {
+        if (!started.has(id)) {
+          started.add(id);
+          hold(id, decide(payload("session.created", id, {})));
+        }
+      } else if (event.type === "session.deleted") {
+        const id = event.properties.info.id;
+        journal("close", { session_id: id });
+        idle.delete(id);
+        started.delete(id);
+      } else if (event.type === "session.status"
+          && event.properties.status.type !== "idle") {
+        idle.delete(event.properties.sessionID);
+      } else if (event.type === "session.idle"
+          || (event.type === "session.status"
+            && event.properties.status.type === "idle")) {
         const id = event.properties.sessionID;
+        if (idle.has(id)) return;
+        idle.add(id);
         const reply = hold(id, decide(payload("session.idle", id, {})));
         if (reply.decision === "block" && reply.reason) {
-          await client.session.prompt({
+          const result = await client.session.prompt({
             path: { id },
             body: { parts: [{ type: "text", text: reply.reason }] },
           });
+          if (result?.error) {
+            throw new Error("Agent Parley continuation was not accepted; "
+              + "check OpenCode session status. No automatic retry.");
+          }
         }
       }
     },
     "chat.message": async (input, output) => {
       const id = input.sessionID;
+      idle.delete(id);
       hold(id, decide(payload("chat.message", id, {})));
-      const context = take(id);
+      const message = output.message;
+      if (!message?.id || message.sessionID !== id) {
+        throw new Error("Agent Parley needs a matching OpenCode UserMessage "
+          + "with id and sessionID; context remains pending.");
+      }
+      const partID = "prt_" + randomUUID().replaceAll("-", "");
+      const { context } = journal("attempt", {
+        session_id: id,
+        message_id: message.id,
+        native_part_id: partID,
+        channel: "chat",
+      });
       if (context) {
-        output.parts.push({ type: "text", text: context });
+        receiptKeys.add(JSON.stringify([id, message.id, partID]));
+        output.parts.push({
+          id: partID,
+          sessionID: id,
+          messageID: message.id,
+          type: "text",
+          text: context,
+          synthetic: true,
+        });
       }
     },
     "tool.execute.before": async (input, output) => {
+      idle.delete(input.sessionID);
       const reply = hold(
         input.sessionID,
         decide(
@@ -122,7 +205,10 @@ export const AgentParley = async ({ client, directory }) => {
           }),
         ),
       );
-      const context = take(input.sessionID);
+      const { context } = journal("attempt", {
+        session_id: input.sessionID,
+        channel: "tool",
+      });
       if (context) {
         output.output = [output.output, context]
           .filter((part) => part)
@@ -156,6 +242,10 @@ def configure(
 
     The lane's MCP server is added under ``mcp`` and one plugin file is
     written that runs the shared hook command for each event in ``EVENTS``.
+    A fixed-argv private helper journals Parley context beside this overlay,
+    so rebuilding the overlay never deletes that evidence. Each configuration
+    receives a new generation; held context from an earlier generation is
+    retained as uncertain, without migrating it into a new launch.
     Every other key of the user's ``opencode.json`` is carried unchanged, the
     source directory is never written, and OpenCode's own authentication
     store outside the configuration directory stays in effect.
@@ -177,9 +267,8 @@ def configure(
     """
     source = Path(
         source_dir
-        or os.environ.get(
-            "OPENCODE_CONFIG_DIR", str(Path.home() / ".config" / "opencode")
-        )
+        or os.environ.get("OPENCODE_CONFIG_DIR")
+        or (Path.home() / ".config" / "opencode")
     )
     if (source / "opencode.jsonc").exists() and not (source / CONFIG).exists():
         raise BridgeError(
@@ -217,7 +306,20 @@ def configure(
     write_json(overlay / CONFIG, settings)
     write_text(
         overlay / "plugin" / "agent-parley.js",
-        PLUGIN.replace("__COMMAND__", json.dumps(command)),
+        PLUGIN.replace("__COMMAND__", json.dumps(command)).replace(
+            "__JOURNAL_COMMAND__",
+            json.dumps(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_parley.opencode_context",
+                    str(
+                        (directory / f"{name}-opencode-context.json").resolve()
+                    ),
+                    uuid.uuid4().hex,
+                ]
+            ),
+        ),
     )
     return overlay
 

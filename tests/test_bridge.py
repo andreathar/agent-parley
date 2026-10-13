@@ -2433,7 +2433,7 @@ def test_many_accounts_of_one_provider_run_side_by_side(
 
 
 def test_a_copilot_lane_configures_only_its_own_client_home(
-    bridge, repo, monkeypatch, tmp_path
+    bridge, repo, monkeypatch, tmp_path, capsys
 ):
     """Exercises the file-configured adapter without a model call."""
     binary = tmp_path / "bin"
@@ -2455,8 +2455,23 @@ def test_a_copilot_lane_configures_only_its_own_client_home(
     with pytest.raises(BridgeError, match="credential profile") as refusal:
         bridge.launch("solo", repo, "Work on issue 42", "copilot")
 
+    assert refusal.value.next_command == (
+        "agent-parley credentials list --json"
+    )
+    inspection = shlex.split(refusal.value.next_command)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [inspection[0], "--home", str(bridge.home), *inspection[1:]],
+    )
+    assert main() == 0
+    assert json.loads(capsys.readouterr().out)["credentials"] == []
     account = tmp_path / "copilot-account"
-    suggested = shlex.split(str(refusal.value).split("`")[1])
+    suggested = next(
+        shlex.split(command)
+        for command in re.findall(r"`([^`]+)`", str(refusal.value))
+        if command.startswith("agent-parley credentials add ")
+    )
     placeholders = {"NAME": "work", "DIR": str(account)}
     monkeypatch.setattr(
         sys,

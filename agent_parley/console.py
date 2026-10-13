@@ -1,9 +1,8 @@
 """Serves a loopback operator console over the existing command surface.
 
-Every mutation is dispatched through the same command-line entry point an
-operator would type, so lane guards, refusals, deadlines and audit records
-apply unchanged. The console adds no authority of its own: it cannot reach a
-command that is absent from its allowlist, and it never edits state directly.
+Command mutations use the command-line entry point. Agent presentation settings
+use the same validated, audited service as the CLI. The console adds no
+authority of its own and never edits state directly.
 
 The listener binds the loopback interface only and answers nothing before a
 caller presents the state home's bearer token. That token is readable only by
@@ -24,6 +23,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from agent_parley import agents
 from agent_parley.state import BridgeError
 
 COOKIE = "parley_console"
@@ -517,6 +517,23 @@ class Console(BaseHTTPRequestHandler):
         if self.path == "/api/snapshot":
             self._send(200, snapshot(self.home))
             return
+        if self.path in {"/api/agents", "/api/agents/configure"}:
+            try:
+                result = (
+                    agents.inventory(self.home)
+                    if self.path == "/api/agents"
+                    else configure_agent(self.home, payload)
+                )
+            except BridgeError as error:
+                code = (
+                    409
+                    if str(error).startswith("Configuration changed;")
+                    else 400
+                )
+                self._send(code, {"error": str(error)})
+                return
+            self._send(200, result)
+            return
         if self.path == "/api/action":
             action = payload.get("action")
             params = payload.get("params")
@@ -531,6 +548,54 @@ class Console(BaseHTTPRequestHandler):
             self._send(200, {"action": action, **run(self.home, argv)})
             return
         self._send(404, {"error": "Unknown route."})
+
+
+def configure_agent(home: Path, payload: dict) -> dict:
+    """Validates the HTTP envelope and shares the CLI configuration service.
+
+    Args:
+        home: Private coordination state root.
+        payload: Repository, stable participant ID and presentation changes.
+
+    Returns:
+        A preview or the audited result of applying the preview revision.
+
+    Raises:
+        BridgeError: If the envelope or shared configuration contract fails.
+    """
+    allowed = {
+        "repo",
+        "participant",
+        "display_name",
+        "role",
+        "preview",
+        "expected_revision",
+    }
+    if payload.keys() - allowed:
+        raise BridgeError("Unknown agent configuration fields.")
+    for field in ("repo", "participant", "display_name"):
+        if not isinstance(payload.get(field), str):
+            raise BridgeError(f"Agent {field} must be a string.")
+    role = payload.get("role")
+    if role is not None and not isinstance(role, str):
+        raise BridgeError("Agent role must be a catalog ID.")
+    preview = payload.get("preview", True)
+    if not isinstance(preview, bool):
+        raise BridgeError("Agent preview must be true or false.")
+    revision = payload.get("expected_revision")
+    if revision is not None and not isinstance(revision, str):
+        raise BridgeError("Agent expected_revision must be a string.")
+    if not preview and not revision:
+        raise BridgeError("Preview the configuration before applying it.")
+    return agents.configure(
+        home,
+        Path(payload["repo"]),
+        payload["participant"],
+        payload["display_name"],
+        role=role,
+        preview=preview,
+        expected_revision=revision,
+    )
 
 
 def catalog() -> list[dict]:
@@ -678,6 +743,14 @@ button {
 }
 button.ghost { background: #222a35; color: #d7dde6; }
 button:hover { filter: brightness(1.12); }
+button:disabled { opacity: .55; cursor: wait; }
+nav { display: flex; gap: 8px; }
+nav button[aria-selected="true"] { background: #1f6feb; }
+.agent-heading { display: flex; gap: 12px; align-items: center; }
+.agent-heading h3 { flex: 1; margin: 0; }
+.scroll { overflow-x: auto; }
+.agent-evidence { margin-top: 12px; }
+.agent-evidence summary { cursor: pointer; }
 input, select {
   background: #0e1116; color: #d7dde6; border: 1px solid #2a3340;
   border-radius: 6px; padding: 7px 9px; font: inherit; width: 100%;
@@ -727,6 +800,12 @@ pre {
     </article>
   </section>
   <section id="app" class="stack" hidden>
+    <nav aria-label="Console sections">
+      <button class="ghost" id="dashboardtab"
+          aria-selected="true">Dashboard</button>
+      <button class="ghost" id="agentstab" aria-selected="false">Agents</button>
+    </nav>
+    <section id="dashboard" class="stack">
     <div class="grid">
       <article><h2>Service</h2><div id="service"></div></article>
       <article><h2>Projects and lanes</h2><div id="lanes"></div></article>
@@ -734,16 +813,60 @@ pre {
     </div>
     <article><h2>Operator actions</h2><div id="actions"></div></article>
     <article><h2>Output</h2><pre id="output">Ready.</pre></article>
+    </section>
+    <section id="agentsview" class="stack" hidden>
+      <article>
+        <h2>Agents</h2>
+        <p>Routing IDs and session generations remain distinct from display
+          names. Availability is observed evidence; a running owner or an
+          installed file alone does not prove an agent connection.</p>
+        <p class="muted">Message dispatch, explicit ACK and completion are
+          separate. ACK records explicit review, not acceptance of a task.
+          Zero pending ACKs never prove success. Tasks and messages below
+          retain their reported states.</p>
+        <p class="err" id="agenterr" role="status"></p>
+        <p id="agentstamp" class="muted"></p>
+      </article>
+      <div id="agentlist" class="stack"></div>
+      <article id="agenteditor" hidden>
+        <h2>Agent presentation settings</h2>
+        <div id="agentidentity"></div>
+        <p class="muted">The selected function is a presentation preference from
+          the existing role catalog. It does not change operational grants,
+          native permissions, hooks or skills.</p>
+        <label for="agentname">Display name</label>
+        <input id="agentname" maxlength="80" autocomplete="off">
+        <label for="agentrole">Function preference (presentation only)</label>
+        <select id="agentrole"></select>
+        <p class="err" id="agentediterr" role="status"></p>
+        <pre id="agentpreview" hidden></pre>
+        <p class="row">
+          <button id="agentpreviewbutton">Preview changes</button>
+          <button id="agentapply" hidden>Apply preview</button>
+          <button class="ghost" id="agentback" hidden>Back to edit</button>
+          <button class="ghost" id="agentcancel">Cancel</button>
+        </p>
+      </article>
+    </section>
   </section>
 </main>
 <script>
 var csrf = "";
 var actions = [];
+var activeTab = "dashboard";
+var agentRows = [];
+var agentRead = 0;
+var snapshotRead = 0;
+var editorEpoch = 0;
+var agentEdit = null;
+var agentBusy = false;
+var agentApplying = false;
 var el = function (id) { return document.getElementById(id); };
 
 function esc(value) {
   return String(value === undefined || value === null ? "" : value)
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 function api(path, body) {
@@ -776,13 +899,331 @@ function signIn() {
 }
 
 function signOut() {
+  cancelAgentEdit();
+  agentRead += 1;
+  snapshotRead += 1;
   api("/api/logout", {}).then(function () { location.reload(); });
 }
 
 function refresh() {
+  if (activeTab === "agents") { refreshAgents(); return; }
+  var read = ++snapshotRead;
   api("/api/snapshot", {}).then(function (res) {
+    if (read !== snapshotRead || activeTab !== "dashboard") { return; }
     if (!res.ok) { show(res.data.error || "Refused."); return; }
     draw(res.data);
+  }).catch(function () {
+    if (read === snapshotRead && activeTab === "dashboard") {
+      show("Unable to refresh. Check the console connection.");
+    }
+  });
+}
+
+function selectTab(name) {
+  if (agentApplying) { return; }
+  activeTab = name;
+  agentRead += 1;
+  snapshotRead += 1;
+  el("dashboard").hidden = name !== "dashboard";
+  el("agentsview").hidden = name !== "agents";
+  el("dashboardtab").setAttribute("aria-selected", name === "dashboard");
+  el("agentstab").setAttribute("aria-selected", name === "agents");
+  if (name !== "agents") { cancelAgentEdit(); }
+  refresh();
+}
+
+function observed(value) {
+  if (value === true) { return "yes"; }
+  if (value === false) { return "no"; }
+  return "unknown";
+}
+
+function details(value) {
+  return typeof value === "object" && value !== null
+    ? JSON.stringify(value) : String(value === undefined ? "unknown" : value);
+}
+
+function observedAt(value) {
+  return typeof value === "number" ? new Date(value * 1000).toISOString()
+    : (value || "unknown");
+}
+
+function evidenceRows(items) {
+  if (!items || !items.length) {
+    return "<p class='muted'>No recorded inventory.</p>";
+  }
+  var html = "<div class='scroll'><table><tr><th>ID</th>"
+    + "<th>Supported</th><th>Available</th><th>Configured</th>"
+    + "<th>Detected</th><th>Verified</th><th>Evidence</th>"
+    + "<th>Source / path</th></tr>";
+  items.forEach(function (item) {
+    html += "<tr><td>" + esc(item.id || item.name || item.path) + "</td><td>"
+      + esc(observed(item.supported)) + "</td><td>"
+      + esc(observed(item.available))
+      + "</td><td>" + esc(observed(item.configured)) + "</td><td>"
+      + esc(observed(item.detected)) + "</td><td>"
+      + esc(observed(item.verified)) + "</td><td>"
+      + esc(details(item.evidence || "unknown")) + "</td><td>"
+      + esc([item.source, item.path].filter(Boolean).join(" / ")
+        || "unknown") + "</td></tr>";
+  });
+  return html + "</table></div>";
+}
+
+function taskRows(items) {
+  if (!items || !items.length) {
+    return "<p class='muted'>No recorded tasks or messages.</p>";
+  }
+  return "<div class='scroll'><table><tr><th>ID</th><th>State</th>"
+    + "<th>Task state</th><th>Details</th></tr>"
+    + items.map(function (item) {
+      var record = typeof item === "object" ? item : { detail: item };
+      return "<tr><td>" + esc(record.message_id || record.id || record.audit_id
+        || record.issue || record.claim_id || "unknown") + "</td><td>"
+        + esc(record.status || record.state || record.action || "unknown")
+        + "</td><td>" + esc(record.task_state || "unknown")
+        + "</td><td><details><summary>"
+        + esc(record.subject || record.title || record.detail
+          || record.kind || "Recorded evidence")
+        + "</summary><pre>" + esc(details(record))
+        + "</pre></details></td></tr>";
+    }).join("") + "</table></div>";
+}
+
+function refreshAgents() {
+  var read = ++agentRead;
+  api("/api/agents", {}).then(function (res) {
+    if (read !== agentRead || activeTab !== "agents") { return; }
+    if (!res.ok) {
+      el("agenterr").textContent = res.data.error || "Inventory refused.";
+      return;
+    }
+    drawAgents(res.data);
+  }).catch(function () {
+    if (read === agentRead && activeTab === "agents") {
+      el("agenterr").textContent =
+        "Unable to read agents. Refresh after checking the connection.";
+    }
+  });
+}
+
+function drawAgents(inventory) {
+  agentRows = [];
+  el("agenterr").textContent = (inventory.warnings || [])
+    .map(details).join("; ");
+  el("agentstamp").textContent = "Observed: "
+    + observedAt(inventory.generated_at);
+  var html = "";
+  (inventory.projects || []).forEach(function (project) {
+    html += "<h3>" + esc(project.root) + "</h3>";
+    (project.agents || []).forEach(function (agent) {
+      var index = agentRows.length;
+      agentRows.push({ agent: agent, project: project });
+      var availability = agent.availability || {};
+      html += "<article><div class='agent-heading'><h3>"
+        + esc(agent.display_name || agent.participant)
+        + "</h3><button class='ghost'"
+        + " data-agent='" + index + "'>Configure</button></div>";
+      html += table([
+        ["Routing ID", agent.participant || agent.id],
+        ["Platform", (agent.capabilities || {}).adapter],
+        ["Configured", observed(agent.configured)],
+        ["Executable detected", observed(agent.executable_detected)],
+        ["Paused / retired", observed(agent.paused) + " / "
+          + observed(agent.retired)],
+        ["Session generation", agent.session_generation || "unknown"],
+        ["Availability", availability.state || "unknown"],
+        ["Transport connected", observed(availability.transport_connected)],
+        ["Freshness", availability.freshness || "unknown"],
+        ["Last observed", observedAt(availability.observed_at)],
+        ["Observation source", availability.freshness_source || "unknown"],
+        ["Stale after (seconds)", availability.stale_after_seconds],
+        ["Last recorded state", availability.recorded_state || "unknown"],
+        ["Last recorded update", observedAt(availability.recorded_updated_at)],
+        ["Function preference", agent.role || "none"],
+        ["Operational role", (agent.operational_role || {}).role || "none"],
+        ["Disabled capabilities", details(
+          (agent.operational_role || {}).disabled || [])],
+        ["Delivery mechanism", (agent.capabilities || {}).delivery],
+        ["Unavailable hooks", details(
+          (agent.capabilities || {}).unavailable_hooks || [])],
+        ["Plugin mode", (agent.plugin || {}).mode || "unknown"],
+        ["Plugin compatibility", observed((agent.plugin || {}).compatible)]
+      ]);
+      html += "<details class='agent-evidence'><summary>"
+        + "Hooks, skills and plugin evidence</summary><p class='muted'>"
+        + "Configured and detected are observations. Verified requires "
+        + "runtime evidence; no control here activates a hook or skill.</p>"
+        + "<h4>Plugin</h4>" + evidenceRows(agent.plugin ? [agent.plugin] : [])
+        + "<h4>Hooks</h4>" + evidenceRows(agent.hooks)
+        + "<h4>Skills</h4>" + evidenceRows(agent.skills)
+        + "<h4>Detected adapter files</h4>" + evidenceRows(agent.artifacts)
+        + "</details>";
+      var tasks = agent.tasks || {};
+      html += "<details class='agent-evidence'><summary>"
+        + "Tasks and message history</summary>"
+        + "<h4>Current tasks</h4>" + taskRows(tasks.current)
+        + "<h4>Coordination history</h4>" + taskRows(tasks.history)
+        + "<h4>Messages: queued / dispatched / acknowledged / terminal</h4>"
+        + taskRows(tasks.messages) + "</details>";
+      html += "<details class='agent-evidence'><summary>Configuration audit"
+        + "</summary>" + taskRows(agent.audit) + "</details></article>";
+    });
+  });
+  el("agentlist").innerHTML = html ||
+    "<article>No registered agents.</article>";
+  Array.prototype.forEach.call(
+    el("agentlist").querySelectorAll("button[data-agent]"),
+    function (button) {
+      button.onclick = function () {
+        openAgent(Number(button.getAttribute("data-agent")));
+      };
+    }
+  );
+}
+
+function setAgentBusy(value) {
+  agentBusy = value;
+  ["agentpreviewbutton", "agentapply", "agentname", "agentrole"]
+    .forEach(function (id) {
+      el(id).disabled = value;
+    });
+}
+
+function openAgent(index) {
+  if (agentBusy) { return; }
+  cancelAgentEdit();
+  var row = agentRows[index];
+  if (!row) { return; }
+  agentEdit = { repo: row.project.root,
+    participant: row.agent.participant || row.agent.id };
+  el("agentidentity").innerHTML = table([
+    ["Routing ID (immutable)", agentEdit.participant],
+    ["Repository", agentEdit.repo],
+    ["Session generation", row.agent.session_generation || "unknown"]
+  ]);
+  el("agentname").value = row.agent.display_name || agentEdit.participant;
+  el("agentrole").innerHTML = "<option value=''>No function preference</option>"
+    + (row.project.roles || []).map(function (role) {
+      return "<option value='" + esc(role.id) + "'>" + esc(role.id)
+        + (role.description ? " — " + esc(role.description) : "") + "</option>";
+    }).join("");
+  var savedRole = row.agent.role || "";
+  if (savedRole && !(row.project.roles || []).some(function (role) {
+    return role.id === savedRole;
+  })) {
+    el("agentrole").innerHTML += "<option value='" + esc(savedRole)
+      + "'>Unavailable catalog ID: " + esc(savedRole) + "</option>";
+    el("agentediterr").textContent =
+      "The saved function is absent from the catalog. Choose an existing "
+      + "function or explicitly clear the preference before previewing.";
+  }
+  el("agentrole").value = row.agent.role || "";
+  el("agenteditor").hidden = false;
+  el("agentname").focus();
+}
+
+function backAgentEdit() {
+  if (agentApplying) { return; }
+  editorEpoch += 1;
+  if (agentEdit) { delete agentEdit.preview; delete agentEdit.changes; }
+  setAgentBusy(false);
+  el("agentpreview").hidden = true;
+  el("agentapply").hidden = true;
+  el("agentback").hidden = true;
+  el("agentpreviewbutton").hidden = false;
+  el("agentediterr").textContent = "";
+}
+
+function cancelAgentEdit() {
+  if (agentApplying) { return; }
+  backAgentEdit();
+  agentEdit = null;
+  el("agenteditor").hidden = true;
+}
+
+function previewAgent() {
+  if (!agentEdit || agentBusy) { return; }
+  var name = el("agentname").value.trim();
+  if (!name || Array.from(name).length > 80
+      || /[\\x00-\\x1f\\x7f]/.test(name)) {
+    el("agentediterr").textContent =
+      "Use a display name of 1–80 characters without control characters.";
+    return;
+  }
+  var changes = { repo: agentEdit.repo, participant: agentEdit.participant,
+    display_name: name, role: el("agentrole").value, preview: true };
+  var epoch = ++editorEpoch;
+  setAgentBusy(true);
+  el("agentediterr").textContent = "";
+  api("/api/agents/configure", changes).then(function (res) {
+    if (epoch !== editorEpoch || !agentEdit) { return; }
+    setAgentBusy(false);
+    if (!res.ok) {
+      el("agentediterr").textContent = res.data.error || "Preview refused.";
+      return;
+    }
+    agentEdit.changes = changes;
+    agentEdit.preview = res.data;
+    el("agentpreview").textContent = JSON.stringify({
+      before: res.data.before, after: res.data.after,
+      changed: res.data.changed, revision: res.data.revision
+    }, null, 2);
+    el("agentpreview").hidden = false;
+    el("agentapply").hidden = false;
+    el("agentback").hidden = false;
+    el("agentpreviewbutton").hidden = true;
+    el("agentname").disabled = true;
+    el("agentrole").disabled = true;
+  }).catch(function () {
+    if (epoch === editorEpoch) {
+      setAgentBusy(false);
+      el("agentediterr").textContent =
+        "Preview failed. Retry after checking the connection.";
+    }
+  });
+}
+
+function applyAgent() {
+  if (!agentEdit || !agentEdit.preview || agentBusy) { return; }
+  var epoch = ++editorEpoch;
+  var changes = Object.assign({}, agentEdit.changes,
+    { preview: false, expected_revision: agentEdit.preview.revision });
+  agentApplying = true;
+  ["agentback", "agentcancel", "dashboardtab", "agentstab"]
+    .forEach(function (id) {
+    el(id).disabled = true;
+  });
+  setAgentBusy(true);
+  api("/api/agents/configure", changes).then(function (res) {
+    if (epoch !== editorEpoch || !agentEdit) { return; }
+    finishAgentApply();
+    setAgentBusy(false);
+    if (!res.ok) {
+      backAgentEdit();
+      el("agentediterr").textContent = res.data.error
+        || "Apply refused. Preview again.";
+      return;
+    }
+    cancelAgentEdit();
+    refreshAgents();
+  }).catch(function () {
+    if (epoch === editorEpoch) {
+      finishAgentApply();
+      backAgentEdit();
+      el("agentediterr").textContent =
+        "Apply response unavailable. Refresh inventory before making another "
+        + "preview; the change may have been recorded.";
+      refreshAgents();
+    }
+  });
+}
+
+function finishAgentApply() {
+  agentApplying = false;
+  ["agentback", "agentcancel", "dashboardtab", "agentstab"]
+    .forEach(function (id) {
+    el(id).disabled = false;
   });
 }
 
@@ -925,6 +1366,12 @@ el("enter").onclick = signIn;
 el("token").onkeydown = function (e) { if (e.key === "Enter") { signIn(); } };
 el("refresh").onclick = refresh;
 el("signout").onclick = signOut;
+el("dashboardtab").onclick = function () { selectTab("dashboard"); };
+el("agentstab").onclick = function () { selectTab("agents"); };
+el("agentpreviewbutton").onclick = previewAgent;
+el("agentapply").onclick = applyAgent;
+el("agentcancel").onclick = cancelAgentEdit;
+el("agentback").onclick = backAgentEdit;
 fetch("/api/session").then(function (r) {
   if (!r.ok) { return; }
   return r.json().then(function (d) {

@@ -8,6 +8,22 @@ listed in an explicit project policy, and never on an agent's own authority.
 
 ## Responsibilities
 
+The agent management views share one read/configuration boundary:
+
+```mermaid
+flowchart LR
+    CLI[agents CLI] --> Inventory[agents service]
+    UI[Console Agents tab] --> Inventory
+    Inventory --> Roster[Existing roster and role catalog]
+    Inventory --> Evidence[Lane state and mail evidence]
+    Inventory --> Config[Preview and revision validation]
+    Config --> Audit[Atomic manifest preferences and audit]
+```
+
+Preferences do not change routing identities or operational role grants.
+Mail evidence preserves review/expiration separately from dispatch and task
+completion; missing correlated protocol receipts remain unknown.
+
 | Module | Responsibility |
 | --- | --- |
 | `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, prints the start-here screen for a bare invocation, and hands every other invocation to `cli` unchanged |
@@ -30,7 +46,12 @@ listed in an explicit project policy, and never on an agent's own authority.
 | `preflight` | Read-only launch scope, configuration observations, native plugin records and effective supervision; never creates state or starts a client |
 | `wiring` | Read-only check that registered lanes' running clients use the service port and state home, that the service rejects tokenless requests, and that required environment variables are present; no tool call is exercised |
 | `roles` | Operator-defined role rules in the project's `roles.json` (outside every repository): capabilities, write and deny paths, shell patterns and tool globs, lane assignments and the built-in templates. The checkpoint refuses a matching `PreToolUse` call and records `role_refused`; an unreadable file refuses writes and shell calls. An operational barrier, not a sandbox |
-| `console` | Loopback operator console: token sign-in, per-session request tokens and a fixed action allowlist dispatched through the command line |
+| `console` | Loopback operator console: token sign-in, per-session request tokens, fixed CLI action allowlist and the shared agent inventory/configuration service |
+| `agents` | Read-only participant inventory joining the existing roster, roles, lane states, task history and adapter capabilities; preview/CAS updates of display names and function preferences, atomically audited in the existing manifest without changing routing or grants |
+| `agents_cli` | Command declarations and rendering for the same inventory/configuration contract used by the console |
+| `mail_evidence` | Bounded SQLite read-only message metadata; explicit ACK review, persistent expiration and cancellation, without inferring native dispatch or task completion |
+| `adapter_evidence` | Sanitized prepared-launch declarations and generation correlation, kept separate from native loading and event evidence |
+| `opencode_context` | Private bounded durable context journal: atomic holding and attempt transitions, metadata-only inventory, correlated native part observations and no automatic retry of uncertain attachments |
 | `host_resources` | Cross-project and cross-home advisory host leases in a separate private atomic registry; explicit generation-bound release with no expiry |
 | `merges` | Merge refusals, preview and the merge itself, plus the readiness, dependency and group ordering that integration follows, and the durable record of an integration the base has not verified |
 | `server` | Authenticated MCP transport and bounded tool contracts |

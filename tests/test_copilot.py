@@ -84,6 +84,31 @@ def test_every_supported_event_is_registered_in_compatible_form(lane):
     )
 
 
+def test_missing_profile_refuses_global_configuration(
+    bridge, repo, monkeypatch, tmp_path
+):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    executable = binary / "copilot"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    global_home = tmp_path / "global-copilot"
+    global_home.mkdir()
+    settings = global_home / "settings.json"
+    settings.write_text('{"operator":true}')
+    monkeypatch.setenv("COPILOT_HOME", str(global_home))
+    monkeypatch.setattr(bridge, "up", lambda: None)
+    store.initialize(bridge.home)
+    with pytest.raises(BridgeError, match="credential profile") as refused:
+        bridge.launch("copilot", repo, "Coordinate", "copilot", None)
+    assert refused.value.next_command == (
+        "agent-parley credentials list --json"
+    )
+    assert settings.read_text() == '{"operator":true}'
+    assert not (global_home / "mcp-config.json").exists()
+
+
 def test_a_native_branch_switch_is_refused_in_copilot_schema(lane):
     output = fire(
         lane,
