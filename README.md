@@ -232,7 +232,8 @@ acknowledging or marking anything for it.
 
 Mail never blocks work: it arrives as context, most relevant first. A tool call
 is refused only when it is unsafe now, such as a write to a path a peer
-reserved. Broadcasts reach only the lanes they concern, and a newer note on a
+reserved or a `git worktree add` outside the lane's `<lane>-wt/` directory.
+Broadcasts reach only the lanes they concern, and a newer note on a
 topic replaces the older one.
 
 When a lane's work is ready, integrate it from the base checkout, or send it
@@ -262,8 +263,9 @@ agent-parley gc --project ROOT --apply  # drop a gone root's project state
 
 A lane is reclaimed only when it is idle, holds no claim, has nothing
 uncommitted or unpushed, and its pull request merged or its branch is gone.
-Every kept lane is reported with the reason. A worktree no lane made is never
-touched, and uncommitted work is removed only with `--force`, after a recovery
+Every kept lane is reported with the reason. A stray worktree is moved into
+the project state directory first, never deleted by the move, and uncommitted
+work is removed only with `--force`, after a recovery
 checkpoint. A quiet lane-made worktree whose unpushed commits already landed
 through another branch is removed without `--force`, its commits bundled into
 a recovery checkpoint first.

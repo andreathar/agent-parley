@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.18.2](https://github.com/suneel944/agent-parley/compare/v0.18.1...v0.18.2) (2026-10-12)
+
+
+### Bug fixes
+
+* 0.18.2 sweep, hook and supervision fixes (#1024) ([#1015](https://github.com/suneel944/agent-parley/issues/1015)) ([#1016](https://github.com/suneel944/agent-parley/issues/1016)) ([#1017](https://github.com/suneel944/agent-parley/issues/1017)) ([#1018](https://github.com/suneel944/agent-parley/issues/1018)) ([#1019](https://github.com/suneel944/agent-parley/issues/1019)) ([#1020](https://github.com/suneel944/agent-parley/issues/1020)) ([#1021](https://github.com/suneel944/agent-parley/issues/1021)) ([#1022](https://github.com/suneel944/agent-parley/issues/1022)) ([#1023](https://github.com/suneel944/agent-parley/issues/1023))
+
+## [0.18.1](https://github.com/suneel944/agent-parley/compare/v0.18.0...v0.18.1) (2026-10-12)
+
+
+### Features
+
+* deny git worktree add outside the lane's -wt directory (#1012)
+
+### Bug fixes
+
+* relocate every unattributed stray worktree by safety (#1011)
+* relocate stray lane worktrees and survive moved paths (#1007)
+
 ## [0.18.0](https://github.com/suneel944/agent-parley/compare/v0.17.0...v0.18.0) (2026-10-05)
 
 

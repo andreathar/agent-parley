@@ -66,7 +66,7 @@ completion; missing correlated protocol receipts remain unknown.
 | `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends. Accounts are published per project in `convergence.json`; the thresholds are the supervision settings `convergence_repeats` (3 repeats of one failure by default) and `convergence_after` (14400 working seconds since the last milestone by default), and both responses are keyed mail, the escalation also notifying through `non_convergence` |
 | `roster` | Providers, credential profiles and project participants |
 | `retirement` | The withdrawal of one lane at its own request: the work it returns, the worktree it leaves only when Git reports it clean, and the durable retirement mark the supervisor and the operator views read |
-| `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees: one holding ignored files is always kept, and a quiet one whose unpushed commits already landed through another branch is bundled into a recovery checkpoint and removed without force. Also the pruning of files retired lanes no longer need and of wake logs past their retention |
+| `reclaim` | The assessment of which lane worktrees and branches, and which worktrees lanes made themselves, a project may remove, each with the one condition that decided it, and Git's refusing removal of the lane-made worktrees: one holding ignored files is always kept, and a quiet one whose unpushed commits already landed through another branch is bundled into a recovery checkpoint and removed without force. Also the move of a lane-made worktree outside its lane into the lane's `<lane>-wt` directory with `git worktree move`, the re-resolution by branch of a recorded worktree path that no longer exists, so a moved worktree is never read as gone, and the pruning of files retired lanes no longer need and of wake logs past their retention |
 | `pool` | The spare worktrees a project keeps prepared from its base with `init` already run: their record and lock in the project state directory, the fill that prepares them, the hand-out to a new lane, and the condition that marks one stale for the fill or `gc` to remove |
 | `policy` | Attribution rules shared by the lane hook, integration and the repository gate |
 | `forge` | Optional best-effort issue lookups and mirrors on the selected forge: `github` through `gh`, `beads` through `bd`, or `null`, the ready-report comment posted there, and one bounded reading of the check, review and merge state of up to `MAX_PULL_REQUESTS` (30) open pull requests on GitHub, and of the issues the newest `MAX_LANDINGS` (100) pull requests merged into the recorded integration base close by keyword |
@@ -371,7 +371,10 @@ last result. An unchanged actionable offer joins the wake backlog even after a
 checkpoint injected it. A continue offer for a lane with no claim it can move
 now only names what its claims wait on and where to look next, so once a wake
 reached the lane that generation leaves the backlog; a change to the ledger or
-to those leads publishes a new generation, delivered once. The launcher reads the revalidated wake selection from
+to those leads publishes a new generation, delivered once. A continue offer
+whose lead is queued, unowned work stays in the backlog while that lead is free
+and the lane is fit, and a rotation to a fresh native session forgets which
+offers the old session was given. The launcher reads the revalidated wake selection from
 private state after admitting the wake, so generated work context does not
 cross the wake socket. The attempt bound measures lane progress rather than
 elapsed wakes: each attempt records the lane's own progress marker, built from
@@ -430,9 +433,21 @@ is the ordinary retirement followed by Git's own merged-branch deletion, so a
 reclaimed lane leaves the state a retired lane leaves, and the lane's state
 record moves to `reclaimed`. Worktrees lanes made for themselves are read from
 `git worktree list` and attributed to a lane by path, when they sit inside a
-lane or directly inside the project state directory, or by branch; one no
-lane made, including one nested deeper under the state directory, is never
-touched, and `reclaim.remove` takes an attributed one out only through
+lane, its `<lane>-wt` directory or directly inside the project state
+directory, or by branch. Before the sweep, `reclaim.relocations` plans and
+`reclaim.relocate` performs a `git worktree move` of each lane-attributed one
+outside its lane and its `-wt` directory into `<lane>-wt/<name>`, and of every
+other one outside the lanes, spares and `-wt` directories into the project's
+`strays/<name>`, because Git records no creator; a locked one, one whose lane
+runs a session or any process works inside, and one Git refuses stay where
+they are, and one Git refused is assessed in place.
+Before any of that, `checkpoints.stray_worktree` lets the lane hook deny a
+`git worktree add` whose target resolves outside `lanes.extras`, the
+`<lane>-wt` directory, so new lane-made worktrees land where attribution by
+path finds them.
+A recorded lane path that no longer exists is re-resolved by branch through
+`reclaim.relocated`, so a moved lane is kept and reported, never retired.
+`reclaim.remove` takes a worktree out only through
 `git worktree remove`, which refuses a dirty or locked worktree. A lane-made
 worktree holding files Git ignores is always kept, because no force can
 checkpoint untracked content. A quiet lane-made worktree whose unpushed

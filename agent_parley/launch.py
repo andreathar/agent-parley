@@ -270,6 +270,7 @@ class LaunchMixin(BridgeCore):
 
     def protocol(self, agent: str, data: dict) -> str:
         """Builds coordination instructions without embedding tokens."""
+        from agent_parley import reclaim
         from agent_parley.cli import delivery, protocol, shlex
 
         participant = data["participants"][agent]
@@ -338,7 +339,10 @@ the peer depends on. When finished, send a handoff containing the exact commit
 then release your reservations. Avoid repeated empty inbox polling.
 
 Edit only your worktree. Do not reset, clean, switch, merge, or modify a peer
-worktree or the main checkout. Preserve existing work on your branch. Shared
+worktree or the main checkout. Preserve existing work on your branch. Add any
+extra worktree only as {reclaim.extras(data["lanes"][agent])}/NAME;
+the supervisor moves one made elsewhere there. Remove it with
+`git worktree remove` once its pull request merges. Shared
 ports/databases need coordination; worktrees do not isolate those resources.
 For resources shared across repositories or installations, use
 reserve_host_resources with canonical keys such as gpu:0 or port:5432.
@@ -478,7 +482,10 @@ reported.
         one, unless the supervision setting ``rotate`` is off. Every
         adapter starts a fresh session by omitting its resume argument, so
         no provider is skipped. Any launch consumes the point, and the
-        session it replaced is kept as ``rotated_from``. A detached
+        session it replaced is kept as ``rotated_from``. The rotation also
+        forgets which work offers reached the old session, through
+        `supervision.forget_delivered`, so the fresh one is told its current
+        offer again. A detached
         launcher is told the setting so it can end an idle session at a
         rotation point, which the service then resumes this way; it is
         withheld for a lane the service would not resume.
@@ -672,6 +679,8 @@ reported.
             )
             if rotating:
                 task = rotation_task(agent, data, lane.parent, seen, task)
+                with contextlib.suppress(BridgeError, OSError):
+                    supervision.forget_delivered(lane.parent, agent)
             prompt = self.protocol(agent, data)
             if shared_roots:
                 prompt += (

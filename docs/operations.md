@@ -332,6 +332,8 @@ the only compatible combination.
 <!-- compatibility:start -->
 | Launcher | Wire protocol | Store schema |
 | --- | --- | --- |
+| 0.18.2 | 1 | 12 |
+| 0.18.1 | 1 | 12 |
 | 0.18.0 | 1 | 12 |
 | 0.17.0 | 1 | 12 |
 | 0.16.0 | 1 | 12 |
@@ -514,6 +516,7 @@ condition, that count, its age and what clears it:
 | `orphaned claims` | The lane's session process is gone and the supervisor marked claims it holds orphaned, and the lane is not yet `ready to retire`. The row is derived from the ledger, so it shows whether or not a notification transport is configured. | `agent-parley issue claim N --take-orphaned` from a live peer lane; with no live lane besides the holder, start one with `agent-parley run NAME` and have it take the claim, or `agent-parley issue release N`. |
 | `ready to retire` | The lane's session process is gone, every claim it holds has been orphaned for longer than `orphan_retire_after` and no peer took it. Never shown while the lane's ready report waits on an open pull request. | `agent-parley participant retire NAME` |
 | `ready to integrate` | The lane's latest report is ready, a claim it holds has an open pull request in the cached forge reading, and the report has waited for integration longer than the default wait ceiling of 3600 seconds. It replaces `ready to retire` and `orphaned claims` for that lane, since retiring or releasing would drop the claim the pull request closes. It clears when the pull request merges or closes, or a newer report supersedes the ready one. Nothing merges on its own. | `agent-parley approve NAME` when the project requires approval and the report is not approved; otherwise review and merge the named pull request, or `agent-parley participant merge NAME`. |
+| `ready without a pull request` | A claim the lane holds has been in the ready state longer than the default wait ceiling of 3600 seconds, the project has a cached forge reading, that reading holds no open pull request for the claim, and no approval is pending. Ready work stays claimed through integration, so a claim whose pull requests all merged or closed while the issue stayed open would otherwise wait for good while the lane is told it waits on CI and review. The row names the longest-ready claim and counts the rest. | Open the claim's pull request, close the issue if its work already merged, or `agent-parley issue release N`. |
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
 | `dirty worktree` | The lane holds uncommitted work, is not active and its session process is gone, or it retired and its uncommitted work kept the worktree. | Commit or stash the named files in the named worktree; `agent-parley participant add NAME` returns a retired lane to service with that work still in place. |
 | `over budget` | The lane crossed an advisory token, call or hour limit. | `agent-parley participant budget NAME` |
@@ -2649,15 +2652,65 @@ that ends the idle session.
 Worktrees a lane made for itself, such as one per pull request, are swept in
 the same pass and published under `worktrees` in `reclaim.json`. Every
 worktree `git worktree list` reports is attributed to a lane by path, when it
-sits inside a lane's worktree, or by branch, when its branch is the lane's
+sits inside a lane's worktree or its `<lane>-wt` directory beside it, or by
+branch, when its branch is the lane's
 name or branch followed by `-` or `/`, such as `claude-pr-12`. One directly
 inside the project state directory belongs to the project, and so does one
 directly inside a project folder under the `agent-bridge` folder beside a
 state root named `agent-parley`, such as `~/.local/state/agent-bridge`, where
-lanes lived before the rename. One nested deeper, such as a worktree an
-operator adds under a directory of their own, is the operator's. A worktree
-nothing accounts for is reported with reason `no lane made it` and never
-touched, even with `--force`.
+lanes lived before the rename, and so does one in the project's `strays`
+directory. Git records no creator, so a worktree no lane accounts for is
+assessed by the same rule wherever it sits; one outside those directories
+that any process works inside is kept with reason `a session is running in
+it`. One outside the repository, the state root and the temporary
+directories (`/tmp`, `/var/tmp`, `/dev/shm` and the platform's temporary
+directory), such as a worktree a systemd unit runs from, belongs to the
+operator: it is never removed and is reported with reason `no lane made it
+and it sits outside the repository, the state directory and temporary
+directories`.
+
+The lane protocol names one place for those worktrees: `<lane>-wt/NAME`
+beside the lane in the project state directory, removed by the lane with
+`git worktree remove` once its pull request merges. Before either sweep,
+every worktree attributed to a lane that sits outside that lane and outside
+its `<lane>-wt` directory, such as one in the home directory, beside the
+repository or in `/tmp`, is moved to `<lane>-wt/<name>` with
+`git worktree move`, taking `<name>-2` and upward when the name is taken.
+Every other worktree the project repository registers outside the base
+checkout, the lanes, the spares and every `<lane>-wt` directory, that sits
+where throwaway checkouts are made, inside the repository, including
+`<repo>/.claude/worktrees/`, under the state root or in a temporary
+directory, is moved the same way to `strays/<name>` in the project state
+directory, with reason `no lane made it and it sits outside the project's
+strays directory`. One anywhere else, such as `~/.local/state/tm-arena`
+used by a systemd unit, is only reported under `relocations`, with the
+operator-owned reason above, and stays where it is. A move never deletes and never forces: uncommitted edits,
+unpushed commits and ignored files travel with the directory. A worktree
+whose directory holds another registered worktree, such as one with its own
+`.claude/worktrees/`, is reported as `another registered worktree sits
+inside it` and stays until the nested one has moved out, so the move never
+strands the nested worktree's registration. A locked worktree, one whose
+lane runs a session or any process works inside, one
+whose directory, Git index or HEAD changed within the last hour, reported as
+`it changed within the relocation grace period` because a session working
+from the base checkout edits it without entering it, and one Git refuses to
+move, such as a move across filesystems, stay in place and
+are reported; one Git refused is then assessed in place by the same rule.
+The base checkout, the lanes themselves and spares are never moved. The
+moves are published under `relocations` in `reclaim.json`; `agent-parley gc`
+lists them as `to move to` without `--apply`, performs them with it, and
+`--json` carries them as `relocations`. `reclaim.json` describes only the
+latest sweep, so the service also writes one `reclaim` line to `server.log`
+for every worktree a sweep moved, every move Git refused and every lane or
+worktree it removed. The log's rotation into `server.log.1` keeps that record
+after later sweeps find nothing left to do.
+
+A worktree moved underneath Agent Parley, by the sweep or by the operator,
+is found again by branch through `git worktree list` before anything acts
+on its recorded path. A lane whose own worktree an operator moved is never
+retired for it: the sweep keeps it with reason `its worktree moved to another
+path Git registers` and names the `git worktree move` that returns it, and
+launch and `participant restore` refuse with the same command.
 
 An attributed worktree is removed with `git worktree remove` when it is not
 locked, has no session running in its lane, has nothing uncommitted, and

@@ -2152,7 +2152,7 @@ class Bridge(
             BridgeError: If the lane is busy, dirty, missing, or holds commits
                 the assigned branch does not.
         """
-        directory, _, participant = self._lane(repo, name)
+        directory, data, participant = self._lane(repo, name)
         lane = Path(participant["lane"])
         branch = participant["branch"]
         with lock(
@@ -2160,6 +2160,10 @@ class Bridge(
             f"{name} has a running session; stop that terminal first.",
         ):
             if not lane.exists():
+                if moved := reclaim.relocated(data["root"], lane, branch):
+                    raise BridgeError(
+                        f"{name}: {reclaim.moved_remedy(lane, moved)}."
+                    )
                 raise BridgeError(
                     f"{name} has no worktree at {lane}. Retire the "
                     "participant, then add it again."
@@ -3051,13 +3055,15 @@ class Bridge(
 
         Lanes add worktrees for pull requests and sub-tasks that no lane
         root accounts for. Each one the project repository registers is
-        assessed by `reclaim.strays`, and a worktree no lane made is never
-        removed. Git's own removal refuses a dirty or locked worktree, so
-        nothing with uncommitted work is lost unless the operator forces
-        it, and a forced removal writes a recovery checkpoint first. The
-        spare worktrees a project pool keeps are assessed by `pool.sweep`
-        in the same pass: a stale spare or one beyond the pool size is
-        removed with its branch, and a usable one is kept.
+        assessed by `reclaim.strays`, whether or not a lane made it, and
+        one no lane made that a process works inside, outside the project
+        state directory, is kept. Git's own removal refuses a dirty or
+        locked worktree, so nothing with uncommitted work is lost unless
+        the operator forces it, and a forced removal writes a recovery
+        checkpoint first. The spare worktrees a project pool keeps are
+        assessed by `pool.sweep` in the same pass: a stale spare or one
+        beyond the pool size is removed with its branch, and a usable one
+        is kept.
 
         Args:
             repo: Any checkout of the target repository.
@@ -3083,6 +3089,34 @@ class Bridge(
             reclaim.remove(str(root), directory, row, force=force)
             for row in rows
         ] + spares
+
+    def relocate_worktrees(
+        self, repo: Path, *, apply: bool = False
+    ) -> list[dict]:
+        """Reports, and optionally performs, moves of stray worktrees.
+
+        A worktree a lane made outside its `<lane>-wt` directory is planned
+        into it, and one no lane accounts for into the project's `strays`
+        directory when it sits inside the repository, under the state root
+        or in a temporary directory, by `reclaim.relocations` and moved with
+        `git worktree move`, which never deletes. It runs before the
+        reclaim sweeps, so a moved worktree is attributed by path in the
+        same pass.
+
+        Args:
+            repo: Any checkout of the target repository.
+            apply: Whether the planned moves are performed.
+
+        Returns:
+            One row per planned move, as `reclaim.relocations` shapes it,
+            carrying whether Git moved it when applied.
+        """
+        _, directory = self.project(repo, create=False)
+        manifest = roster.read(directory)
+        rows = reclaim.relocations(directory, manifest)
+        if not apply:
+            return rows
+        return [reclaim.relocate(manifest["root"], row) for row in rows]
 
 
 COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -6111,6 +6145,9 @@ def main() -> int:
                     else "\n".join(supervision.forgotten_lines(forgot))
                 )
                 return 0
+            moved = bridge.relocate_worktrees(
+                args.repo.resolve(), apply=args.apply
+            )
             swept = bridge.reclaim(args.repo.resolve(), apply=args.apply)
             made = bridge.reclaim_worktrees(
                 args.repo.resolve(),
@@ -6119,9 +6156,12 @@ def main() -> int:
                 force=args.force,
             )
             print(
-                views.render("gc", {"lanes": swept, "worktrees": made})
+                views.render(
+                    "gc",
+                    {"lanes": swept, "worktrees": made, "relocations": moved},
+                )
                 if args.json
-                else "\n".join(reclaim.lines(swept + made))
+                else "\n".join(reclaim.lines(moved + swept + made))
                 or "No lane to reclaim."
             )
         elif args.command == "notify" and args.action == "setup":
