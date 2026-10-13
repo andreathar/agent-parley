@@ -1020,6 +1020,8 @@ function drawAgents(inventory) {
       var index = agentRows.length;
       agentRows.push({ agent: agent, project: project });
       var availability = agent.availability || {};
+      var mediaWorkspace = agent.workspace || {};
+      var mediaCapability = mediaWorkspace.capability || {};
       html += "<article><div class='agent-heading'><h3>"
         + esc(agent.display_name || agent.participant)
         + "</h3><button class='ghost'"
@@ -1027,6 +1029,18 @@ function drawAgents(inventory) {
       html += table([
         ["Routing ID", agent.participant || agent.id],
         ["Platform", (agent.capabilities || {}).adapter],
+        ["Workspace mode", (agent.workspace || {}).mode || "unknown"],
+        ["Workspace path", (agent.workspace || {}).lane || "unknown"],
+        ["Workspace exists", observed((agent.workspace || {}).lane_exists)],
+        ["Workspace profile matches", observed(mediaWorkspace.profile_matches)],
+        ["Canonical media", mediaWorkspace.media_root || "not configured"],
+        ["Asset catalog", (agent.workspace || {}).catalog || "not configured"],
+        ["Task outputs", mediaWorkspace.output_root || "not allocated"],
+        ["Media adapter supported", observed(mediaCapability.supported)],
+        ["Native media read verified",
+          observed(mediaCapability.native_read_verified)],
+        ["Read-only protection enforced",
+          observed(mediaCapability.readonly_enforced)],
         ["Configured", observed(agent.configured)],
         ["Executable detected", observed(agent.executable_detected)],
         ["Paused / retired", observed(agent.paused) + " / "

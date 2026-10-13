@@ -234,6 +234,24 @@ clean worktree is removed. Retirement is not
 a way to drop work you were asked to finish, and only the operator returns a
 retired lane to service.
 
+## Shared media in lightweight workspaces
+
+When the launcher supplies `AGENT_PARLEY_MEDIA_ROOT`, inputs belong to that
+canonical root, not a second copy in the lane. `AGENT_PARLEY_ASSET_CATALOG`
+points to the project's existing registry. `AGENT_PARLEY_OUTPUT_ROOT` names
+this task's derivative directory; use a new version and deliver IDs, hashes
+and provenance for producer review. Never modify canonical originals or
+publish a derivative merely because its file exists.
+
+These variables are path references, not filesystem grants or read-only
+mounts. A refused native read is a blocker to report, not a reason to copy
+the media, change permissions, trust a hook or add a writable root. Do not
+use symlinks or hardlinks as a security boundary. Existing operational roles
+and paid-submission approvals still apply. The operator can inspect the
+profile with `agent-parley workspace status --json` and distinguish a host
+read from unknown native access with `agent-parley media doctor --json`.
+Use the launcher's exact CLI prefix and its plain-command rule as above.
+
 ## Read mail and inspect evidence
 
 Use `fetch_inbox` with `unread` or `unacknowledged` to find pending mail; rows

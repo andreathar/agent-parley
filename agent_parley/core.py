@@ -498,15 +498,20 @@ class BridgeCore:
             if spare is not None:
                 lane = spare
             else:
-                git(
-                    root,
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    str(lane),
-                    data["base"],
-                )
+                from agent_parley import workspace
+
+                if workspace.profile(data):
+                    workspace.add(root, lane, branch, data["base"])
+                else:
+                    git(
+                        root,
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch,
+                        str(lane),
+                        data["base"],
+                    )
             created = time.monotonic()
             if spare is None and data.get("initialize"):
                 initialize_lane(lane, data["initialize"], root)
@@ -521,6 +526,10 @@ class BridgeCore:
                     created - started, time.monotonic() - created
                 ),
             }
+            from agent_parley import workspace
+
+            if selected := workspace.profile(data):
+                participants[name]["workspace_profile"] = selected
             try:
                 write_json(directory / "project.json", data)
             except OSError:
@@ -555,10 +564,11 @@ class BridgeCore:
             The spare's worktree, now on the lane branch, or None when the
             project keeps no pool or none of its spares is usable.
         """
-        from agent_parley import pool
+        from agent_parley import pool, workspace
         from agent_parley.cli import git
         from agent_parley.state import LockBusy
 
+        workspace.profile(data)
         if not data.get("pool"):
             return None
         try:
@@ -606,7 +616,18 @@ class BridgeCore:
         if not lane.exists():
             started = time.monotonic()
             git(root, "worktree", "prune")
-            if has_branch(root, branch):
+            from agent_parley import workspace
+
+            if selected := workspace.profile(data):
+                workspace.add(
+                    root,
+                    lane,
+                    branch,
+                    data["base"],
+                    new_branch=not has_branch(root, branch),
+                )
+                participant["workspace_profile"] = selected
+            elif has_branch(root, branch):
                 git(root, "worktree", "add", str(lane), branch)
             else:
                 git(

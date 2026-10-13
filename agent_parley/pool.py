@@ -180,9 +180,11 @@ def fill(root: Path, directory: Path, manifest: dict) -> list[dict]:
     Returns:
         The spares recorded once the fill finished.
     """
-    from agent_parley import process
+    from agent_parley import process, workspace
     from agent_parley.worktrees import initialize_lane
 
+    if workspace.profile(manifest):
+        return spares(directory)
     wanted = int(manifest.get("pool") or 0)
     with lock(directory / LOCK, timeout=LOCK_SECONDS):
         kept: list[dict] = []

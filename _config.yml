@@ -142,3 +142,9 @@ defaults:
     values:
       title: Terms of use
       description: Terms of use for the Agent Parley command line and plugin.
+  - scope:
+      path: docs/shared-media.md
+    values:
+      title: Shared media and lightweight workspaces
+      description: >-
+        Canonical media references, sparse lane preparation and per-task outputs.

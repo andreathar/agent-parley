@@ -254,6 +254,10 @@ context.api = function(path, body) {
 const inventory = { projects: [{root:'/repo', roles:[{id:'review'}], agents:[
   {participant:'opencode',display_name:'Open ' +
     'Code',role:'review',session_generation:'s1',
+   workspace:{mode:'shared-media',lane:'/lane',media_root:'/canonical/<input>',
+     catalog:'assets.csv',output_root:'/lane/outputs/job',profile_matches:true,
+     capability:{supported:true,native_read_verified:null,
+       readonly_enforced:false}},
    availability:{state:'stale',freshness:'stale',transport_connected:null,
      recorded_state:'working',freshness_source:'native_hook'},
     tasks:{messages:[{id:59,state:'queued'}]},
@@ -273,6 +277,11 @@ const preview = {ok:true,data:{revision:'r1',before:{display_name:'Open Code'},
   assert.match(elements.agentlist.innerHTML, /Transport connected/);
   assert.match(elements.agentlist.innerHTML, /Last recorded state/);
   assert.match(elements.agentlist.innerHTML, /native_hook/);
+  assert.match(elements.agentlist.innerHTML, /shared-media/);
+  assert.match(elements.agentlist.innerHTML, /canonical\/&lt;input&gt;/);
+  assert.match(elements.agentlist.innerHTML, /Native media read verified/);
+  assert.match(elements.agentlist.innerHTML, /Read-only protection enforced/);
+  assert.match(elements.agentlist.innerHTML, /lane\/outputs\/job/);
   context.openAgent(0);
   assert.equal(elements.agentname.focused,true);
   assert.equal(elements.agentname.value,'Open Code');

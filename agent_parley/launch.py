@@ -428,6 +428,7 @@ reported.
         resume: bool = False,
         issue: str = "",
         blueprint: str = "",
+        output_task: str = "",
     ) -> int:
         """Runs one participant's native CLI in its persistent lane.
 
@@ -492,6 +493,7 @@ reported.
             issue: Issue number to claim and hydrate before the first turn.
             blueprint: Recorded blueprint the claim runs through; needs
                 ``issue``.
+            output_task: Stable output task ID for a shared-media workspace.
 
         Returns:
             The native process exit code.
@@ -541,6 +543,31 @@ reported.
             )
         process.check_repository_host(repo)
         directory = self.project(repo, create=False)[1]
+        from agent_parley import checkpoints, workspace
+
+        current_manifest = (
+            roster.read(directory)
+            if (directory / "project.json").exists()
+            else {}
+        )
+        if workspace.profile(current_manifest):
+            existing = current_manifest["participants"].get(agent, {})
+            chosen_provider = provider or existing.get("provider") or agent
+            chosen_adapter = roster.provider(self.home, chosen_provider)[
+                "adapter"
+            ]
+            if not workspace.capability(chosen_adapter)["supported"]:
+                raise BridgeError(
+                    f"{chosen_adapter} cannot use shared media; "
+                    "no lane created."
+                )
+            if not output_task and number:
+                output_task = f"issue-{number}"
+            if not output_task and resume:
+                output_task = checkpoints.activity(directory, agent).get(
+                    "output_task", ""
+                )
+            roster.identifier(output_task, "output task (--output-task)")
         stopped = (
             budgets.halted(directory, roster.read(directory))
             if (directory / "project.json").exists()
@@ -565,6 +592,9 @@ reported.
             )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
+        shared_roots = workspace.launch_roots(
+            data, participant, entry["adapter"], output_task
+        )
         account = roster.launch_environment(
             self.home, entry, participant["credential"]
         )
@@ -643,6 +673,21 @@ reported.
             if rotating:
                 task = rotation_task(agent, data, lane.parent, seen, task)
             prompt = self.protocol(agent, data)
+            if shared_roots:
+                prompt += (
+                    "\nShared-media inputs: "
+                    + shared_roots["AGENT_PARLEY_MEDIA_ROOT"]
+                    + "\nAsset catalog: "
+                    + shared_roots["AGENT_PARLEY_ASSET_CATALOG"]
+                    + "\nWrite task derivatives only to: "
+                    + shared_roots["AGENT_PARLEY_OUTPUT_ROOT"]
+                    + "\nPaths do not grant access or enforce read-only media. "
+                    "If native access is refused, report it; never copy or "
+                    "modify canonical inputs to bypass the refusal."
+                )
+                Path(shared_roots["AGENT_PARLEY_OUTPUT_ROOT"]).mkdir(
+                    parents=True, exist_ok=True, mode=0o700
+                )
             hooks = self.hooks(agent, lane.parent)
             env = {
                 **os.environ,
@@ -651,6 +696,7 @@ reported.
                 "AGENT_PARLEY_HOME": str(self.home),
                 "AGENT_PARLEY_PARTICIPANT": agent,
                 "AGENT_PARLEY_PROJECT_ROOT": str(data["root"]),
+                **shared_roots,
             }
             if entry["adapter"] == "claude":
                 config = lane.parent / f"{agent}-mcp.json"
@@ -892,6 +938,11 @@ reported.
                     session_started=time.time(),
                     attached=sys.stdin.isatty(),
                 )
+                if shared_roots:
+                    previous.update(
+                        output_task=output_task,
+                        output_root=shared_roots["AGENT_PARLEY_OUTPUT_ROOT"],
+                    )
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)
                 previous.pop("rotation", None)

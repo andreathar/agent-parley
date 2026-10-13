@@ -1569,3 +1569,8 @@ instead of being treated as absent FTS5 support.
 CI covers temporary Git repositories, independent MCP clients, concurrent calls,
 authorization failures, persistence, resource budgets and isolated wheel installs.
 It does not demonstrate compliance by a paid live model session.
+
+## Lightweight workspaces and shared media
+
+See [Shared media](shared-media.md) for the opt-in profile, preview/CAS CLI,
+per-task outputs, sparse-before-LFS preparation and native access limits.

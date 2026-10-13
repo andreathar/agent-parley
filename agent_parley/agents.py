@@ -32,6 +32,7 @@ from agent_parley import (
     store,
     supervision,
     views,
+    workspace,
 )
 from agent_parley.state import BridgeError, lock, write_json
 
@@ -647,6 +648,10 @@ def _agent(
         "routing_name": entry["display"],
         "provider": entry["provider"],
         "adapter": adapter,
+        "workspace": {
+            **workspace.binding(manifest, entry, adapter),
+            "output_root": activity.get("output_root"),
+        },
         "revision": revision,
         "operational_role": (rules or {}).get("assign", {}).get(name, {}),
         "session_generation": (record or {}).get("session") or None,

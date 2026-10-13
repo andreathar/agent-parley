@@ -1196,6 +1196,11 @@ def normalize(manifest: dict) -> dict:
             else {}
         ),
         "supervision": project,
+        **{
+            key: manifest[key]
+            for key in ("workspace", "workspace_history")
+            if key in manifest
+        },
         "participants": participants,
     }
 

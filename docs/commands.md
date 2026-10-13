@@ -384,3 +384,8 @@ attachment is removed when its record is pruned or its offer is declined,
 cancelled, released, completed or resolved. A full allowance releases the
 lane's oldest message attachments that every recipient has read; `--full`
 then says the body was released and the message keeps its first slice.
+
+## Lightweight workspaces and shared media
+
+See [Shared media](shared-media.md) for the opt-in profile, preview/CAS CLI,
+per-task outputs, sparse-before-LFS preparation and native access limits.

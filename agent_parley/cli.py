@@ -3097,6 +3097,8 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "report",
             "participant",
             "agents",
+            "workspace",
+            "media",
             "approve",
             "reject",
         ),
@@ -3685,9 +3687,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         parser: Root parser whose epilog carries the command listing.
         commands: Index the subcommands are declared through.
     """
-    from agent_parley import agents_cli
+    from agent_parley import agents_cli, workspace_cli
 
     agents_cli.declare(commands)
+    workspace_cli.declare(commands)
     inspecting = commands.add_parser(
         "preflight",
         help="Read launch scope and settings without initializing state.",
@@ -4204,6 +4207,12 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     )
     run.add_argument("--repo", type=Path, default=Path.cwd())
     run.add_argument("--resume", action="store_true")
+    run.add_argument(
+        "--output-task",
+        default="",
+        help="Stable derivative task ID for shared media; "
+        "required without --issue.",
+    )
     run.add_argument(
         "--task", default="Check shared coordination state and await my task."
     )
@@ -5643,6 +5652,16 @@ def main() -> int:
 
         return demo.main()
     try:
+        if args.command in {"workspace", "media"}:
+            from agent_parley import workspace_cli
+
+            result = workspace_cli.execute(home, args)
+            print(
+                views.render(f"{args.command}_{args.action}", result)
+                if args.json
+                else workspace_cli.render(result)
+            )
+            return 1 if result.get("warnings") else 0
         if args.command == "agents":
             from agent_parley import agents_cli
 
@@ -5893,6 +5912,7 @@ def main() -> int:
                 resume=args.resume,
                 issue=args.issue,
                 blueprint=args.blueprint,
+                output_task=args.output_task,
             )
             if args.json:
                 print(
