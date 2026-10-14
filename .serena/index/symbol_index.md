@@ -1,0 +1,2001 @@
+<!-- source: 07673ea -->
+# Symbol index (generated)
+
+## agent_parley/__init__.py
+- class BridgeError: __init__
+- def refusal
+- def _defer_cli
+
+## agent_parley/__main__.py
+
+## agent_parley/adapter_evidence.py
+- def location
+- def _skills
+- def _digest
+- def record_launch
+- def read
+
+## agent_parley/agents.py
+- def _revision
+- def _settings
+- def _read
+- def _project
+- def _name
+- def configure
+- def _configure
+- def _availability
+- def _observed_hooks
+- def _native_observation
+- def _skills
+- def _artifacts
+- def _hook_verification
+- def _assets
+- def _agent
+- def inventory
+
+## agent_parley/agents_cli.py
+- def declare
+- def execute
+- def render
+
+## agent_parley/amp.py
+- def configure
+- def payload
+- def response
+
+## agent_parley/approvals.py
+- def operator
+- def policy_digest
+- def binding
+- def _unreadable
+- def _log
+- def _drift
+- def review
+- def refusal
+- def remember
+
+## agent_parley/archive.py
+- def _digest
+- def _project_files
+- def _stripped_identity
+- def _project_entry
+- def _project_locks
+- def _exportable_tables
+- def _snapshot
+- def _columns
+- def export
+- def _add
+- def _safe_name
+- def read_manifest
+- def describe
+- def _selected
+- def _occupied
+- def import_archive
+- def _extract
+- def _rebind
+- def _merge_store
+- def _rekey
+- def _remapped
+
+## agent_parley/attachments.py
+- def folder
+- def validate
+- def reference
+- def marker
+- def find
+- def bounded
+- def used
+- def release
+- def keep
+- def spill
+- def body
+- def page
+- def remove
+- def retarget
+- def renumber
+- def _path
+
+## agent_parley/blueprints.py
+- def parse
+- def _node
+- def define
+- def describe
+- def default
+- def chosen
+- def for_lane
+- def _runs
+- def _save
+- def start
+- def advance
+- def supervise
+- def _due
+- def _held
+- def _moved
+- def progress
+- def _busy
+- def line
+- def _walk
+- def _execute
+- def _agent
+- def _reported
+- def _pull_request
+- def _wait_ci
+- def _rerunning
+- def _red
+
+## agent_parley/budgets.py
+- def limits
+- def consumption
+- def report
+- def standing
+- def _figure
+- def marker
+- def notice
+- def enforced
+- def _fresh
+- def _baseline
+- def _begin
+- def start
+- def _sound
+- def _load
+- def _set_aside
+- def halted
+- def unmetered
+- def _fold
+- def _raw
+- def _used
+- def _over
+- def account
+- def admit
+- def resume
+- def run_account
+
+## agent_parley/checkpoints.py
+- class Stages: __init__, enter, report
+- def clip
+- def operator_prompt
+- class Reason: 
+- def decision_of
+- def offered_attachments
+- def injected_bytes
+- def notice_items
+- def item_digest
+- def base_advance_notice
+- def fresh_notices
+- def count_injection
+- def hourly_rate
+- def record
+- def foreign_refusal
+- def foreign_session
+- def foreign_reading
+- def notifying
+- def permission_denied
+- def announce
+- def event_lock
+- def read_events
+- def prune
+- def shell_segments
+- def invoked
+- def git_action
+- def changes_lane_branch
+- def stray_worktree
+- def _subcommand
+- def lifts_run_budget
+- def continuation_refused
+- def option_values
+- def message_files
+- def attributed_command
+- def diagnosable
+- def chained_cli
+- def redirects
+- def bridge_invocation
+- def touched_path
+- def relevance
+- def feed_notice
+- def owed_acknowledgements
+- def owed_notice
+- def standing_notices
+- def digest
+- def hazard
+- def exempt
+- def reserved_conflict
+- def peer_pull_requests
+- def overlaps
+- def named_paths
+- def filed_issue
+- def claimed_matches
+- def overlap_notice
+- def hazard_denial
+- def unscanned_hazard
+- def role_refusal
+- def outage
+- def restores_lane_branch
+- def branch_exists
+- def current_branch
+- def branch_head
+- def _git_directory
+- def rebasing_branch
+- def head_moves
+- def recorded_branch
+- def lane_branch
+- def activity
+- def work_offer
+- def participant_liveness
+- def event_summary
+- def branch_guard
+- def mailbox
+- def renewed_leases
+- def paused_output
+- def retired_output
+- def outside_lane_output
+- def lane_return
+- def native_process
+- def scan
+- def checkpoint
+- def mark_delivered
+- def deliver
+- def mark_seen
+- def recover
+- def merge_recovery
+- def serve
+- def failed
+- def _hook_pid
+- def unreadable
+- def main
+
+## agent_parley/claims.py
+- def forge_mark
+- class ClaimsMixin: authorize_recovery, issue, _carry, _inherit, _free_orphaned, _claim_forecast, issue_next, issue_match, issue_assign, issue_resolve, _request_notice, issue_reading, work_plan, plan_revision
+
+## agent_parley/cli.py
+- def deferred_module
+- def deferred
+- class _DeferredCallable: __init__, __call__
+- def __getattr__
+- def duration
+- def clock
+- def repeat_plan
+- def assignment
+- class Selection: filtered, describe, holds_project, holds, _inactive
+- def pending_offers
+- def narrow
+- def reviewed_line
+- def supervision_failure
+- def supervision_liveness
+- def wake_schedule
+- def review_fields
+- def shown_record
+- def fitted
+- def detail_lines
+- def decision_lines
+- def reported_lanes
+- def lane_detail
+- def terminal_width
+- def inbound_status
+- def notification_line
+- def add_selector
+- def add_status_filters
+- def selected_status
+- def add_budget_flags
+- def budget_changes
+- def operator_only
+- def selected
+- def matching_lanes
+- def selection_plan
+- def confirmed
+- def ignored_paths
+- def shown_paths
+- def retired_lane
+- def bulk_lanes
+- def operator_message
+- def lane_roster
+- def spoken_lanes
+- def participant_lanes
+- def assigned_lanes
+- def assigned_selection
+- def merged_lanes
+- def gh
+- def hygiene_metadata
+- def pull_request_body
+- def reserved_overlaps
+- class Bridge: restore, retire, _record_operator, pause, _holdings, stop, restart, pull_request, self_service_pull_request, _self_opened, _authorize, _pull_request, reclaim, reclaim_worktrees, relocate_worktrees
+- class Absorbed: __getattr__, absorb
+- class CommandIndex: __init__, add_parser
+- def command_help
+- def add_reader_argument
+- def add_say_arguments
+- def typed_parser
+- def spoken
+- def lane_reading
+- def issue_lines
+- def notification_report
+- def secret
+- def secret_settings
+- def declare
+- def selected_command
+- def root_parser
+- def _plain_status
+- def _title
+- def main
+- def _error_message
+- def _refusal_lines
+- def _error_document
+
+## agent_parley/completion.py
+- def _manifests
+- def _issue_numbers
+- def candidates
+- def _subcommands
+- def _flags
+- def _value_flags
+- def tree
+- def value_flags
+- def _bash
+- def _zsh
+- def _fish
+- def script
+
+## agent_parley/console.py
+- def token
+- def validate
+- def build
+- def run
+- class Sessions: __init__, create, read, discard
+- class Console: log_message, _session, _body, _send, _page, do_GET, do_POST
+- def configure_agent
+- def catalog
+- def snapshot
+- def serve
+- def main
+
+## agent_parley/convergence.py
+- def signature
+- def classify
+- def evidence
+- def fresh
+- def fold
+- def waiting
+- def settle_wait
+- def age
+- def decide
+- def read
+- def _load
+- def _stamp
+- def _order
+- def observe
+- def view
+- def current
+- def reading
+- def describe
+- def message
+- def supervise
+
+## agent_parley/copilot.py
+- def payload
+- def response
+- def configure_copilot
+- def release_copilot
+- def bridge_hook
+- def owned_hook
+
+## agent_parley/core.py
+- class BridgeCore: __init__, server_process, health, ready, up, down, project, setup, _project, add_participant, _spare, _readmit, record_launch, _lane, _reviewed, _require_approval
+
+## agent_parley/dashboard.py
+- def _number
+- def _tokens
+- def _unused
+- def _fitness
+- def _cached
+- def _pull_request_record
+- def _branch
+- def dormant
+- def _awaiting_approval
+- def _row
+- def _blueprint
+- def _orphan_remedies
+- def _reported_ready
+- def _totals
+- def collect
+- def export
+- def _cells
+- def state_cell
+- def notes
+- def alert
+- def _span
+- def _widths
+- def select
+- def detail
+- def keymap
+- def _blocks
+- def _page
+- def _summary
+- def layout
+- def _follow
+- def render
+- def _warning
+- def _draw
+- def _overlay
+- def _ask
+- def _loop
+- def run
+
+## agent_parley/decisions.py
+- def identifier
+- def _read
+- def _write
+- def _expire
+- def _clipped
+- def open_or_refresh
+- def get
+- def find
+- def list_open
+- def refusal
+- def answer
+- def hold
+- def close
+- def confirming
+- def applied
+- def stale
+- def options
+- def callback
+- def tapped
+- def keyboard
+- def _block
+- def compose
+- def _lease
+- def flush
+
+## agent_parley/delivery.py
+- def interval
+- def mail_file
+- def instructions
+- def _notices
+- def _compose
+- def _unread
+- def _publish
+- def deliver
+- def _serve
+- def polling
+
+## agent_parley/demo.py
+- class Step: 
+- class Card: 
+- def free_port
+- def git
+- def fixtures
+- def environment
+- def terminal
+- def drain
+- def clean
+- def lines
+- class Recorder: __init__, parley, attach, capture, run, shell, launch, tool, event, session, prompt, hook, chapter, latest, caption, stop, close, down
+- def finish
+- def leftovers
+- def sweep
+- def quitting
+- def narrator
+- def sandbox_directory
+- def main
+
+## agent_parley/demo_scenario.py
+- def opening
+- def lanes
+- def work_order
+- def claims
+- def guardrails
+- def handoffs
+- def revisions
+- def budget
+- def integration
+- def dashboard
+- def closing
+- def record
+- def tour
+
+## agent_parley/denials.py
+- class Denial: 
+- def _clipped
+- def _command
+- def _reason
+- def detect
+- def rule
+- def options
+- def record
+- def waiting
+
+## agent_parley/dialogs.py
+- class Dialog: 
+- class Frame: 
+- def flatten
+- def rows
+- def _picker_start
+- def lane_cause
+- def locate
+- def match
+- def prompted
+- def question
+- def options
+- def _comparable
+- def keys
+- def _zone
+- def reset_at
+- def report
+- def configured
+- def requested
+- def parked
+- def waited
+- def pre_approved
+- def auto_mode
+- def _opted_in
+- def bridge_shell
+- def _shell_rows
+- def requested_command
+- def standing_reply
+- def typed
+- class Watch: __init__, _opted_in, holding, answered, advance, _approvable, _describe, _act, _exhaust, _escalate, _ask, _carry, close, _retire, _evidence, _publish, _release, _notify
+- def watcher
+
+## agent_parley/entry.py
+- def main
+
+## agent_parley/evidence.py
+- def collect
+- def section
+- def refresh
+- def publish
+
+## agent_parley/forecast.py
+- def _git
+- def history
+- def cochanges
+- def collisions
+
+## agent_parley/forge.py
+- def select
+- def _implementation
+- def slug
+- def _reachable
+- def _beads_reachable
+- def branch_completion
+- def branch_evidence
+- def issue_completion
+- def _closing_references
+- def closing_numbers
+- def integration_landings
+- def open_pull_requests
+- def pull_request
+- def _pull_request_reading
+- def _checks
+- def _pending
+- def _failed
+- def rerun_job
+- def review_feedback
+- def failed_log
+- def checks_timeout
+- def _epoch
+- def _run
+- def issue_title
+- def _title_of
+- def _beads_title
+- def issue_details
+- def issue_labels
+- def issue_pull_request_paths
+- def open_issues
+- def open_issue_catalog
+- def issue_providers
+- def assign
+- def assigned
+- def unassign
+- def _operator
+- def _beads_update
+- def comment
+- def report_comment
+
+## agent_parley/gemini.py
+- def configure
+- def payload
+- def response
+
+## agent_parley/history.py
+- def _provider
+- def _detail
+- def _ledger_records
+- def holdings
+- def _decided_report
+- def _decided
+- def _report_records
+- def _store_records
+- def records
+- def _claim
+- def describe
+
+## agent_parley/hook.py
+- def write_client
+- def options
+- def read_input
+- def hook_pid
+- def request
+- def framed
+- def relaunch
+- def fallback
+- def main
+
+## agent_parley/host_resources.py
+- def home
+- def owner
+- def _private
+- def _read
+- def inspect
+- def _items
+- def reserve
+- def release
+- def call
+
+## agent_parley/inbound.py
+- class Passcode: __init__, _hash, matches
+- class Gate: __init__, locked, admits
+- class Refusing: error, exit
+- def parser
+- def command
+- def reading
+- def clip
+- def enabled
+- def fault
+- def reported
+- def polling
+- def announce
+- def erase
+- def serve
+- def _chat
+- def _sender
+- def answering
+- def settle
+- def decide
+- def _confirm
+- def _receipt
+- def typed
+- def _remaining
+- def tap
+- def updates
+- def run
+
+## agent_parley/integration.py
+- class IntegrationMixin: merge, _from_base, verify_recovery, _held_integration, _unverified, _integrate_lane, preview_merge, _integration_candidates, integration_plan, integrate, _confirmed_candidates, _integration_preview, _integrate_sequence, _decide, approve, reject
+
+## agent_parley/issues.py
+- def delivered
+- def deadline_state
+- def claimed_since
+- def last_progress
+- def offer_state
+- def released
+- def ended
+- def closed
+- def landed
+- def settled_at
+- def deadline_notice
+- def unresolved_completion
+- def idle_blocking
+- def offer_source
+- def handoff_payload
+- def handoff_fields
+- def attempt
+- def parse_issue
+- def snapshot
+- def with_forge
+- def holders
+- def waiters
+- def unclaimed
+- def _refuse
+- def change
+- def _clear_recovery
+- def _unseen
+- def _taken
+- def _assign
+- def _operator_offer
+- def grant_requests
+- def _within_cap
+- def _request
+- def _withdraw
+- def _answer_request
+- def _change
+- def note_supervision_error
+- def supervision_error
+- def _carried
+- def orphan_age
+- def describe
+- def held_claim
+- def exact_claim
+- def merge_claim
+
+## agent_parley/lanes.py
+- def extras
+- def ensure
+- def _absent
+- def read
+- def read_all
+- def _event
+- def transition
+- def read_wake
+- def write_wake
+- def from_liveness
+- def sample
+- def rebooted
+- def wakes
+- def hook_evidence
+- def submit
+- def pending
+- def settled
+- def apply
+- def label
+- def read_accounts
+- def account
+- def _charge
+- def _top
+- def summary
+- def combine
+- def describe_account
+- def history
+- def view
+- def describe
+- def provenance
+- def inference
+
+## agent_parley/launch.py
+- def launch_receipt
+- def _clipped
+- def issue_task
+- def rotation_task
+- class LaunchMixin: identity, protocol, hooks, launch
+
+## agent_parley/lifecycle.py
+- def append_history
+- def initial
+- def drop_offer
+- def state
+- def _next_action
+- def authorize
+- def claimed
+- def released
+- def end_on_forge
+- def satisfied
+- def dependencies_complete
+- def actionable
+- def operator_blocked
+- def describe_action
+- def backlog
+- def record_report
+- def complete
+- def integration_failed
+- def settle_dependencies
+- def _reconcile_dependents
+- def resolve
+- def _issue_number
+- def reaches
+- def _snapshot
+
+## agent_parley/mail.py
+- class MailMixin: say, acknowledge, mail, orphan_decisions, decide, decisions
+
+## agent_parley/mail_evidence.py
+- def _base
+- def _message
+- def _schedule_names
+- def _schedules
+- def messages
+
+## agent_parley/merges.py
+- def session_busy
+- def launch_busy
+- def attributed_commits
+- def merge_blockers
+- def merge_preview
+- def merge_branch
+- def lane_dependencies
+- def lane_session
+- def reported_ready
+- def ready_lanes
+- def group_lanes
+- def lane_refusals
+- def group_refusal
+- def unattempted
+- def outside_prerequisites
+- def diagnostic
+- def integration_record
+- def record_integration
+- def withdraw_integration
+- def integration_owner
+- def merging
+- def integration_holds
+- def unmerged
+- def clear_integration
+- def integration_exhausted
+- def integration_remedy
+- def integration_hold
+
+## agent_parley/metrics.py
+- def report_path
+- def record_report
+- def _drop_attachment
+- def report_records
+- def find_report
+- def record_review
+- def latest_review
+- def latest_report
+- def idle_intervals
+- def _mail_waits
+- def _offer_waits
+- def _report_waits
+- def waits
+- def pending
+- def ci_rounds
+- def _merges
+- def _first_pass
+- def pull_request_outcomes
+- def outcome_line
+
+## agent_parley/notify.py
+- class Event: 
+- def stored
+- def environment
+- def store
+- def reported
+- def enabled
+- def _port
+- def settings
+- def select
+- def offered
+- def compose
+- def call
+- def telegram
+- def email
+- def send
+- def _pending
+- def _mark
+- def _report
+- def _decide
+- def deliver
+- def observe
+- def flush_decisions
+- def problem_decisions
+- def drain
+- def probe
+
+## agent_parley/opencode.py
+- def configure
+- def payload
+- def response
+
+## agent_parley/opencode_context.py
+- def _identity
+- def _read
+- def summary
+- def _change
+- def execute
+- def main
+
+## agent_parley/plan.py
+- def _named
+- def _issues
+- def _sortable
+- def order
+- def read
+- def envelope
+- def recorded
+- def edges
+- def planned
+- def groups
+- def members
+- def ready_groups
+- def diff
+- def _blank
+- def apply
+- def describe
+- def _edge
+- def _changes
+- def _grounds
+- def _revised
+- def _effect
+- def _held
+- def _contradicted
+- def _settle
+- def _accept
+- def _retain
+- def _expire
+- def _landed
+- def _recover
+- def propose
+- def decide
+- def revisions
+- def render_proposal
+- def render_revisions
+- def render_diff
+- def render
+
+## agent_parley/plugins.py
+- class Client: 
+- class Failed: 
+- def run
+- def names
+- def holds
+- def detected
+- def recorded
+- def status
+- def inspection
+- def preview
+- def install_one
+- def install
+
+## agent_parley/policy.py
+- def matched_rule
+- def has_attribution
+- def refusal
+
+## agent_parley/pool.py
+- def spares
+- def _write
+- def _git
+- def current
+- def _preparing
+- def state
+- def discard
+- def _slot
+- def fill
+- def take
+- def replenish
+- def reading
+- def summary_line
+- def sweep
+
+## agent_parley/preflight.py
+- def _document
+- def _native
+- def _client
+- def inspect
+
+## agent_parley/problems.py
+- def _row
+- def _blocked
+- def _dialog
+- def _inferred
+- def _answer
+- def _attempted
+- def _remedy
+- def _recorded
+- def _age
+- def _listed
+- def _claim_rows
+- def _cap_rows
+- def _awaiting_integration
+- def _integrate_rows
+- def _unopened_rows
+- def _retire_rows
+- def _orphan_rows
+- def _unresolved_rows
+- def _child_rows
+- def _diverging_rows
+- def _ack_rows
+- def _lane_rows
+- def _offer_rows
+- def _request_rows
+- def _bounce_rows
+- def _retired_rows
+- def _refused_rows
+- def _integration_rows
+- def _root_rows
+- def _plan_rows
+- def _run_rows
+- def _checks_rows
+- def _crossing_rows
+- def _checks_failed_rows
+- def _checks_refused_rows
+- def _grouped_gaps
+- def derive
+- def _stale
+- def _fold
+- def shown
+- def lines
+- def rendered
+
+## agent_parley/process.py
+- def read_ps_field
+- def read_local_ps_field
+- def linux_start_ticks
+- def linux_same_start
+- def linux_running
+- def linux_zombie
+- def linux_foreground_pid
+- def linux_parent_pid
+- def linux_matches_command
+- def linux_worktree_clients
+- def libc_pidfd
+- def linux_signal
+- def linux_terminate
+- def darwin_running
+- def darwin_zombie
+- def darwin_start_ticks
+- def darwin_same_start
+- def darwin_foreground_pid
+- def darwin_parent_pid
+- def darwin_matches_command
+- def darwin_worktree_clients
+- def darwin_terminate
+- class Platform: 
+- def linux_boot_id
+- def darwin_boot_id
+- def linux_platform
+- def darwin_platform
+- def platform_for
+- def kernel_release
+- def wsl_version
+- def pidfd_available
+- def host_report
+- def check_repository_host
+- def boot_id
+- def start_ticks
+- def running
+- def alive
+- class ServerProcess: stop
+- def foreground_process
+- def launched_process
+- def recorded_process
+- def worktree_client
+- def identify
+
+## agent_parley/protocol.py
+- def cli_command
+- def cli_rule
+- def manifests
+- def plugin_root
+- def launcher_version
+- def revision
+- def installed
+- def compatible
+- def render
+- def verdict
+- def mismatch
+
+## agent_parley/reclaim.py
+- def _read
+- def worktrees
+- def _lines
+- def _uncommitted
+- def _ahead
+- def _upstream
+- def _upstream_gone
+- def landed
+- def _outcome
+- def _busy
+- def _occupied
+- def assess
+- def _changed
+- def _used
+- def _quiet
+- def _holds
+- def plan
+- def _entries
+- def relocated
+- def moved_remedy
+- def size
+- def _within
+- def owned_roots
+- def _disposable
+- def _unpushed
+- def _absorbed
+- def _regenerable
+- def _stray
+- def _owner
+- def _owner_index
+- def child_worktrees
+- def children_by_lane
+- def _lane_made
+- def strays
+- def _free
+- def relocations
+- def relocate
+- def prune
+- def forceable
+- def remove
+- def reclaimable
+- def summary_line
+- def lines
+
+## agent_parley/recommend.py
+- def conflicts
+- def _grouped
+- def _underway
+- def _reasons
+- def rank
+- def shortlist
+- def terms
+- def _match_reasons
+- def match
+- def render_match
+- def render
+
+## agent_parley/records.py
+- def _mtime
+- def _newest
+- def _config_home
+- def _claude_sources
+- def _claude_records
+- def _codex_cwd
+- def _codex_lane
+- def _codex_sources
+- def _codex_records
+- def _fold_claude
+- def _fold_codex
+- def _stamp
+- def _capacity_state
+- def _reset_clock
+- def _text_capacity
+- def _claude_capacity
+- def _reset_at
+- def _codex_capacity
+- def capacity_observation
+- def reported_refusal
+- def _advance
+- def reported_tokens
+- def child_activity
+- def lane_sources
+
+## agent_parley/recovery.py
+- def _git
+- def _text
+- def _folder
+- def _digest
+- def _identifier
+- def _commit
+- def _snapshot_commits
+- def _content_trees
+- def _fingerprint
+- def _tree
+- def _paths
+- def _refuse_untracked_collisions
+- def _require_dead
+- def _lane_scope
+- def _reclaim_temporary_refs
+- def _publish_bundle
+- def gate_evidence
+- def _step
+- def capture
+- def _capture
+- def preserve
+- def checkpoint
+- def prune
+- def authorize
+- def approval
+- def _consume_approval
+- def _capacity_candidate
+- def _supersede_restarted_authorization
+- def prepare_takeover
+- def commit_takeover
+- def quiesce_exhausted
+- def refusal
+- def _refuse
+- def quiesce_authorized
+- def stale_session
+- def _artifact
+- def preflight
+- def current_take
+- def restore
+
+## agent_parley/reports.py
+- class ReportsMixin: report, show_report, review_report, export_events, state_archive, history
+
+## agent_parley/retirement.py
+- def _git
+- def ignored_files
+- def _prune
+- def _awaits
+- def return_work
+- def mark
+- def withdraw
+- def abandon
+- def _silence
+
+## agent_parley/retries.py
+- def digest
+- def validate
+- def scope
+- def remember
+- def mismatch
+- def replayed
+- def operator_key
+
+## agent_parley/roles.py
+- def location
+- def _strings
+- def validate
+- def load
+- def save
+- def digest
+- def effective
+- def _paths
+- def _matches
+- def broken
+- def decide
+- def render
+- def change
+
+## agent_parley/roster.py
+- def identifier
+- def branch_prefix
+- def branch_name
+- def integration_base
+- def pool_size
+- def next_lane_branch
+- def variables
+- def overrides
+- def verify_command
+- def deadlines
+- def budget
+- def merged_budget
+- def resource_name
+- def resources
+- def retired_reason
+- def _manifest_stamp
+- def _index_projects
+- def locate
+- def paused
+- def retired
+- def _registry
+- def _define
+- def providers
+- def unavailable_hooks
+- def delivery_path
+- def inspect
+- def remove
+- def provider
+- def define_provider
+- def provider_budget
+- def credentials
+- def credential
+- def define_credential
+- def config_home
+- def launch_environment
+- def normalize
+- def dialog_answers
+- def approval_opt_in
+- def standing_reply
+- def forge_choice
+- def approval_steps
+- def pull_request_policy
+- def integration_policy
+- def expand
+- def read
+- def resolve
+- def caller_lane
+- def from_lane
+- def require_operator
+- def describe
+
+## agent_parley/server.py
+- def log
+- def sweep
+- def _tool
+- class Server: __init__, drifted, waiting, health, server_bind, process_request, process_request_thread, refuse, recover, _recovering, coalesce, flush_repeats, _pending, handle_error
+- class Handler: setup, log_message, _reply, _authorize, do_GET, do_DELETE, do_POST, _body, _hook, _received, _delivered, _decide, _raw_hook, _declared_protocol, _call
+- def stop_on_signal
+- def main
+
+## agent_parley/settings.py
+- class SettingsMixin: verification, approval_policy, resume_opt_in, initialization, pool, fill_pool, commands, branch_naming, integration_branch, tracker, resources, budgets, budget, enforce, _budget_account
+
+## agent_parley/start.py
+- class Found: 
+- def checkout
+- def serving
+- def attention
+- def look
+- def advice
+- def render
+- def show
+
+## agent_parley/state.py
+- class Transient: 
+- class LockBusy: 
+- def write_json
+- def write_text
+- def trim_log
+- def lock
+
+## agent_parley/status.py
+- def reading
+- def forge_note
+- def landed_line
+- def lane_state
+- def folded
+- def fold_line
+- def task_line
+- def stopped_seconds
+- def dormant
+- def pull_request
+- def attention
+- def since
+- def moved_after
+- def reported_since
+- def registered_root
+- class StatusMixin: doctor, problems, liveness, _approval_state, _project_reading, _project_accounting, _project_context, _lane_status, status_snapshot, _integration, _health, project_at, board, forge_issues, _board_project, status
+
+## agent_parley/store.py
+- class Transaction: __init__
+- def missing
+- def connect
+- def reading
+- def initialize
+- def _add_ack_deadline
+- def _add_ack_retirement
+- def _add_decision_flag
+- def _add_claim_correlation
+- def _add_reservation_ttl
+- def _add_supersession
+- def _add_topic
+- def _add_schedule_cancellation
+- def _add_reservation_created
+- def _add_message_search
+- def _fts_available
+- def _searchable
+- def _open_threads
+- def _rebuild_search
+- def _rebuild_reservations
+- def _import_legacy
+- def register
+- def revoke
+- def _expire
+- def authenticate
+- def _text
+- def _number
+- def _whole
+- def _flag
+- def _opened_thread
+- def _answered_thread
+- def ack_seconds
+- def message_topic
+- def mentions
+- def issue_mail
+- def reservation_stem
+- def lane_work
+- def _concerned
+- def _routed
+- def mark_read
+- def feed
+- def _ack_window
+- def _operator_reply
+- def _send
+- def _settled_attachments
+- def _roster
+- def _inbox
+- def peek_inbox
+- def _bounded
+- def _thread
+- def _phrase
+- def _wildcards
+- def _indexed_matches
+- def _substring_matches
+- def _search
+- def _decision_rows
+- def _decisions
+- def named_resource
+- def overlapping
+- def overlapping_paths
+- def _keys
+- def _operator
+- def _expired_leases
+- def _reclaim
+- def _reclaim_notice
+- def _conflicts
+- def _refusal
+- def _reserve
+- def _grant
+- def _request
+- def _queue
+- def _cancel_request
+- def _release
+- def _grant_queued
+- def _notice
+- def _event
+- def _observe
+- def call
+- def schema_version
+- def schema_state
+- def remedy
+- def _layout
+- def reconcile
+- def refused
+- def _refused
+- def _recipient_warnings
+- def _dispatch
+- def _lane_provider
+- def _recommended
+- def _retirement_notice
+- def _addressable
+- def _retire
+- def declared_resources
+- def cochange_history
+- def owned_claims
+- def held_claim
+- def supersede_claim
+- def supersede_recipient
+- def return_stale_deliveries
+- def supersede_project_claim
+- def _recorded
+- def _retain
+- def _serve
+- def _effect
+- def _reviewed
+- def _identify
+- def read_thread
+- def read_message
+- def search_messages
+- def search_decisions
+- def decide
+- def list_messages
+- def acknowledge
+- def _unanswered
+- def overdue_acknowledgements
+- def pending_acknowledgements
+- def superseded_shares
+- def retire_acknowledgement
+- def speak
+- def _project_id
+- def _schedule_row
+- def _advance_schedule
+- def schedule
+- def schedules
+- def cancel_schedule
+- def complete_schedule
+- def deliver_schedule
+- def waiting
+- def _waiting_on
+- def _record_refusals
+- def record_refusal
+- def _refused_by
+- def refused_holders
+- def usage
+- def served_since
+- def transfer_reservations
+- def transfer_claim_reservations
+- def _settle_requests
+- def release_reservations
+- def release_dead_holder
+- def reclaim_expired
+- def renew_reservations
+- def active_reservations
+
+## agent_parley/supervision.py
+- def track_launcher
+- def reap_launchers
+- def settings
+- def lane_state
+- def rebooted
+- def settle_reboot
+- def rebind_sessions
+- def presence
+- def _remember_process
+- def _known_process_gone
+- def recorded_presence
+- def recorded_observations
+- def _mark_unstarted
+- def launches
+- def stall
+- def silence
+- def stall_marker
+- def dirty_paths
+- def _read
+- def _changed
+- def operator_edits
+- def operator_edit_marker
+- def base_advances
+- def refresh_readings
+- def _take_readings
+- class _ReadingsFlight: __init__
+- def _published_readings
+- def readings
+- def _join_readings_flight
+- def _fly_readings
+- def base_advance_marker
+- def base_advance_told
+- def rebase_command
+- def _session_check
+- def published_capacity
+- def provider_error
+- def published_wait
+- def record_wait
+- def record_capacity
+- def _native_recovery
+- def _observe_capacity
+- def _clear_exhaustion
+- def probe_exhaustion
+- def _account_members
+- def capacity
+- def _capacity_check
+- def _worktree_check
+- def _mail_check
+- def fit
+- def _fit_reading
+- def stranded_claims
+- def record_stranded_claims
+- def published_stranded_claim
+- def idle_seconds
+- def poll_readings
+- def forget_poll_readings
+- def _once_per_poll
+- def branch_completion
+- def _refresh_completion
+- def published_work
+- def named_leads
+- def _first_untaken
+- def _pull_text
+- def _rebalance_text
+- def _split_text
+- def _waiting_claims
+- def _idle_leads
+- def _continue_text
+- def _work_bindings
+- def _work_progress
+- def _work_changed
+- def _work_dispatch
+- def share_recipients
+- def _work_offer
+- def work
+- def announce_idle
+- def configuration
+- def opt_in_missing
+- def reminders
+- def unresolved_reason
+- def observed_complete
+- def completion_escalations
+- def end_merged_claims
+- def deadline_notices
+- def expire_offers
+- def deadline_defaults
+- def tool_silence
+- def holder_silent
+- def idle_claim
+- def _overdue_peer
+- def _overdue_summary
+- def _idle_blocker
+- def _overdue_step
+- def overdue_claims
+- def dialog_waiting
+- def unacknowledged_reason
+- def acknowledgement_deadlines
+- def share_blocker
+- def bounced_shares
+- def share_bounces
+- def dead_mail
+- def _return_mail
+- def orphan_reason
+- def live_peer
+- def orphan_remedy
+- def orphan_marker
+- def orphan_decision
+- def _dead
+- def _quiesced
+- def key_hold
+- def refused_keys
+- def _tell_key_hold
+- def orphans
+- def _audience
+- def _announce_orphan
+- def _announce_return
+- def dead_reason
+- def dead_lanes
+- def _return_work
+- def _announce_dead
+- def prompting
+- def headless_prompts
+- def _stop_headless
+- def _issue_reading
+- def _landing_reading
+- def completed_claims
+- def branch_lane
+- def refresh_forge_issues
+- def end_closed_issues
+- def checks_ceiling
+- def pull_request_wakes
+- def blueprint_runs
+- def _past_the_window
+- def _pending_clock
+- def _checks_clock
+- def _ci_rounds
+- def _ci_round_limit
+- def _stalled_checks
+- def _rerun_cancelled
+- def _not_started_groups
+- def _not_started_decisions
+- def _pull_request_changes
+- def _pull_request_feedback
+- def _review_text
+- def _quoted_feedback
+- def _clipped
+- def _pull_request_lane
+- def reported_since
+- def eligible
+- def hand_off
+- def deliveries
+- def reclaim_due
+- def reclaim_lanes
+- def reclaim_summary
+- def root_retired
+- def missing_root
+- def forget
+- def forgotten_lines
+- def poll
+- def _poll
+- def failure
+- def last_poll
+- def _publish_presence
+- def settle_evidence
+- def settle_lanes
+- def hook_gaps
+- def watched_dialog
+- def account_lanes
+- def wake_record
+- def undelivered_wake
+- def store_wake
+- def condition
+- def _remind
+- def observe_responses
+- def _work_backlog
+- def _lane_activity
+- def _work_escalation
+- def _write_work_dispatch
+- def forget_delivered
+- def _wake_flags
+- def _prompting_command
+- def _select_work_prompt
+- def _wake_due
+- def _instant
+- def exhaustion_probe_due
+- def _wake_block
+- def _park_wake
+- def _defer_wake
+- def _clear_block
+- def _escalate_blocked
+- def _mail_digest
+- def session_held
+- def _fenced
+- def wake
+- def run
+
+## agent_parley/tables.py
+- def age
+- def size
+- def _char_columns
+- def measure
+- def fit
+- def session
+- def idle_age
+- def widths
+- def span
+- def layout
+- def heading
+- def line
+- def status_row
+- def status_table
+- def pull_cell
+- def work_row
+- def work_table
+- def lane_table
+
+## agent_parley/terminal.py
+- def _wake_flags
+- def _work_bindings
+- def _noted
+- def selected_prompt
+- def sweep_sockets
+- def socket_path
+- def request
+- def operator_input
+- class Draft: 
+- def draft
+- def detached_terminal_replies
+- def _issue_order
+- def lane_title
+- def compose_title
+- def title_sequence
+- def retitle
+- def _read_json
+- def turn_busy
+- def lane_summary
+- def _changed_at
+- def _relay
+- def call
+- def run
+- def _session
+
+## agent_parley/timeouts.py
+- class Kind: 
+- def kind_of
+- def policy
+- def _valid
+- def timeout
+- def undo
+- def settle
+- def line
+- def record
+- def announce
+- def sweep
+- def describe
+- def show
+- def configure
+
+## agent_parley/unattended.py
+- def policy
+- def operator_only
+- def describe
+- def configure
+- def _record
+- def refuse
+- def failed
+- def _replayed
+- def _evaluate
+- def _conditions
+- def integrate
+
+## agent_parley/views.py
+- def timestamp
+- def document
+- def render
+- def offer
+- def handoff
+- def request
+- def doctor
+- def work_plan
+- def plan_diff
+- def issues
+- def history
+- def ledger
+- def participants
+- def issue_detail
+- def participant_detail
+- def provider_detail
+- def redacted
+- def credential_detail
+- def _count
+- def _row
+- def frame
+- def _measured
+- def _total
+- def _number
+- def _label
+- def _description
+- def families
+- def exposition
+- def measurements
+
+## agent_parley/waits.py
+- def delivered
+- def bounded
+- def _empty
+- def wait
+
+## agent_parley/watch.py
+- def _entry
+- def _describe
+- def _history
+- def _store
+- def _hooks
+- def _blueprints
+- def collect
+- def line
+- def follow
+- def keys
+- def run
+
+## agent_parley/wiring.py
+- def _check
+- def _rules
+- def _port
+- def _unauthenticated
+- def _processes
+- def _bound_url
+- def _client
+- def _binding
+- def _participant
+- def inspect
+- def render
+- def main
+
+## agent_parley/workspace.py
+- def relative
+- def resolve
+- def profile
+- def _git
+- def exclusions
+- def add
+- def capability
+- def binding
+- def launch_roots
+- def status
+- def configure
+- def _configure
+
+## agent_parley/workspace_cli.py
+- def declare
+- def execute
+- def render
+
+## agent_parley/worktrees.py
+- def git
+- def has_branch
+- def preserve_pending
+- def drift
+- def commit_all
+- def verify_base
+- def preparation
+- def launched
+- def launch_line
+- def initialize_lane
+
+## scripts/__init__.py
+
+## scripts/acceptance.py
+- def _run
+- def _document
+- def workspace
+- def register
+- def supervise
+- def trust
+- def mark
+- def _replace
+- def _lane
+- def launcher
+- def rehearse
+- def launch
+- def lane_counters
+- def _read
+- def _directory
+- def frame
+- def _project
+- def watch
+- def _reports
+- def _log_faults
+- def _worktrees
+- def samples
+- def _idle_claims
+- def _stale_leases
+- def measure
+- def verdict
+- def report
+- def main
+
+## scripts/benchmark.py
+- def startup
+- def main
+
+## scripts/check_issue_hygiene.py
+- def template_rules
+- def validate
+- def main
+
+## scripts/check_mcp_manifests.py
+- def text_errors
+- def registry_errors
+- def glama_errors
+- def manifest_errors
+- def main
+
+## scripts/check_policy.py
+- def contribution_errors
+- def readme_link_errors
+- def duplicate_paragraph_errors
+- def frontmatter
+- def skill_errors
+- def reported_errors
+- def plugin_validation_errors
+- def main
+
+## scripts/check_pr_hygiene.py
+- def issue_numbers
+- def validate
+- def validate_commit_references
+- def api
+- def main
+
+## scripts/ci_scope.py
+- def matches
+- def category
+- def plan
+- def changed_paths
+- def version_only
+- def main
+
+## scripts/codex_bundle.py
+- def add_bytes
+- def png_size
+- def load_manifests
+- def submission_manifest
+- def manifest_errors
+- def listing_skill_errors
+- def build
+- def main
+
+## scripts/install_dev.py
+- def install
+- def main
+
+## scripts/pages_video.py
+- def rewrite
+- def main
+
+## scripts/record_demo.py
+- def lower_stall_windows
+- def verdict
+- def screenshot_scenario
+- def rewritten
+- def colour
+- def escape
+- def frame
+- def typing_seconds
+- def hold_seconds
+- def cut
+- def timeline
+- def keytimes
+- def animate
+- def visibility
+- def definitions
+- def draw_card
+- def draw_step
+- def render
+- def annotate
+- def render_static
+- def screenshots
+- def main
+
+## scripts/record_live.py
+- class Pane: 
+- class Frame: 
+- def tmux
+- def seed
+- def window
+- class Session: __init__, sample, hold, type, until
+- def issue_state
+- def forbidden
+- def redact
+- def leaks
+- def timeline
+- def visibility
+- def spans
+- def render
+- def record
+- def main
+
+## scripts/release_artifacts.py
+- def release_notes
+- def add_entry
+- def checksums
+- def main
+
+## scripts/release_publish.py
+- def command
+- def emit
+- def digest
+- def asset_names
+- def verify_assets
+- def release_history
+- def release_baseline
+- def next_version
+- def advance_version
+- def version_available
+- def available_version
+- def product_units
+- def release_candidate
+- def release_history_errors
+- def run_acceptance_suite
+- def acceptance_errors
+- def changelog_entry
+- def declared_constant
+- def write_compatibility
+- def bump
+- def validate_tag
+- def github_release
+- def has_package_changes
+- def download
+- def prepare
+- def pypi_files
+- def pending_files
+- def main
