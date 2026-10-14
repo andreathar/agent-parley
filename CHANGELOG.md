@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.1](https://github.com/suneel944/agent-parley/compare/v0.19.0...v0.19.1) (2026-10-14)
+
+
+### Metrics
+
+- The twelve Prometheus families that 0.19.0 renamed are exported again under their 0.18.x `_total` names as deprecated aliases, next to the `_window` and `_retained` gauges that replace them. Each alias names its replacement in `# HELP`, and `metrics --json` marks it `deprecated` (#1234).
+
+### Release notes
+
+- A milestone release now publishes its notes: the `###` sections of the squash commit body, upgrade notes from its compatibility bullets and one link to the milestone's closed issues, instead of one headline and a link per issue. Commits without such sections keep the one-line form (#1235).
+- The 0.19.0 entry in `CHANGELOG.md` now matches the corrected v0.19.0 release notes (#1235).
+
+### Upgrade notes
+
+- The 0.18.x metric names are deprecated, not removed. Move dashboards and alerts to the `_window` and `_retained` names; removing the aliases needs a release marked breaking.
+- No configuration or state changes.
+
+Closed issues: [milestone 0.19.1](https://github.com/suneel944/agent-parley/issues?q=is%3Aissue%20is%3Aclosed%20milestone%3A0.19.1).
+
 ## [0.19.0](https://github.com/suneel944/agent-parley/compare/v0.18.2...v0.19.0) (2026-10-14)
 
 
