@@ -55,6 +55,35 @@ def forge_mark(directory: Path, number: str, *, added: bool) -> bool:
     return held
 
 
+def forge_unclaim(repo: Path, directory: Path, number: str) -> bool:
+    """Removes the forge assignment a claim added, keeping the mark on failure.
+
+    The mark is read without being taken, and cleared only once the forge
+    confirms the removal, so a removal that fails is retried by the next
+    caller, `supervision.release_forge_marks` among them.
+
+    Args:
+        repo: Repository or assigned worktree that selects the forge project.
+        directory: Private project state directory.
+        number: Bare repository issue number.
+
+    Returns:
+        Whether the forge removed an assignment the issue was marked for.
+    """
+    from agent_parley.cli import forge, json
+
+    try:
+        marks = json.loads((directory / FORGE_MARKS).read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(marks, dict) or marks.get(number) is not True:
+        return False
+    if not forge.unassign(repo, number):
+        return False
+    forge_mark(directory, number, added=False)
+    return True
+
+
 class ClaimsMixin(ReportsMixin):
     """Issue ledger transitions, claim forecasts and the work-order plan.
 
@@ -177,9 +206,11 @@ class ClaimsMixin(ReportsMixin):
         """
         from agent_parley.cli import (
             attachments,
+            budgets,
             change,
             forge,
             git,
+            issues,
             parse_issue,
             roster,
             snapshot,
@@ -282,6 +313,11 @@ class ClaimsMixin(ReportsMixin):
                     if action in ("claim", "request", "accept")
                     else None
                 ),
+                usage=(
+                    budgets.claim_reading(self.home, directory, data, agent)
+                    if action in ("claim", "accept")
+                    else None
+                ),
             )
         except BridgeError:
             attachments.remove(directory, carried.get("diff", ""))
@@ -294,9 +330,12 @@ class ClaimsMixin(ReportsMixin):
             if recovery.current_take(record):
                 record = recovery.restore(directory, lane, record)
             record = self._free_orphaned(data, record)
-            if not forge.assigned(repo, parse_issue(number)) and forge.assign(
+            others = issues.forge_assignees(directory, parse_issue(number))
+            if others:
+                record = {**record, "forge_assignees": others}
+            elif forge.assigned(
                 repo, parse_issue(number)
-            ):
+            ) is False and forge.assign(repo, parse_issue(number)):
                 forge_mark(directory, parse_issue(number), added=True)
             likely = self._claim_forecast(
                 repo, directory, data, agent, parse_issue(number)
@@ -304,8 +343,7 @@ class ClaimsMixin(ReportsMixin):
             if likely:
                 record = {**record, "forecast": likely}
         elif action == "release":
-            if forge_mark(directory, parse_issue(number), added=False):
-                forge.unassign(repo, parse_issue(number))
+            forge_unclaim(repo, directory, parse_issue(number))
         return record
 
     def _carry(
@@ -525,7 +563,8 @@ class ClaimsMixin(ReportsMixin):
         and still races any peer that chose the same one. To make that race
         rare, an issue another lane's published work names as its next lead
         or first pull pick, through `supervision.named_leads`, ranks below
-        the issues no lane was pointed at.
+        the issues no lane was pointed at, and the lead this lane's own
+        publication names, through `supervision.own_lead`, ranks first.
 
         Args:
             repo: Assigned worktree, which names the lane doing the reading.
@@ -564,6 +603,7 @@ class ClaimsMixin(ReportsMixin):
                 store.overlapping,
                 limit,
                 supervision.named_leads(directory, data, agent),
+                supervision.own_lead(directory, agent),
             ),
         }
 
@@ -737,6 +777,7 @@ class ClaimsMixin(ReportsMixin):
                 unresolved-completion escalation.
         """
         from agent_parley.cli import (
+            budgets,
             forge,
             issues,
             lifecycle,
@@ -801,7 +842,10 @@ class ClaimsMixin(ReportsMixin):
             outcome="release" if release else "complete",
             actor=roster.OPERATOR,
             reason=reason,
+            usage=budgets.claim_reading(self.home, directory, data, holder),
         )
+        if release:
+            forge_unclaim(Path(data["root"]), directory, issue)
         return {
             "issue": int(issue),
             "outcome": resolved["resolution"]["outcome"],
@@ -916,7 +960,11 @@ class ClaimsMixin(ReportsMixin):
         }
 
     def work_plan(
-        self, repo: Path, action: str, path: Path | None = None
+        self,
+        repo: Path,
+        action: str,
+        path: Path | None = None,
+        force: bool = False,
     ) -> dict:
         """Applies, compares or reports the repository's work-order plan.
 
@@ -932,6 +980,7 @@ class ClaimsMixin(ReportsMixin):
                 for apply.
             action: Apply, diff, or show.
             path: Plan file for apply and diff.
+            force: Whether apply restores edges accepted revisions removed.
 
         Returns:
             The recorded version for apply, the comparison for diff, or the
@@ -961,7 +1010,7 @@ class ClaimsMixin(ReportsMixin):
                     "checkout, because a plan sets the revision envelope "
                     "lanes are held to."
                 )
-        return plan.apply(directory, path)
+        return plan.apply(directory, path, force=force)
 
     def plan_revision(
         self,
@@ -979,8 +1028,9 @@ class ClaimsMixin(ReportsMixin):
 
         A proposal run from an assigned worktree is that lane's; one run from
         the project base checkout, outside every lane, is the operator's.
-        A lane running inside its own worktree cannot name a peer's worktree
-        as `--repo`, so it never proposes under the peer's name. Only the
+        A lane cannot name a peer's worktree as `--repo`: its working
+        directory and the lane credential it carries both name it, wherever
+        it runs, so it never proposes under the peer's name. Only the
         operator approves or rejects, so a lane can never widen the
         authority its own proposal needs.
 
@@ -1013,12 +1063,15 @@ class ClaimsMixin(ReportsMixin):
         )
         if action == "propose":
             by = roster.OPERATOR if operator else roster.resolve(data, lane)
-            caller = roster.caller_lane(data)
-            if not operator and caller not in (None, by):
-                raise BridgeError(
-                    f"{caller} cannot propose from {by}'s worktree; run the "
-                    "proposal from your own worktree."
-                )
+            for caller in (
+                roster.caller_lane(data),
+                roster.token_lane(self.home, data),
+            ):
+                if not operator and caller not in (None, by):
+                    raise BridgeError(
+                        f"{caller} cannot propose from {by}'s worktree; run "
+                        "the proposal from your own worktree."
+                    )
             return plan.propose(
                 directory,
                 by,

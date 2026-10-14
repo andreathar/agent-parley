@@ -4,6 +4,7 @@ import contextlib
 import curses
 import functools
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -155,7 +156,8 @@ LEGEND = (
     "denied or blocked of retained hook events; CALLS served MCP calls, "
     "!rejected; TOKENS what that lane's own native client recorded for "
     "its session, not billed spend and not comparable between vendors, "
-    "blank when its records were not readable; IDLE observed coordination "
+    "blank when its records were not readable, n/a when its provider has "
+    "no token reader; IDLE observed coordination "
     "inactivity inside the window, measured from this lane's own recorded "
     "turn ends, with + when the window reaches past what retention kept. "
     "IDLE says how long a lane went without coordination activity; it "
@@ -513,6 +515,13 @@ def _row(
         "denied_by": events.get("denied_by", []),
         "calls": stats.get("calls", 0),
         "errors": stats.get("errors", 0),
+        "unmeasured": (
+            []
+            if records.measures_tokens(
+                home, str(participant.get("provider", ""))
+            )
+            else ["tokens"]
+        ),
         "tokens": records.reported_tokens(
             home, participant, context["records"]
         ),
@@ -744,7 +753,7 @@ def collect(
         }
         rows = [
             _row(home, path.parent, data, agent, context)
-            for agent in sorted(data["participants"])
+            for agent in sorted(data["participants"], key=tables.natural_key)
         ]
         _orphan_remedies(rows, data["root"])
         if providers:
@@ -762,6 +771,7 @@ def collect(
                 ),
             }
         )
+    projects.sort(key=lambda project: project["root"])
     return {
         "running": running,
         "home": str(home),
@@ -803,7 +813,7 @@ def export(
     return views.exposition(view)
 
 
-def _cells(row: dict) -> tuple[str, ...]:
+def row_cells(row: dict) -> tuple[str, ...]:
     """Formats one row as the text of every column, in column order.
 
     Args:
@@ -830,7 +840,7 @@ def _cells(row: dict) -> tuple[str, ...]:
         tables.size(row["injected_bytes"]),
         f"{row['denials']}/{row['hook_events']}",
         f"{row['calls']}" + (f"!{row['errors']}" if row["errors"] else ""),
-        _tokens(row["tokens"]),
+        "n/a" if row.get("unmeasured") else _tokens(row["tokens"]),
         tables.age(row["idle_seconds"]) + ("" if row["idle_complete"] else "+"),
         _unused(row.get("accounting")),
         _fitness(row),
@@ -974,7 +984,7 @@ def _widths(
     full = {
         name: max(
             [minimum, len(name)]
-            + [tables.measure(_cells(row)[index]) for row in rows]
+            + [tables.measure(row_cells(row)[index]) for row in rows]
         )
         for index, name, minimum in known
     }
@@ -1148,7 +1158,7 @@ def _blocks(view: dict, columns: list[tuple[int, str, int]]) -> list[dict]:
                 }
             )
         for row in project["rows"]:
-            cells = _cells(row)
+            cells = row_cells(row)
             line = tables.GAP.join(
                 tables.fit(cells[index], size) for index, _, size in columns
             ).rstrip()
@@ -1247,7 +1257,7 @@ def _summary(view: dict, rate: str) -> list[str]:
 
     first = (
         f"agent-parley top - {time.strftime('%H:%M:%S')}  "
-        f"server {'running' if view['running'] else 'not running'}  "
+        f"service {'running' if view['running'] else 'not running'}  "
         f"projects {len(view['projects'])}"
         + (
             f"  idle {tables.age(totals['idle'])} (most "
@@ -1505,7 +1515,13 @@ def render(
 
 
 def _warning() -> int:
-    """Chooses how a warning row is emphasized on this terminal."""
+    """Chooses how a warning row is emphasized on this terminal.
+
+    A non-empty `NO_COLOR` keeps emphasis bold-only, as the no-color.org
+    convention asks, so colour is never set up on such a terminal.
+    """
+    if os.environ.get("NO_COLOR"):
+        return curses.A_BOLD
     with contextlib.suppress(curses.error):
         if curses.has_colors():
             curses.start_color()

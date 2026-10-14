@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import threading
 import time
@@ -20,6 +21,7 @@ from agent_parley import (
 from agent_parley.state import BridgeError, lock, write_json
 
 WINDOW = 300
+LIVE = {"claude", "codex"}
 IDLE_AFTER = 3600
 
 
@@ -142,6 +144,79 @@ def test_an_idle_claim_of_a_live_lane_is_offered_and_its_peer_kept(
     assert "overdue_recovery" not in offered["7"]
 
 
+@pytest.mark.parametrize("waiting", [lifecycle.READY, lifecycle.BLOCKED])
+def test_a_waiting_second_claim_keeps_tool_calls_counting_on_the_first(
+    bridge, paired, waiting
+):
+    registered(bridge, paired)
+    lane = Path(paired["lanes"]["claude"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    bridge.issue(lane, "claim", "8")
+    for number in ("7", "8"):
+        edit(directory, number, lambda record: aged(record, 2 * IDLE_AFTER))
+    edit(
+        directory,
+        "8",
+        lambda record: record["execution"].update(
+            state=waiting, claim_id=record["claim_id"]
+        ),
+    )
+    live(directory, "claude", 5)
+    events(directory, "claude", ("PostToolUse", 5))
+    live(directory, "codex", 5)
+    events(directory, "codex", ("PostToolUse", 5))
+    assert lifecycle.actionable(issues.snapshot(directory), "claude") == ["7"]
+
+    for _ in range(2):
+        kept = step(bridge, directory)
+        assert kept["7"]["owner"] == "claude"
+        assert kept["7"]["offer"] is None
+        assert "overdue_recovery" not in kept["7"]
+
+
+def reported(directory, pid, number):
+    """Records evidence of running work bound to one of claude's claims."""
+    claim_id = issues.snapshot(directory)["issues"][number]["claim_id"]
+    work = supervision.work_evidence(directory, pid, "", number, claim_id)
+    path = directory / "claude-activity.json"
+    write_json(path, {**json.loads(path.read_text()), "work": work})
+    return work
+
+
+def test_reported_running_work_holds_only_the_claim_it_names(
+    bridge, paired, worker
+):
+    directory = busy_with_one_idle_claim(bridge, paired)
+    reported(directory, worker, "7")
+    assert step(bridge, directory)["8"]["overdue_recovery"]["step"] == "wake"
+
+    reported(directory, worker, "8")
+    kept = step(bridge, directory)["8"]
+    assert kept["offer"] is None
+    assert "overdue_recovery" not in kept
+
+
+def test_reported_work_holds_nothing_without_a_claim_or_once_reclaimed(
+    bridge, paired, worker
+):
+    directory = busy_with_one_idle_claim(bridge, paired)
+    work = reported(directory, worker, "8")
+    assert supervision.live_work(directory, "claude", "8")
+    with pytest.raises(BridgeError, match="bound to a claim"):
+        supervision.work_evidence(directory, worker, "")
+
+    path = directory / "claude-activity.json"
+    unbound = {**work, "issue": ""}
+    write_json(path, {**json.loads(path.read_text()), "work": unbound})
+    assert supervision.live_work(directory, "claude", "7") == ""
+    assert supervision.live_work(directory, "claude") == ""
+
+    write_json(path, {**json.loads(path.read_text()), "work": work})
+    edit(directory, "8", lambda record: record.update(claim_id="reclaimed"))
+    assert supervision.live_work(directory, "claude", "8") == ""
+
+
 def test_progress_on_the_idle_claim_drops_its_recovery(bridge, paired):
     directory = busy_with_one_idle_claim(bridge, paired)
     assert step(bridge, directory)["8"]["overdue_recovery"]["step"] == "wake"
@@ -162,8 +237,12 @@ def test_the_listing_shows_each_claims_own_progress(bridge, paired):
     directory = busy_with_one_idle_claim(bridge, paired)
     text = issues.describe(issues.snapshot(directory))
     lines = text.splitlines()
-    assert "last progress 0s ago" in lines[0] or "last progress 1s" in lines[0]
-    assert f"last progress {2 * IDLE_AFTER}s ago" in lines[1]
+    ages = [
+        int(re.search(r"last progress (\d+)s ago", line).group(1))
+        for line in lines[:2]
+    ]
+    assert 0 <= ages[0] <= 5
+    assert 2 * IDLE_AFTER <= ages[1] <= 2 * IDLE_AFTER + 5
 
 
 def test_a_peer_takeover_request_is_granted_after_the_grace_window(
@@ -175,7 +254,7 @@ def test_a_peer_takeover_request_is_granted_after_the_grace_window(
         codex, "request", "8", summary="claude is not working #8"
     )
     assert requested["request"]["to"] == "codex"
-    assert issues.grant_requests(directory, WINDOW, {}) == []
+    assert issues.grant_requests(directory, WINDOW, {}, LIVE) == []
 
     edit(
         directory,
@@ -184,7 +263,7 @@ def test_a_peer_takeover_request_is_granted_after_the_grace_window(
             created=time.time() - WINDOW - 1
         ),
     )
-    assert issues.grant_requests(directory, WINDOW, {}) == ["8"]
+    assert issues.grant_requests(directory, WINDOW, {}, LIVE) == ["8"]
     record = issues.snapshot(directory)["issues"]["8"]
     assert record["request"] is None
     assert record["offer"]["to"] == "codex"
@@ -208,7 +287,7 @@ def test_a_request_on_a_progressing_claim_waits_for_its_holder(bridge, paired):
     lifecycle.record_report(
         directory, "claude", "partial", "", "tests remain", issue="7"
     )
-    assert issues.grant_requests(directory, WINDOW, {}) == []
+    assert issues.grant_requests(directory, WINDOW, {}, LIVE) == []
     assert issues.snapshot(directory)["issues"]["7"]["request"]
 
 

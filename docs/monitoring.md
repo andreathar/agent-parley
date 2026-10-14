@@ -59,8 +59,9 @@ working directory is the lane worktree. The activity record then names that
 process and carries a `rebound` entry with its process ID, session and time,
 and the next hook from it is adopted under its new session ID. So a lane is
 never read as stopped, aged into `dead` or has its claims orphaned while a
-client still runs in its worktree. On macOS, where `ps` reports no working
-directory, only the recorded second session is found this way.
+client still runs in its worktree. Linux reads each client's working
+directory from `/proc` and macOS from `lsof`; when `lsof` cannot run, only the
+recorded second session is found this way.
 
 A client the launcher did not start has no wake socket, so a wake cannot reach
 it. The wake is recorded as `unavailable`, `problems` shows a `wake attention`
@@ -91,9 +92,22 @@ dialog, is read. A framed dialog counts only while it shows at least two
 numbered options and its own footer (`Esc to cancel`, `Enter to select` and
 similar), and a usage limit counts only on the client's own notice line. Text
 that merely quotes a dialog, in scrollback or in the agent's output, never
-parks the lane. Once a dialog is answered, by the launcher or by a digit or
-Enter you type in the lane's terminal, the next screen output releases the
-lane; any other key leaves it held.
+parks the lane. Once a dialog is answered, by the launcher or by a digit,
+Enter, Esc or Ctrl-C you type in the lane's terminal, the next screen output
+releases the lane; any other key leaves it held.
+
+Any other screen that ends on a waiting prompt is escalated as an unrecognized
+native prompt once it has stayed unchanged for thirty seconds, and is never
+answered. That covers the approval prompts of the other providers, read from
+the wording their releases ship: Gemini CLI 0.64.0 (`Allow execution of
+[Shell]?` or `Apply this change?` over `1. Allow once`), GitHub Copilot CLI
+1.0.35 (`Do you want to run this command?`), OpenCode 1.19.0 (`Permission
+required` with `Allow once`, `Always allow` and `Reject`) and Amp
+0.0.1791936083 (`Approval Required` with `Allow Once` and `Allow All for This
+Session`). A screen in wording nobody recorded is escalated the same way when
+it stays silent after the lane's last hook announced a tool call. `doctor`
+names a lane whose client is newer than the release its wording was read
+from.
 
 `directory-trust` is the screen that asks whether you trust the folder. Codex
 records that trust for the repository root, so trusting a lane's worktree also
@@ -159,8 +173,10 @@ The command writes `approve_bridge_tools` under `supervision` in the project
 manifest, or on one lane with `--participant`; `--auto-mode on|off` records
 `auto_mode` the same way, and `approval resume` with no flag reports both for
 each lane. Only the operator can change them. The default is off and changes
-nothing about the client's configuration. While a `claude` lane the service
-could resume has neither this opt-in nor `auto_mode`, `run` and
+nothing about the client's configuration. Every adapter but `amp` carries the
+opt-in in its own per-server allow; [Providers](providers.md) lists each one.
+While such a lane the service could resume has neither this opt-in nor, for
+`claude`, `auto_mode`, `run` and
 `participant add` say so on standard error, `doctor` lists the lane under
 `approvals` as a setup gap with that command, and the service withholds its
 resume: the wake is recorded as `setup gap: bridge tool approval not recorded`
@@ -168,12 +184,19 @@ and spends no wake attempt, because the outcome is known from the manifest, so
 the lane is never escalated for it and its backlog waits for the opt-in or
 your own resume. `problems` reports the lane under `wake attention` with the
 command that records the opt-in and the `run --resume` command for your own
-terminal; when several lanes of one project share the gap, they share one row. With it on, the launch adds two native permission rules: `mcp__agent_parley`, which
+terminal; when several lanes of one project share the gap, they share one row. With it on, the launch adds two native permission rules, plus one legacy rule described below: `mcp__agent_parley`, which
 allows this bridge's own coordination tools, and
-`Bash(<interpreter> -m agent_parley.cli *)`, which allows the exact interpreter
+`Bash(<interpreter> -P -m agent_parley.cli *)`, which allows the exact interpreter
 and module the protocol prompt orders every lane to run for `issue claim`,
 `issue list`, `report` and the other CLI commands. Both are spelled from the
-same string the prompt prints, so they cannot drift apart. Nothing else is
+same string the prompt prints, so they cannot drift apart. For release 0.19.0
+only, the launch also adds the legacy rule
+`Bash(<interpreter> -m agent_parley.cli *)`, the spelling earlier releases
+ordered, and the watcher answers a prompt for either spelling, so a lane
+launched before the upgrade, whose prompt text and allow rule name the legacy
+form, is not parked by the move to `-P`. The release after 0.19.0 drops the
+legacy rule and its watcher match; restart any lane still running from an
+earlier release before upgrading past 0.19.0. Nothing else is
 allowed: no file tool, no other shell command, no other MCP server, no bypass
 flag and no weakened decision. A lane launched before you recorded the opt-in
 still draws the shell prompt for that command; its watcher reads the opt-in
@@ -203,10 +226,9 @@ it on, a launched `claude` lane's session settings carry
 routine commands and still stops a risky one. The client ignores `auto` from a
 project's own `.claude/settings.json`, which is why the launch carries it. The
 default is off, a lane entry overrides the project, a value that is not a
-boolean is refused, and no bypass mode is ever passed. Codex CLI
-0.153.4 has no per-tool approval surface of its own — its approval settings are
-whole-session policies — so its launch is left untouched and its prompts are
-reported for you to answer.
+boolean is refused, and no bypass mode is ever passed. Both opt-ins apply to
+`claude` lanes only. Codex, Gemini, Copilot, OpenCode and Amp launches are left
+untouched, and their prompts are reported for you to answer.
 
 ## Tab titles
 
@@ -219,7 +241,9 @@ lane. The supervision key `titles` turns the tab title off; the details are in
 
 ## `status`
 
-`status` prints the server line, the code line, the state directory and then,
+`status` prints the `Service:` line, a `Code:` line only when the service is
+stale, a `Store:` line only when the schema needs a repair, the `Notify:` line
+and the `State:` line, and then,
 per project, the open work: each live claim's issue, title, owner, lane state,
 last event and pull request, then one line per lane with its state, live claim
 count and current task. The task is the lane's last report while the lane still
@@ -249,11 +273,12 @@ ownership, activity and outcomes.
   <img src="https://cdn.jsdelivr.net/gh/suneel944/agent-parley@main/docs/assets/screenshot-status.svg" width="880" alt="agent-parley status listing issue owners, a pending handoff, and a lane on the wrong branch">
 </p>
 
-`Code: stale` says the running service is older than the installed code. The
-service is up and answering, so nothing reports it as down, but it is serving
-the build it was started from rather than the one on disk: restart it with
-`agent-parley down && agent-parley up` before reading the next frame as current.
-`Code: ok` says the running service matches the checkout.
+`Code: stale` says the service found the sources on disk changed since it
+started. It stops accepting connections, answers every request as stale until
+it exits, and the next hook or `agent-parley up` starts a service on the
+current code; the line ends with that remedy: `agent-parley up starts a
+service on the code in the checkout.` When the service matches the code, no
+`Code:` line is printed.
 
 Narrow the table by appending a participant name, which reports that lane in
 full instead of as a row, or by filters that combine:
@@ -377,7 +402,8 @@ of the frame is read on every redraw, keeping a normal frame under a second.
 
 A lane that drifted from its branch, holds a stale lease, had a call rejected,
 owns an overdue issue or lost its session process is drawn in colour where the
-terminal offers it and in bold where it does not. Each of those also prints its
+terminal offers it and in bold where it does not. Set `NO_COLOR` to keep
+emphasis bold-only. Each of those also prints its
 own marker in the table or a note under it, so a monochrome pipe reads exactly
 the same.
 
@@ -387,7 +413,11 @@ reporting. `top --once` prints full detail.
 `TOKENS` is the session total that lane's own native client already wrote to
 disk. No vendor is asked, no key is read and no price is applied, so it is a
 relative signal between refreshes rather than billed spend, and the cell is
-blank when nothing could be read.
+blank when nothing could be read. `claude`, `codex`, `copilot`, `gemini` and
+`opencode` lanes are read; an `amp` lane, whose client keeps no local usage
+record, prints `n/a`. A `copilot` lane counts only once its session ends.
+[Token reading](providers.md#token-reading) names the file each provider is
+read from.
 
 ## Idle time is a number, not an impression
 
@@ -511,11 +541,15 @@ service against the code installed here. A service started from an older build
 is reported stale with the restart that clears it, rather than reported ready.
 Then `projects` names each registered root that no longer exists, `notify`
 says whether outbound and inbound notification are active, `approvals` names
-each lane lacking the resume opt-in, and a platform line names the kernel
+each lane lacking the resume opt-in, `tokens` names the defined providers
+whose token usage is read and those not measured, and a platform line names the kernel
 release, the WSL generation and whether `pidfd_open` is available. `doctor`
-exits non-zero on a version mismatch, a missing project root, or notification
-configured but unable to send, so a script can gate on it; notification that
-is off and an `approvals` setup gap leave it at zero. It reads only, and
+exits non-zero on a plugin protocol mismatch, a store schema this build cannot
+use, a stale service, a service that is not running while a registered project
+has lanes, a missing project root, a damaged decisions record kept aside,
+outbound notification configured but unable to send, or an inbound poller
+fault such as a passcode shorter than twelve characters, so a script can gate
+on it; notification that is off and an `approvals` setup gap leave it at zero. It reads only, and
 prints no credential.
 
 ## `metrics`
@@ -533,10 +567,48 @@ agent-parley metrics --output /var/lib/node_exporter/parley.prom --every 30
 
 `--output` writes the frame by atomic rename, so the textfile collector of
 `node_exporter` never reads a partial one, and `--every` rewrites it on that
-interval until you interrupt it. There is no HTTP endpoint and no new port: the
-file is the interface. The command reads the records `top` reads, holds no lock
+interval until you interrupt it. `metrics` itself opens no port: the file is
+the interface, and `top --serve` below is the endpoint to scrape instead. The
+command reads the records `top` reads, holds no lock
 and writes no coordination state, and its `tokens` counter is what the native
 client counted rather than billed spend, exactly as the `TOKENS` column is.
+
+### Web view and scrape endpoint
+
+`top --serve [PORT]` serves the same frame in a browser tab. It binds
+`127.0.0.1` only, on `PORT` or a free port when none is given, and prints an
+address carrying a random token generated for that run:
+
+```sh
+agent-parley top --serve 8790 --interval 5
+Serving a read-only view at http://127.0.0.1:8790/<token>/
+```
+
+| Path | Content |
+| --- | --- |
+| `/<token>/` | HTML table of every lane with each `top` column and its problem notes, reloading every `--interval` seconds, without JavaScript |
+| `/<token>/frame.json` | The document `top --json` prints |
+| `/<token>/metrics` | The Prometheus text `metrics` prints |
+
+A request without the token gets 404, one whose `Host` header is not
+`127.0.0.1:PORT` or `localhost:PORT` gets 403, as a guard against DNS
+rebinding, and any method but `GET` gets 405. No route writes state, answers a
+decision or sends mail; steering stays in the CLI. The reading is cached for
+the interval, at least one second, so several tabs or a scraper share one
+reading. `--provider`, `--repo`, `--participant`, `--since`, `--sort` and
+`--no-operator-edits` narrow the served frame as they narrow `top`. The token
+is the only credential: treat the printed address as a secret, and stop the
+command to revoke it.
+
+To watch from another machine, forward the same port number over SSH, so the
+`Host` header still names the served port:
+
+```sh
+ssh -N -L 8790:127.0.0.1:8790 operator@workstation
+```
+
+then open the printed address locally. A Prometheus job scrapes
+`/<token>/metrics` with `metrics_path` set to that path.
 
 ### Pull request outcomes
 
@@ -545,9 +617,9 @@ window, or the last 7 days when no window is given:
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
-| `agent_parley_lane_pull_requests_opened_total` | counter | Pull requests supervision first saw open in the window |
-| `agent_parley_lane_pull_requests_merged_total` | counter | Pull requests a claim resolution recorded as merged in the window |
-| `agent_parley_lane_pull_requests_closed_total` | counter | Pull requests that left the open list in the window with no recorded merge |
+| `agent_parley_lane_pull_requests_opened_window` | gauge | Pull requests supervision first saw open in the window |
+| `agent_parley_lane_pull_requests_merged_window` | gauge | Pull requests a claim resolution recorded as merged in the window |
+| `agent_parley_lane_pull_requests_closed_window` | gauge | Pull requests that left the open list in the window with no recorded merge |
 | `agent_parley_lane_first_pass_ratio` | gauge | Share of merged pull requests with a known CI round count that merged after one round and no `CHANGES_REQUESTED` review |
 | `agent_parley_lane_ci_rounds_unknown` | gauge | Merged pull requests with no stored CI round count, left out of the ratio and the median |
 | `agent_parley_lane_ci_rounds_median` | gauge | Median CI rounds over merged pull requests with a known count |
@@ -561,10 +633,54 @@ when it was first seen; one that leaves the open list moves to that file's
 resolution names, so its lane is the claim's holder and its claim-to-merge time
 runs from the claim to the forge's close instant. A pull request that left the
 open list without such a resolution counts as closed unmerged, which includes a
-merge no claim recorded. A window with nothing in it reports zeros. `top` adds
+merge no claim recorded. A window with nothing in it reports zero counts and no
+ratio or median sample: a lane with no merged pull request, or none with a known
+CI round count, exports no `first_pass_ratio` or `ci_rounds_median` sample, and
+one with no timed merge no `claim_to_merge_seconds_median`, so an idle lane
+never reads as a 0 % first pass or an instant merge; `top --json` carries
+`null` for those fields. The counts are gauges, not counters, because a pull request
+that leaves the window lowers them; read them as levels rather than through
+`rate()` or `increase()`. `top` adds
 one `Pull requests` summary to its issues line and `status` one line per
 project over the last 7 days, each only when the window holds any, and `top --json` carries each lane's figures
 under `pull_requests`.
+
+## Usage per issue
+
+A claim records what its lane had consumed when it began and again when it
+resolved, from the same readings a budget uses: tokens from the lane's own
+session transcript, served calls from the store and hours from the session's
+age. The difference is written on the claim's resolution and its `resolve`
+history entry as `usage` with `tokens`, `calls`, `hours` and a `basis`.
+`basis: claim` means both readings came from the same session. `basis:
+session` means the session rotated during the claim, so the figures cover
+the final session only and may be lower than what the claim used. A figure
+that could not be read is `null`. `history issue N` shows it on the
+`resolve` line, and `--json` carries it under each record's `usage`.
+
+```sh
+agent-parley report usage --since 7d
+agent-parley report usage --since 7d --json
+```
+
+`report usage` lists every claim resolved in the window. Each row names the
+issue, its lane and provider, the outcome, the pull request and its state, and
+the usage. A total line follows the rows. A ledger written before this
+reading existed loads unchanged and reports its figures as unknown.
+
+No figure is spend. An operator who wants an estimate records a blended price
+per million tokens for a provider from an operator shell:
+
+```sh
+agent-parley provider price claude --per-mtok 3
+agent-parley provider price claude --per-mtok 0
+```
+
+The second command removes the price. When a price is set, each row with a
+token count gains an `estimated_spend` and the totals gain a sum. The text
+output labels the total as an estimate from recorded prices, not a bill. A lane
+cannot set or change a price: the command refuses a lane worktree and any
+process holding a lane's `AGENT_PARLEY_TOKEN`.
 
 ## `watch`
 

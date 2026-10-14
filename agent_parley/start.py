@@ -9,8 +9,10 @@ Every reading is read-only and local. Nothing starts the service, registers
 a repository, creates the state directory or runs a native CLI: the service
 is judged from its published record and the process that record names, the
 registration from the recorded manifests, and each native CLI's plugin from
-the record that CLI keeps (`plugins.recorded`). The only process started is
-one bounded `git status` in the working directory. For a registered project
+the record that CLI keeps (`plugins.recorded`). The only processes started
+are one bounded `git status` in the working directory and, in a registered
+base checkout, one bounded `git stash list` that finds the entry
+registration made of its pending changes. For a registered project
 whose service runs, the screen also reads what `agent-parley problems`
 would list, from the readings supervision cached, and whether outbound
 notification is configured, so a returning operator learns what needs
@@ -23,12 +25,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
-from agent_parley import BridgeError, plugins, process
+from agent_parley import BridgeError, plugins, process, roster
 from agent_parley.status import registered_root
+from agent_parley.worktrees import PENDING_MESSAGE
 
 GIT_SECONDS = 2.0
 DEFAULT_HOME = "~/.local/state/agent-parley"
@@ -42,50 +46,67 @@ class Found(NamedTuple):
         dirty: Whether that checkout has uncommitted changes, or None when
             Git did not answer in time.
         registered: Whether the checkout belongs to a registered project.
-        clis: Each supported native CLI on PATH, mapped to whether its
-            plugin record lists the Agent Parley plugin.
+        clis: Each built-in provider whose command is on PATH, mapped to
+            whether its plugin record lists the Agent Parley plugin, or
+            None for a provider that takes no plugin.
         service: Whether the recorded coordination service is running.
         problems: The rows `agent-parley problems` would list, most urgent
             first; read only for a registered project with a running
             service.
-        notify: Whether an outbound notification transport is configured.
+        notify: Whether an outbound notification transport is configured
+            with every setting it needs to send.
         lanes: How many lanes the project has registered.
+        unborn: Whether the checkout's branch has no commit yet, so no
+            lane can start from it.
+        stash: Commit of the newest stash entry registration made of the
+            base checkout's pending changes, empty when there is none.
     """
 
     repository: bool
     dirty: bool | None
     registered: bool
-    clis: dict[str, bool]
+    clis: dict[str, bool | None]
     service: bool
     problems: tuple[dict, ...] = ()
     notify: bool = True
     lanes: int = 0
+    unborn: bool = False
+    stash: str = ""
 
 
-def checkout(directory: Path) -> tuple[bool, bool | None]:
-    """Says whether a directory is in a Git checkout and whether it is dirty.
+def checkout(directory: Path) -> tuple[bool, bool | None, bool]:
+    """Says whether a directory is in a Git checkout and what state it is in.
 
     Membership is read from a ``.git`` entry in the directory or a parent,
     so a slow or missing Git never makes a plain directory read as a
-    checkout; Git runs only to learn whether a found checkout is dirty.
-    It runs with ``--no-optional-locks`` so the reading never refreshes
-    and rewrites the checkout's index.
+    checkout; Git runs only to learn whether a found checkout is dirty and
+    whether it has a first commit. It runs with ``--no-optional-locks`` so
+    the reading never refreshes and rewrites the checkout's index. The
+    version 2 porcelain branch header names an unborn branch as
+    ``# branch.oid (initial)``, a stable form Git does not translate.
 
     Args:
         directory: Directory to inspect.
 
     Returns:
-        Whether it is a checkout, and whether it has uncommitted changes,
-        None when Git did not answer within `GIT_SECONDS`.
+        Whether it is a checkout; whether it has uncommitted changes, None
+        when Git did not answer within `GIT_SECONDS`; and whether its
+        branch has no commit yet.
     """
     resolved = directory.resolve()
     if not any(
         (place / ".git").exists() for place in (resolved, *resolved.parents)
     ):
-        return False, False
+        return False, False, False
     try:
         finished = subprocess.run(
-            ["git", "--no-optional-locks", "status", "--porcelain"],
+            [
+                "git",
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+            ],
             cwd=directory,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -94,12 +115,60 @@ def checkout(directory: Path) -> tuple[bool, bool | None]:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return True, None
+        return True, None, False
     except OSError:
-        return False, False
+        return False, False, False
     if finished.returncode:
-        return False, False
-    return True, bool(finished.stdout.strip())
+        return False, False, False
+    lines = finished.stdout.splitlines()
+    headers = [line for line in lines if line.startswith("# ")]
+    return (
+        True,
+        len(headers) < len(lines),
+        "# branch.oid (initial)" in headers,
+    )
+
+
+def stashed(root: Path) -> str:
+    """Finds the stash entry registration made of a checkout's pending work.
+
+    `worktrees.preserve_pending` stashes with a message that starts with
+    `worktrees.PENDING_MESSAGE`; Git records it after an ``On <branch>: ``
+    prefix, and a branch name cannot hold a colon. The entry stays listed
+    until it is dropped, because ``git stash apply`` keeps it.
+
+    Args:
+        root: Base checkout the project was registered from.
+
+    Returns:
+        The newest such entry's commit, or an empty string when there is
+        none or Git did not answer within `GIT_SECONDS`.
+    """
+    try:
+        finished = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "stash",
+                "list",
+                "--format=%H %s",
+            ],
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=GIT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if finished.returncode:
+        return ""
+    for line in finished.stdout.splitlines():
+        entry, _, subject = line.partition(" ")
+        if subject.partition(": ")[2].startswith(PENDING_MESSAGE):
+            return entry
+    return ""
 
 
 def serving(home: Path) -> bool:
@@ -136,8 +205,8 @@ def attention(home: Path, root: str) -> tuple[tuple[dict, ...], bool, int]:
 
     Returns:
         The problem rows, most urgent first, whether an outbound
-        notification transport is configured, and how many lanes the
-        project has registered.
+        notification transport is configured and able to send, and how
+        many lanes the project has registered.
     """
     from agent_parley import notify
     from agent_parley.cli import Bridge, problems
@@ -158,8 +227,40 @@ def attention(home: Path, root: str) -> tuple[tuple[dict, ...], bool, int]:
         for project in report["projects"]
         if project["root"] == root
     )
-    configured = bool(notify.reported(notify.environment(home))["transports"])
+    outbound = notify.reported(notify.environment(home))
+    configured = bool(outbound["transports"]) and not outbound["fault"]
     return rows, configured, lanes
+
+
+def installed(home: Path) -> dict[str, bool | None]:
+    """Finds each built-in provider whose command is on PATH.
+
+    The built-in names are `roster.ADAPTERS`; a local definition with the
+    same name supplies its own command, and an unreadable provider registry
+    falls back to the built-in presets. Only the clients in
+    `plugins.CLIENTS` take a marketplace plugin, so every other provider is
+    ready as soon as its command is found.
+
+    Args:
+        home: Private state directory, which need not exist.
+
+    Returns:
+        Each provider found, in `roster.ADAPTERS` order, mapped to whether
+        its plugin is recorded, or None when it takes no plugin.
+    """
+    try:
+        defined = roster.providers(home)
+    except (OSError, ValueError, AttributeError):
+        defined = roster.PRESETS
+    plugged = {client.name for client in plugins.CLIENTS}
+    found: dict[str, bool | None] = {}
+    for name in roster.ADAPTERS:
+        entry = defined.get(name)
+        command = entry.get("command") if isinstance(entry, dict) else None
+        if not isinstance(command, str) or not shutil.which(command):
+            continue
+        found[name] = plugins.recorded(name) if name in plugged else None
+    return found
 
 
 def look(home: Path, directory: Path) -> Found:
@@ -172,16 +273,22 @@ def look(home: Path, directory: Path) -> Found:
     Returns:
         What was found.
     """
-    repository, dirty = checkout(directory)
+    repository, dirty, unborn = checkout(directory)
     try:
         root = registered_root(home, directory) if repository else ""
     except (OSError, ValueError, KeyError, TypeError):
         root = ""
-    clis = {
-        client.name: plugins.recorded(client.name)
-        for client, _ in plugins.detected()
-    }
-    found = Found(repository, dirty, bool(root), clis, serving(home))
+    resolved = directory.resolve()
+    base = bool(root) and Path(root) in (resolved, *resolved.parents)
+    found = Found(
+        repository,
+        dirty,
+        bool(root),
+        installed(home),
+        serving(home),
+        unborn=unborn,
+        stash=stashed(Path(root)) if base else "",
+    )
     if not (root and found.service):
         return found
     import sqlite3
@@ -235,7 +342,7 @@ def advice(found: Found) -> list[tuple[str, str]]:
         steps.append(
             ("agent-parley notify setup", "Get told when a lane needs you.")
         )
-    missing = [name for name, added in found.clis.items() if not added]
+    missing = [name for name, added in found.clis.items() if added is False]
     if missing:
         steps.append(
             (
@@ -244,11 +351,15 @@ def advice(found: Found) -> list[tuple[str, str]]:
             )
         )
     chosen = next(
-        (name for name, added in found.clis.items() if added),
+        (name for name, added in found.clis.items() if added is not False),
         next(iter(found.clis)),
     )
     if not found.repository:
         steps.append(("cd REPOSITORY", "Move into the Git checkout to share."))
+    elif found.unborn:
+        steps.append(
+            ("git commit", "Make the first commit; lanes start from it.")
+        )
     elif found.dirty:
         steps.append(
             ("git status", "Lanes start from the last commit; commit first.")
@@ -275,6 +386,8 @@ def render(found: Found) -> str:
     """
     if not found.repository:
         repository = "not a Git repository"
+    elif found.unborn:
+        repository = "Git repository, no commits yet"
     elif found.dirty is None:
         repository = "Git repository"
     elif found.dirty:
@@ -282,13 +395,20 @@ def render(found: Found) -> str:
     else:
         repository = "Git repository, clean"
     if found.clis:
-        clis = ", ".join(
-            f"{name} (plugin {'added' if added else 'missing'})"
-            for name, added in found.clis.items()
-        )
+        rows: list[list[str]] = []
+        for name, added in found.clis.items():
+            item = (
+                f"{name} (no plugin needed)"
+                if added is None
+                else f"{name} (plugin {'added' if added else 'missing'})"
+            )
+            if rows and len(", ".join([*rows[-1], item])) < 68:
+                rows[-1].append(item)
+            else:
+                rows.append([item])
+        clis = (",\n" + " " * 12).join(", ".join(row) for row in rows)
     else:
-        names = ", ".join(client.name for client in plugins.CLIENTS)
-        clis = f"none on PATH ({names})"
+        clis = f"none on PATH ({', '.join(roster.ADAPTERS)})"
     steps = advice(found)
     width = max(len(command) for command, _ in steps) + 2
     pending = []
@@ -309,6 +429,11 @@ def render(found: Found) -> str:
             "",
             "Found:",
             f"  Here      {repository}",
+            *(
+                [f"  Stashed   git stash apply {found.stash}"]
+                if found.stash
+                else []
+            ),
             "  Project   "
             + ("registered" if found.registered else "not registered"),
             f"  CLIs      {clis}",

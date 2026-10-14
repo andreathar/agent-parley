@@ -12,7 +12,9 @@ moved method reads. This module never imports `cli` at import time, because
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -27,6 +29,54 @@ if TYPE_CHECKING:
 TIMING_LOCK_SECONDS = 5
 
 
+def suggested_gate(root: Path) -> list[str] | None:
+    """Names the check command a repository's committed files declare.
+
+    Detection only suggests: the operator owns the merge gate, so nothing
+    found here is ever recorded. Only files committed at HEAD count, which
+    keeps an untracked scratch file from shaping the suggestion.
+
+    Args:
+        root: Base checkout of the repository.
+
+    Returns:
+        The argument list of the first match, in order: a ``Makefile``
+        ``check`` or ``test`` target, a ``package.json`` test script, a
+        ``pyproject.toml`` pytest table, a ``Cargo.toml``, a ``go.mod``;
+        None when nothing matches or HEAD cannot be read.
+    """
+    from agent_parley.cli import git
+
+    try:
+        committed = set(git(root, "ls-tree", "--name-only", "HEAD").split())
+        files = {
+            name: git(root, "show", f"HEAD:{name}")
+            for name in ("Makefile", "package.json", "pyproject.toml")
+            if name in committed
+        }
+    except BridgeError:
+        return None
+    targets = re.findall(
+        r"^([\w.-]+)\s*:", files.get("Makefile", ""), re.MULTILINE
+    )
+    for target in ("check", "test"):
+        if target in targets:
+            return ["make", target]
+    try:
+        scripts = json.loads(files.get("package.json") or "{}")["scripts"]
+    except (ValueError, KeyError, TypeError):
+        scripts = {}
+    if isinstance(scripts, dict) and scripts.get("test"):
+        return ["npm", "test"]
+    if "[tool.pytest" in files.get("pyproject.toml", ""):
+        return ["pytest", "-q"]
+    if "Cargo.toml" in committed:
+        return ["cargo", "test"]
+    if "go.mod" in committed:
+        return ["go", "test", "./..."]
+    return None
+
+
 class BridgeCore:
     """Private state root, mail server and project lanes of the bridge.
 
@@ -34,7 +84,12 @@ class BridgeCore:
         home: Resolved private state directory.
         config: Local HTTP port and bearer credential.
         url: Loopback HTTP origin of the mail server.
+        preserved: The notice naming the stash entry registration made of
+            the base checkout's pending changes, empty when nothing was
+            stashed, so `run` can repeat it after the native CLI exits.
     """
+
+    preserved: str = ""
 
     def __init__(self, home: Path) -> None:
         """Loads or initializes private configuration under home."""
@@ -61,6 +116,12 @@ class BridgeCore:
                         {"port": port, "token": secrets.token_urlsafe(32)},
                     )
         self.config = json.loads(path.read_text())
+        for key in ("port", "token"):
+            if key not in self.config:
+                raise BridgeError(
+                    f"{path} lacks {key!r}; the file is incomplete or "
+                    "corrupt. Remove it so the bridge writes a new one."
+                )
         self.url = f"http://127.0.0.1:{self.config['port']}"
 
     def server_process(self) -> process.ServerProcess | None:
@@ -349,11 +410,19 @@ class BridgeCore:
         worktree to be on the wrong branch of, and reading its pruned lane
         would report an unavailable worktree as a drifted one.
 
+        A new manifest records ``case_insensitive`` when Git reports
+        ``core.ignorecase``, which Git sets from a file-system probe when the
+        repository is cloned or initialized, so reservation keys there are
+        compared without regard to case. A manifest without the field keeps
+        exact comparison.
+
         Raises:
             BridgeError: If a checked lane left its assigned branch, Git
                 registers its worktree at another path, which names the
-                command that moves it back, or no manifest exists and
-                creation is not allowed.
+                command that moves it back, no manifest exists and
+                creation is not allowed, or the repository has no commit
+                yet for lanes to start from, checked before any pending
+                work is stashed.
         """
         from agent_parley.cli import (
             drift,
@@ -396,16 +465,30 @@ class BridgeCore:
             return data
         if not preserve:
             return roster.read(directory)
+        try:
+            base = git(root, "rev-parse", "--verify", "--quiet", "HEAD")
+        except BridgeError:
+            raise BridgeError(
+                "This repository has no commits yet; lanes start from HEAD. "
+                "Make a first commit, then retry.",
+                next_command='git commit --allow-empty -m "Initial commit"',
+            ) from None
         preserved = preserve_pending(root)
         if preserved:
+            self.preserved = preserved
             print(preserved, file=sys.stderr, flush=True)
+        try:
+            folded = git(root, "config", "--bool", "core.ignorecase")
+        except BridgeError:
+            folded = "false"
         data = {
             "version": roster.MANIFEST_VERSION,
             "root": str(root),
-            "base": git(root, "rev-parse", "--verify", "HEAD"),
+            "base": base,
             "verify": [],
             "initialize": [],
             "forge": forge.select(root),
+            **({"case_insensitive": True} if folded == "true" else {}),
             "participants": {},
         }
         write_json(path, data)
@@ -429,7 +512,9 @@ class BridgeCore:
             repo: Main checkout or linked worktree of the target repository.
             name: Participant name, unique within this project.
             provider: Provider definition; defaults to the registered one, or
-                to a provider named exactly like the participant.
+                to a provider named exactly like the participant. A new name
+                that names no provider is refused with a ``--provider``
+                remedy rather than a provider definition.
             credential: Credential profile selecting one account; defaults to
                 the profile already registered for this participant.
 
@@ -454,9 +539,20 @@ class BridgeCore:
             data = self._project(root, directory, verify={name}, preserve=True)
             participants = data["participants"]
             existing = participants.get(name)
-            provider = provider or (existing or {}).get("provider") or name
+            chosen = provider or (existing or {}).get("provider")
+            provider = chosen or name
             if credential is None:
                 credential = (existing or {}).get("credential")
+            if not chosen and provider not in roster.providers(self.home):
+                raise BridgeError(
+                    f"No provider named {name!r}; a new lane name needs "
+                    f"--provider. Run agent-parley run {name} --provider "
+                    "claude, or agent-parley provider list.",
+                    next_command=(
+                        f"agent-parley run {shlex.quote(name)} "
+                        "--provider claude"
+                    ),
+                )
             roster.provider(self.home, provider)
             if credential is not None:
                 roster.credential(self.home, credential)
@@ -591,16 +687,29 @@ class BridgeCore:
         credential is not reissued here; the next launch registers one, which
         is the only path that has ever issued a lane's credential.
 
+        A worktree already at the lane path is kept only when it is this
+        lane's own: on the lane branch, and neither a recorded spare nor
+        another participant's lane. Anything else is refused, because
+        adopting it would put two participants, or a lane and a spare the
+        pool may still hand out, in one worktree.
+
         Args:
             root: Common repository root.
             directory: Private state directory for the repository.
             data: Manifest being updated, under the held setup lock.
             name: Retired participant being re-admitted.
+
+        Raises:
+            BridgeError: If the lane path holds a spare, another
+                participant's lane, or a worktree on another branch.
         """
+        from agent_parley import pool
         from agent_parley.cli import (
+            drift,
             git,
             has_branch,
             initialize_lane,
+            lane_branch,
             preparation,
             write_json,
         )
@@ -608,7 +717,31 @@ class BridgeCore:
         participant = data["participants"][name]
         lane = Path(participant["lane"])
         branch = participant["branch"]
-        if not lane.exists():
+        if lane.exists():
+            holders = sorted(
+                other
+                for other, entry in data["participants"].items()
+                if other != name and Path(entry["lane"]) == lane
+            )
+            if holders or any(
+                Path(spare["path"]) == lane for spare in pool.spares(directory)
+            ):
+                holder = f"{holders[0]}'s lane" if holders else "a pool spare"
+                raise BridgeError(
+                    f"{name}'s recorded lane {lane} now holds {holder}, so "
+                    "re-admitting there would share one worktree. Move that "
+                    f"worktree away with `git worktree move`, then run "
+                    f"agent-parley run {shlex.quote(name)} again.",
+                    next_command=f"git -C {shlex.quote(str(root))} "
+                    "worktree list",
+                )
+            actual = lane_branch(lane)
+            if actual != branch:
+                raise BridgeError(
+                    drift(name, participant, actual),
+                    next_command=f"agent-parley participant restore {name}",
+                )
+        else:
             started = time.monotonic()
             git(root, "worktree", "prune")
             if has_branch(root, branch):

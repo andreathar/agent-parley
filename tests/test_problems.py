@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -787,6 +788,33 @@ def test_a_missing_root_names_the_live_lanes_it_keeps(
     )
 
 
+def test_a_forge_refusing_the_account_names_the_gh_auth_remedy(
+    bridge, repo, paired, served
+):
+    directory = bridge.project(repo)[1]
+    cache = directory / status.FORGE_ISSUES
+    assert not rows(bridge, problems.FORGE_REFUSED)
+    failed = {
+        "read_at": time.time() - 900,
+        "failed_at": time.time() - 30,
+        "issues": {},
+        "failure": {"kind": "auth", "detail": "HTTP 401: Bad credentials"},
+    }
+    write_json(cache, failed)
+    [row] = rows(bridge, problems.FORGE_REFUSED)
+    assert row["project"] == paired["root"]
+    assert row["seconds"] >= 30
+    assert "(auth): HTTP 401: Bad credentials" in row["detail"]
+    assert row["command"].startswith("gh auth status, then gh auth switch")
+    write_json(cache, {**failed, "failure": {"kind": "rate", "detail": ""}})
+    [row] = rows(bridge, problems.FORGE_REFUSED)
+    assert "retries at" in row["command"]
+    write_json(cache, {**failed, "failure": {"kind": "timeout"}})
+    assert not rows(bridge, problems.FORGE_REFUSED)
+    write_json(cache, {**failed, "read_at": time.time()})
+    assert not rows(bridge, problems.FORGE_REFUSED)
+
+
 def test_two_overdue_claims_on_one_lane_are_one_row(
     bridge, repo, paired, served
 ):
@@ -1542,10 +1570,14 @@ def test_a_lane_ready_to_retire_carries_no_separate_orphan_row(monkeypatch):
     assert not orphaned_lane(LIVE, monkeypatch, problems.ORPHANED)
 
 
-def integrating_lane(monkeypatch, seconds, pull=True, approval=None):
+def integrating_lane(monkeypatch, seconds, pull=True, approval=None, **reading):
     """Derives a dead lane's rows holding a waiting ready report."""
     monkeypatch.setattr(supervision, "dirty_paths", lambda lane: [])
-    opened = {"number": 830, "url": "https://example.test/pull/830"}
+    opened = {
+        "number": 830,
+        "url": "https://example.test/pull/830",
+        **reading,
+    }
     claims = [
         {**ORPHANED[0], "pull_request": opened if pull else None},
     ]
@@ -1602,6 +1634,25 @@ def test_a_ready_report_waiting_on_its_pull_request_replaces_retirement(
     [row] = [row for row in held if row["condition"] == problems.INTEGRATE]
     assert row["command"] == "agent-parley approve claude --repo /root"
     assert "approve" in declared()
+
+
+def test_a_conflicting_or_red_pull_request_is_never_offered_for_merge(
+    monkeypatch,
+):
+    ceiling = supervision.DEFAULT_WAIT_CEILING
+    conflicting = integrating_lane(
+        monkeypatch, ceiling + 1, mergeable="CONFLICTING", checks="green"
+    )
+    [row] = [
+        row for row in conflicting if row["condition"] == problems.INTEGRATE
+    ]
+    assert "conflicts with its base" in row["detail"]
+    assert row["command"].startswith("rebase the claude branch")
+    assert "review and merge" not in row["command"]
+    red = integrating_lane(
+        monkeypatch, ceiling + 1, mergeable="MERGEABLE", checks="red"
+    )
+    assert problems.INTEGRATE not in {row["condition"] for row in red}
 
 
 def test_a_ready_claim_with_no_open_pull_request_is_reported(
@@ -1937,3 +1988,49 @@ def test_a_dead_lane_holding_a_claim_keeps_its_old_rows():
     problems._fold([row], project, 86400)
     assert "folded" not in row
     assert any(line.endswith("woken; x y") for line in problems.lines([row]))
+
+
+def test_dirtiness_is_read_once_per_reporting_lane_on_worker_threads(
+    monkeypatch,
+):
+    calls = []
+
+    def recorder(lane):
+        calls.append((lane, threading.current_thread()))
+        return ["draft.txt"]
+
+    monkeypatch.setattr(supervision, "dirty_paths", recorder)
+    stopped = {
+        "state": supervision.STOPPED,
+        "process_alive": False,
+        "age_seconds": 900,
+    }
+    records = [
+        lane_record(participant="quiet", availability=stopped),
+        lane_record(participant="live"),
+        lane_record(participant="drifted", availability=stopped, drift=True),
+        {"participant": "gone"},
+    ]
+    data = {
+        "participants": {
+            name: {"lane": f"/{name}", "branch": "work"}
+            for name in ("quiet", "live", "drifted")
+        }
+        | {"gone": {"lane": "/gone", "branch": "work", "retired": 1.0}}
+    }
+    dirt = problems._dirt({"participants": records}, data)
+    assert dirt == {"/gone": ["draft.txt"], "/quiet": ["draft.txt"]}
+    assert sorted(lane for lane, _ in calls) == ["/gone", "/quiet"]
+    assert all(thread is not threading.main_thread() for _, thread in calls)
+    calls.clear()
+    rows = problems._lane_rows(
+        records[0],
+        data["participants"]["quiet"],
+        "/root",
+        supervision.DEFAULTS,
+        600,
+        time.time(),
+        dirt=dirt,
+    )
+    assert problems.DIRTY in {row["condition"] for row in rows}
+    assert calls == []

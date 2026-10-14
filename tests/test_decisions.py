@@ -42,6 +42,7 @@ def test_a_repeat_observation_refreshes_the_one_open_decision(tmp_path):
     first = opened(tmp_path, now=100.0)
     again = opened(tmp_path, now=200.0)
     assert again["id"] == first["id"]
+    assert again["nonce"] == first["nonce"]
     assert again["refreshed"] == 200.0
     assert again["expires"] == 200.0 + decisions.DEFAULT_TTL
     assert [
@@ -101,9 +102,10 @@ def test_due_decisions_go_out_as_one_digest_with_a_row_each(tmp_path, sent):
     assert "accept (recommended)" in sent[0]["body"]
     rows = sent[0]["markup"]["inline_keyboard"]
     assert [button["callback_data"] for button in rows[0]] == [
-        f"d:{first['id']}:0",
-        f"d:{first['id']}:1",
+        f"d:{first['id']}.{first['nonce']}:0",
+        f"d:{first['id']}.{first['nonce']}:1",
     ]
+    assert f"decision: {first['id']}.{first['nonce']} " in sent[0]["body"]
     assert rows[0][0]["text"] == "accept *"
     assert all(
         len(button["callback_data"].encode()) <= 64
@@ -137,6 +139,72 @@ def test_a_refused_digest_is_retried_with_a_growing_backoff(
     stored = decisions.get(tmp_path, record["id"])
     assert stored["attempts"] == 2
     assert stored["retry_at"] == 131.0 + 2 * decisions.BACKOFF_FIRST
+
+
+def test_a_failing_transport_never_makes_a_healthy_one_resend(
+    tmp_path, monkeypatch
+):
+    calls = {"good": 0, "flaky": 0}
+    broken = {"flaky": True}
+
+    def good(config, subject, body):
+        calls["good"] += 1
+
+    def flaky(config, subject, body):
+        calls["flaky"] += 1
+        if broken["flaky"]:
+            raise OSError("smtp refused")
+
+    monkeypatch.setitem(notify.TRANSPORTS, "good", good)
+    monkeypatch.setitem(notify.TRANSPORTS, "flaky", flaky)
+    config = {"transports": ["good", "flaky"]}
+    record = opened(tmp_path, now=100.0)
+    for tick in range(4):
+        decisions.flush(tmp_path, config, now=100.0 + tick * 900.0)
+    stored = decisions.get(tmp_path, record["id"])
+    assert calls == {"good": 1, "flaky": 4}
+    assert stored["sent"] == 0.0
+    assert set(stored["delivered"]) == {"good"}
+    assert "flaky: OSError: smtp refused" in stored["error"]
+    broken["flaky"] = False
+    report = decisions.flush(tmp_path, config, now=10000.0)
+    assert report["sent"] == [record["id"]]
+    assert calls == {"good": 1, "flaky": 5}
+    assert decisions.get(tmp_path, record["id"])["sent"] == 10000.0
+    decisions.flush(tmp_path, config, now=20000.0)
+    assert calls == {"good": 1, "flaky": 5}
+
+
+def test_a_transport_failing_for_good_stops_at_the_attempt_cap(
+    tmp_path, monkeypatch
+):
+    calls = {"good": 0, "broken": 0}
+
+    def good(config, subject, body):
+        calls["good"] += 1
+
+    def refuse(config, subject, body):
+        calls["broken"] += 1
+        raise OSError("smtp refused")
+
+    monkeypatch.setitem(notify.TRANSPORTS, "good", good)
+    monkeypatch.setitem(notify.TRANSPORTS, "broken", refuse)
+    config = {"transports": ["good", "broken"]}
+    record = opened(tmp_path, now=100.0)
+    for tick in range(48):
+        decisions.flush(tmp_path, config, now=100.0 + tick * 900.0)
+    assert calls == {"good": 1, "broken": decisions.MAX_ATTEMPTS}
+    stored = decisions.get(tmp_path, record["id"])
+    assert stored["attempts"] == decisions.MAX_ATTEMPTS
+    assert stored["state"] == decisions.OPEN
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "codex-events.jsonl").read_text().splitlines()
+    ]
+    assert [event["reason_class"] for event in events] == [
+        "notification_failed"
+    ]
+    assert "broken: OSError: smtp refused" in events[0]["cause"]
 
 
 def test_a_decision_leased_by_one_sender_is_not_sent_by_another(tmp_path):
@@ -189,3 +257,51 @@ def test_no_credential_reaches_a_decision_record(tmp_path, monkeypatch, sent):
     assert record["reversibility"] == decisions.IRREVERSIBLE
     assert record["recommended"] == "deny"
     assert record["sent"]
+
+
+def test_a_damaged_record_is_kept_aside_before_a_writer_replaces_it(
+    tmp_path,
+):
+    from agent_parley import issues
+
+    opened(tmp_path, key="s1", lane="l1")
+    opened(tmp_path, key="s2", lane="l2")
+    path = tmp_path / decisions.RECORD_NAME
+    damaged = path.read_bytes()[:-5]
+    path.write_bytes(damaged)
+    assert decisions.list_open(tmp_path, 100.0) == []
+    assert path.read_bytes() == damaged
+    opened(tmp_path, key="s3", lane="l3")
+    kept = list(tmp_path.glob(f"{decisions.RECORD_NAME}.corrupt-*"))
+    assert len(kept) == 1 and kept[0].read_bytes() == damaged
+    assert str(kept[0]) in issues.supervision_error(tmp_path)["detail"]
+    assert [
+        record["lane"] for record in decisions.list_open(tmp_path, 100.0)
+    ] == ["l3"]
+    path.write_text("[]")
+    opened(tmp_path, key="s4", lane="l4")
+    copies = sorted(tmp_path.glob(f"{decisions.RECORD_NAME}.corrupt-*"))
+    assert len(copies) == 2 and copies[0].read_bytes() == damaged
+
+
+def test_a_missing_record_reads_as_empty_and_keeps_no_side_file(tmp_path):
+    assert decisions.list_open(tmp_path) == []
+    opened(tmp_path)
+    assert {path.name for path in tmp_path.iterdir()} == {
+        decisions.LOCK_NAME,
+        decisions.RECORD_NAME,
+    }
+
+
+def test_doctor_names_every_damaged_decision_copy(bridge):
+    from agent_parley import protocol
+
+    project = bridge.home / "projects" / "p1"
+    project.mkdir(parents=True)
+    kept = project / f"{decisions.RECORD_NAME}.corrupt-100"
+    kept.write_text("{")
+    reported = bridge.doctor()
+    named = {entry["component"]: entry for entry in reported["components"]}
+    assert named["decisions"]["state"] == protocol.DAMAGED
+    assert str(kept) in named["decisions"]["remedy"]
+    assert reported["consistent"] is False

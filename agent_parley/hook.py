@@ -13,7 +13,8 @@ budget:
 * Served: `CONNECT_TIMEOUT` to reach the service, then at most
   `server.DECISION_SECONDS` until it answers with a decision or with
   `DECIDING`. `DECIDING` ends the hook immediately with no context, so a
-  slow decision costs 0.25 + 1.5 seconds and is never repeated. The client
+  slow decision costs 0.25 + 1.5 seconds and is never repeated. A tool
+  call a command guard refuses is answered with that denial instead. The client
   confirms a whole reply with `RECEIPT`, and a decision that injected
   coordination closes the reply after at most `server.DELIVERY_SECONDS`
   more, once the lane records it as delivered.
@@ -55,6 +56,7 @@ RELAUNCH_STAMP = "relaunch.stamp"
 RELAUNCH_INTERVAL = 60.0
 HOOK_PID_ENV = "AGENT_PARLEY_HOOK_PID"
 ANSWERED_ENV = "AGENT_PARLEY_SERVICE_ANSWERED"
+PARTICIPANT_ENV = "AGENT_PARLEY_PARTICIPANT"
 DECIDING = 202
 
 CLIENT_SCRIPT = r"""#!/usr/bin/env bash
@@ -80,6 +82,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 payload="$(cat)"
+
+if [ "$adapter" = "copilot" ] \
+  && [ "$participant" != "${@PARTICIPANT_ENV@-}" ]; then
+  exit 0
+fi
 
 decide_in_process() {
   printf '%s' "$payload" | "@PYTHON@" -m agent_parley.hook "${arguments[@]}"
@@ -198,7 +205,8 @@ def write_client(home: str, python: str) -> str:
     ``claude`` hook call arrived empty. ``cat`` reads descriptor 0 as it
     was given, for one short process. A
     payload past `MAX_INPUT_BYTES` goes straight to the in-process path,
-    which records it as oversize and allows the call.
+    which records it as oversize and runs only the guards its small fields
+    allow.
 
     The reply body is read to its declared length and then confirmed with
     `RECEIPT`, which the request announces in `RECEIPT_HEADER`. A write
@@ -232,6 +240,7 @@ def write_client(home: str, python: str) -> str:
         .replace("@DECIDING@", str(DECIDING))
         .replace("@MAX_INPUT@", str(MAX_INPUT_BYTES))
         .replace("@ANSWERED@", ANSWERED_ENV)
+        .replace("@PARTICIPANT_ENV@", PARTICIPANT_ENV)
         .replace("@status_header@", STATUS_HEADER)
         .replace("@stdout_header@", STDOUT_HEADER)
         .replace("@receipt_header@", RECEIPT_HEADER)
@@ -423,6 +432,10 @@ def relaunch(home: str) -> None:
     backward clock step leaves, is read as expired rather than holding
     relaunch off until the clock catches up.
 
+    A recorded service whose identity cannot be read, as when ``ps``
+    times out on a loaded macOS host, is left running rather than raced
+    by a second start.
+
     A home with no record is left alone: nothing claimed to serve it, and
     the first start belongs to the lane launch or to the operator. The
     request is detached and never waited on, so the hook that made it
@@ -440,7 +453,12 @@ def relaunch(home: str) -> None:
     try:
         with open(os.path.join(home, "server.json")) as stream:
             record = json.load(stream)
-        if process.alive(record.get("pid"), record.get("start_ticks")):
+        if (
+            process.alive_or_unknown(
+                record.get("pid"), record.get("start_ticks")
+            )
+            is not False
+        ):
             return
         failures = int(record.get("failures", 0) or 0)
         interval = RELAUNCH_INTERVAL * 2 ** min(max(failures - 1, 0), 4)
@@ -509,11 +527,21 @@ def main() -> int:
     in-process decision.
 
     A payload past `MAX_INPUT_BYTES` is never posted: the service would
-    refuse it, and the in-process path records it as oversize and allows
-    the call.
+    refuse it, and the in-process path records it as oversize and runs
+    only the guards its small fields allow.
+
+    A Copilot profile runs every hook registered in it for every session on
+    it, so a ``copilot`` hook whose participant is not the session's own,
+    named in `PARTICIPANT_ENV` by the launcher, emits nothing and succeeds.
+    A session the launcher did not start carries no name, so another lane's
+    hook never decides an operator's own session either.
     """
     raw, size = read_input(sys.stdin)
     selected = options(sys.argv[1:])
+    if selected.get("adapter") == "copilot" and selected.get(
+        "participant"
+    ) != os.environ.get(PARTICIPANT_ENV):
+        return 0
     if size > MAX_INPUT_BYTES:
         return fallback(raw, "oversize payload", size=size)
     if refused := os.environ.get(ANSWERED_ENV, ""):

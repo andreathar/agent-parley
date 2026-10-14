@@ -1,9 +1,11 @@
 """Oversized payloads spill to attachments and travel as references."""
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agent_parley import attachments, checkpoints, cli, issues, metrics, store
@@ -45,6 +47,44 @@ def run(bridge, monkeypatch, capsys, *arguments):
     )
     assert cli.main() == 0
     return capsys.readouterr().out
+
+
+def test_a_body_at_the_attachment_cap_spills_over_mcp_transport(
+    bridge, repo, paired
+):
+    bridge.up()
+    tokens = {
+        name: asyncio.run(bridge.identity(name, paired))["registration_token"]
+        for name in paired["participants"]
+    }
+    body = '"quoted"\n' * (attachments.MAX_ATTACHMENT_BYTES // 9)
+    assert len(body.encode()) > 60000
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "send_message",
+            "arguments": {
+                "to": ["codex"],
+                "subject": "Evidence",
+                "body_md": body,
+                "idempotency_key": "transport-1",
+            },
+        },
+    }
+    with httpx.Client(base_url=bridge.url, trust_env=False) as client:
+        response = client.post(
+            "/mcp/",
+            json=request,
+            headers={"Authorization": f"Bearer {tokens['claude']}"},
+        )
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert not result.get("isError")
+    sent = json.loads(result["content"][0]["text"])
+    assert sent["attachment"] == f"message-{sent['id']}"
+    assert sent["attachment_bytes"] == len(body.encode())
 
 
 def test_a_message_over_the_cap_is_attached_and_referenced(
@@ -500,3 +540,89 @@ def test_mail_show_prints_the_reference_and_the_whole_body_on_request(
         ],
     )
     assert cli.main() != 0
+
+
+def scanned(directory):
+    """Reads the allowance every metadata file records, as 0.18 counted it."""
+    totals = {}
+    for path in attachments.folder(directory).glob("*-*.json"):
+        meta = json.loads(path.read_text())
+        if not meta.get("released"):
+            mine = totals.setdefault(meta["writer"], {})
+            mine[path.stem] = meta["bytes"]
+    return totals
+
+
+def test_the_allowance_index_matches_a_full_scan(tmp_path):
+    for identifier, writer in ((1, "claude"), (2, "claude"), (3, "codex")):
+        attachments.keep(
+            tmp_path, "message", identifier, "x" * 5000, writer, ["codex"]
+        )
+    attachments.release(tmp_path, "message-1", "claude")
+    attachments.remove(tmp_path, "message-3")
+    assert (
+        json.loads(
+            (attachments.folder(tmp_path) / attachments.INDEX).read_text()
+        )
+        == scanned(tmp_path)
+        == {"claude": {"message-2": 5000}}
+    )
+    attachments.renumber(tmp_path, [("message-2", "message-9")])
+    assert attachments.held(tmp_path, "claude") == {"message-9": 5000}
+    assert attachments.used(tmp_path, "claude") == 5000
+    assert attachments.used(tmp_path, "codex") == 0
+
+
+def test_a_missing_index_is_rebuilt_from_older_state(tmp_path):
+    home = attachments.folder(tmp_path)
+    home.mkdir()
+    for identifier, released in ((1, True), (2, False)):
+        reference = f"message-{identifier}"
+        (home / f"{reference}.md").write_text("y" * 5000)
+        write_json(
+            home / f"{reference}.json",
+            {
+                "reference": reference,
+                "kind": "message",
+                "bytes": 5000,
+                "writer": "claude",
+                "readers": ["codex"],
+                "released": released,
+            },
+        )
+    assert attachments.used(tmp_path, "claude") == 5000
+    assert json.loads((home / attachments.INDEX).read_text()) == scanned(
+        tmp_path
+    )
+    (home / attachments.INDEX).write_text("not json")
+    assert attachments.used(tmp_path, "claude") == 5000
+
+
+def test_the_allowance_reads_no_released_metadata(tmp_path, monkeypatch):
+    for identifier in range(1, 21):
+        attachments.keep(
+            tmp_path, "message", identifier, "z" * 5000, "claude", ["codex"]
+        )
+        attachments.release(tmp_path, f"message-{identifier}", "claude")
+    attachments.keep(tmp_path, "message", 21, "z" * 5000, "claude", ["codex"])
+    reads = []
+    original = Path.read_text
+
+    def counting(path, *args, **kwargs):
+        reads.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+    assert attachments.used(tmp_path, "claude") == 5000
+    monkeypatch.setattr(attachments, "MAX_LANE_BYTES", 9000)
+    with pytest.raises(BridgeError, match="allowance"):
+        attachments.keep(
+            tmp_path,
+            "message",
+            22,
+            "w" * 5000,
+            "claude",
+            ["codex"],
+            [f"message-{n}" for n in range(1, 21)],
+        )
+    assert reads and set(reads) == {attachments.INDEX}

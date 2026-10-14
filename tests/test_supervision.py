@@ -111,6 +111,32 @@ def test_presence_separates_an_idle_lane_from_a_stopped_one(tmp_path):
     assert unknown["process_alive"] is None
 
 
+def test_a_session_whose_identity_ps_cannot_read_is_never_stopped(
+    tmp_path, monkeypatch
+):
+    def timed_out(field, pid):
+        raise process.IdentityUnknown("ps timed out")
+
+    known = tmp_path / "lane-session-process.json"
+    record = {
+        "session_pid": os.getpid(),
+        "session_ticks": "Wed Sep 10 11:22:33 2026",
+    }
+    write_json(
+        tmp_path / "lane-activity.json",
+        {**record, "updated": time.time(), "activity": "stopped"},
+    )
+    write_json(known, record)
+    monkeypatch.setattr(
+        process, "PLATFORM", process.darwin_platform(timed_out, timed_out)
+    )
+    reading = supervision.presence(tmp_path, "lane")
+    assert reading["process_alive"] is None
+    assert reading["activity"] == supervision.UNKNOWN
+    assert reading["evidence"] == supervision.IDENTITY_UNREADABLE
+    assert supervision._known_process_gone(known) is False
+
+
 def live(tmp_path, **extra):
     """Publishes an activity record whose session process is alive."""
     write_json(
@@ -1056,6 +1082,114 @@ def test_a_declared_wait_defers_a_wake_until_its_next_check(
     assert retried["result"] == "accepted"
 
 
+def test_direct_mail_about_a_held_issue_wakes_through_a_declared_wait(
+    bridge, paired, monkeypatch
+):
+    actors = registered(bridge, paired)
+    lane = Path(paired["lanes"]["codex"])
+    directory = lane.parent
+    bridge.issue(lane, "claim", "7")
+    write_json(
+        directory / "codex-activity.json",
+        {
+            "activity": "idle",
+            "updated": time.time() - 500,
+            "session_pid": os.getpid(),
+            "session_ticks": process.start_ticks(os.getpid()),
+        },
+    )
+    supervision.record_wait(
+        directory, "codex", "gpu forecast run", time.time() + 900, 3600
+    )
+    calls = []
+    monkeypatch.setattr(
+        terminal, "request", lambda *args: calls.append(args) or "accepted"
+    )
+    config = {**supervision.DEFAULTS, "inactive_after": 1}
+    observed = sampled(bridge, paired, directory, "codex")
+    path = directory / "codex-wake.json"
+    other = store.call(
+        bridge.home,
+        actors["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Lunch",
+            "body_md": "Unrelated to #70",
+            "idempotency_key": "other",
+        },
+    )
+    assert (
+        supervision.held_issue_mail(bridge.home, directory, paired, "codex")
+        == []
+    )
+    rewake(
+        bridge,
+        paired,
+        directory,
+        "codex",
+        at=0,
+        backlog=[str(other["id"])],
+        attempts=1,
+        result="manual attention required",
+    )
+
+    supervision.wake(bridge.home, directory, paired, "codex", observed, config)
+
+    assert not calls
+    assert (
+        "waiting on gpu forecast run" in json.loads(path.read_text())["blocked"]
+    )
+
+    asked = store.call(
+        bridge.home,
+        actors["claude"],
+        "send_message",
+        {
+            "to": ["codex"],
+            "subject": "Forecast",
+            "body_md": "Is #7 still running?",
+            "idempotency_key": "asked",
+        },
+    )
+    assert supervision.held_issue_mail(
+        bridge.home, directory, paired, "codex"
+    ) == [str(asked["id"])]
+
+    supervision.wake(bridge.home, directory, paired, "codex", observed, config)
+
+    woken = json.loads(path.read_text())
+    assert calls
+    assert woken["result"] == "accepted"
+    assert str(asked["id"]) in woken["backlog"]
+    assert str(other["id"]) in woken["backlog"]
+
+
+def test_held_issue_mail_is_searched_only_while_a_wait_is_in_force(tmp_path):
+    searched = []
+    observed = {"record": {}, "process_alive": True}
+
+    def search():
+        searched.append(True)
+        return []
+
+    assert supervision._wake_block(
+        tmp_path, "codex", observed, {}, 60, search
+    ) == ("", 0.0)
+    assert searched == []
+    supervision.record_wait(
+        tmp_path, "codex", "gpu forecast run", time.time() + 900, 3600
+    )
+    blocked, _ = supervision._wake_block(
+        tmp_path, "codex", observed, {}, 60, search
+    )
+    assert blocked == "waiting on gpu forecast run"
+    assert searched == [True]
+    assert supervision._wake_block(
+        tmp_path, "codex", observed, {}, 60, lambda: ["1"]
+    ) == ("", 0.0)
+
+
 def test_a_declared_wait_is_capped_by_its_project_ceiling(tmp_path):
     now = time.time()
 
@@ -1153,6 +1287,7 @@ def test_dead_manual_session_resumes_from_its_recorded_session(
         bridge, paired, directory, "codex", 300, session="manual-session"
     )
     assert observed["process_alive"] is False
+    paired.setdefault("supervision", {})[dialogs.PRE_APPROVE] = True
     supervision.wake(
         bridge.home,
         directory,
@@ -1229,6 +1364,67 @@ def test_a_claude_resume_without_the_approval_opt_in_is_withheld(
         assert not record["exhausted_at"]
 
 
+@pytest.mark.parametrize("adapter", roster.ADAPTERS)
+def test_every_adapter_that_carries_the_opt_in_reports_its_gap(bridge, adapter):
+    manifest = {"participants": {"lane": {"provider": adapter}}}
+    carried = roster.APPROVAL[adapter] is not None
+    assert supervision.opt_in_missing(bridge.home, manifest, "lane") is carried
+    assert supervision.opt_in_adapter(bridge.home, manifest, "lane") == (
+        adapter if carried else ""
+    )
+    manifest["supervision"] = {dialogs.PRE_APPROVE: True}
+    assert not supervision.opt_in_missing(bridge.home, manifest, "lane")
+
+
+def test_auto_mode_clears_the_gap_of_a_claude_lane_only(bridge):
+    manifest = {
+        "supervision": {dialogs.AUTO_MODE: True},
+        "participants": {
+            "claude": {"provider": "claude"},
+            "gemini": {"provider": "gemini"},
+        },
+    }
+    assert not supervision.opt_in_missing(bridge.home, manifest, "claude")
+    assert supervision.opt_in_missing(bridge.home, manifest, "gemini")
+
+
+@pytest.mark.parametrize("adapter", roster.ADAPTERS)
+def test_a_recorded_opt_in_an_adapter_cannot_carry_is_named(bridge, adapter):
+    manifest = {"participants": {"lane": {"provider": adapter}}}
+    assert not supervision.opt_in_unsupported(bridge.home, manifest, "lane")
+    manifest["supervision"] = {dialogs.PRE_APPROVE: True}
+    warning = supervision.opt_in_unsupported(bridge.home, manifest, "lane")
+    if roster.APPROVAL[adapter] is None:
+        assert warning.startswith(f"lane is a {adapter} lane with a bridge")
+        assert "agent-parley run lane --resume" in warning
+    else:
+        assert warning == ""
+
+
+@pytest.mark.parametrize(
+    ("version", "named"),
+    [
+        (None, False),
+        ("codex-cli 0.153.0", False),
+        ("codex-cli 0.152.9", True),
+        ("", True),
+    ],
+)
+def test_a_codex_release_without_the_server_approval_is_named(
+    bridge, version, named
+):
+    manifest = {
+        "supervision": {dialogs.PRE_APPROVE: True},
+        "participants": {"lane": {"provider": "codex"}},
+    }
+    warning = supervision.opt_in_unsupported(
+        bridge.home, manifest, "lane", version
+    )
+    assert bool(warning) is named
+    if named:
+        assert "predates the per-server tool approval codex 0.153.0" in warning
+
+
 def test_operator_stop_holds_until_the_next_launch(
     bridge, repo, paired, monkeypatch
 ):
@@ -1287,6 +1483,7 @@ def test_stopping_a_live_session_with_backlog_is_not_resumed_by_a_wake(
     bridge, repo, paired, monkeypatch
 ):
     actors = registered(bridge, paired)
+    paired.setdefault("supervision", {})[dialogs.PRE_APPROVE] = True
     directory = Path(paired["lanes"]["codex"]).parent
     path = directory / "codex-activity.json"
     send(bridge, actors["claude"], "codex")
@@ -1546,7 +1743,7 @@ def test_stopped_resume_keeps_native_interactive_permissions(
     )
     assert bridge.launch(provider, repo, terminal.PROMPT, resume=True) == 0
     warned = "no bridge tool approval is recorded" in capsys.readouterr().err
-    assert warned is (provider == "claude")
+    assert warned is (roster.APPROVAL[provider] is not None)
     assert "12345678-abcd-1234-abcd-123456789abc" in captured[0]
     assert "exec" not in captured[0] and "--print" not in captured[0]
     assert not any(
@@ -1988,3 +2185,50 @@ def test_a_recovery_burst_queues_one_capture_with_merged_evidence(
 
     assert [payload for payload, _ in calls] == [{"step": 0}, {"step": 3}]
     assert [evidence for _, evidence in calls] == [None, passing]
+
+
+def test_a_failed_issue_reading_is_not_repeated_inside_the_retry_window(
+    tmp_path, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        supervision.forge,
+        "issue_completion",
+        lambda root, number: calls.append(number),
+    )
+    for _ in range(5):
+        assert supervision._issue_reading(tmp_path, "7") is None
+    assert calls == ["7"]
+    key = (str(tmp_path), "7")
+    supervision._issue_readings[key] = (time.time() - 1, None)
+    supervision._issue_reading(tmp_path, "7")
+    assert calls == ["7", "7"]
+
+
+def test_a_refusing_forge_is_left_alone_until_the_retry_window_ends(
+    tmp_path, monkeypatch
+):
+    def unread(*args, **kwargs):
+        raise AssertionError("the forge is not read while it refuses")
+
+    monkeypatch.setattr(supervision.forge, "issue_completion", unread)
+    monkeypatch.setattr(supervision.forge, "open_pull_requests", unread)
+    monkeypatch.setattr(supervision.forge, "integration_landings", unread)
+    monkeypatch.setattr(
+        supervision.forge,
+        "_failure",
+        {"at": time.time(), "kind": "auth", "detail": "HTTP 401"},
+    )
+    manifest = {
+        "root": str(tmp_path),
+        "participants": {"claude": {"branch": "lane"}},
+    }
+    ledger = {"issues": {"9": {"owner": "claude"}}}
+    assert supervision.completed_claims(manifest, ledger) == {}
+    assert supervision._landing_reading(tmp_path, "integration") == {}
+    supervision.pull_request_wakes(tmp_path, tmp_path, manifest)
+    assert not (tmp_path / supervision.PULL_REQUEST_RECORD).exists()
+    supervision.forge._failure["kind"] = "missing"
+    assert not supervision._forge_backoff()
+    supervision.forge._failure.update(kind="rate", at=time.time() - 61)
+    assert not supervision._forge_backoff()

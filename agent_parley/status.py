@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agent_parley import BridgeError
+from agent_parley import BridgeError, protocol
 from agent_parley.core import BridgeCore
 
 if TYPE_CHECKING:
@@ -31,8 +31,12 @@ FORGE_ISSUES = "forge-issues.json"
 FORGE_TTL = 300.0
 FORGE_STALE = 2 * FORGE_TTL
 FORGE_RETRY = 60.0
-FORGE_TIMEOUT = 5
 FORGE_LIMIT = 1000
+FORGE_PAGE = 100
+FORGE_TIMEOUT = 3 + 2 * -(-FORGE_LIMIT // FORGE_PAGE)
+FORGE_FULL_SECONDS = 3600.0
+FORGE_OVERLAP = 120.0
+TOKEN_READERS = "read for {read}; not measured for {unread}"
 
 
 def reading(
@@ -134,6 +138,27 @@ def lane_state(record: dict) -> str:
     if condition := record.get("condition"):
         return str(condition["state"])
     return str(record["availability"]["state"])
+
+
+def service_state(server: dict) -> str:
+    """Names the coordination service's state in the shared wording.
+
+    `status`, `problems`, `top` and `doctor` print the same words for the
+    same fact, so a stopped service reads ``not running`` everywhere.
+
+    Args:
+        server: The ``server`` record of `status_snapshot`.
+
+    Returns:
+        ``running`` for a ready service, `protocol.STOPPED` when nothing
+        answered, and ``not ready`` for a service that answered but cannot
+        serve, such as one running stale code or over an unusable store.
+    """
+    if server["ready"]:
+        return "running"
+    if server.get("state") in ("", "not ready"):
+        return protocol.STOPPED
+    return "not ready"
 
 
 def folded(record: dict, after: float) -> bool:
@@ -471,7 +496,10 @@ class StatusMixin(BridgeCore):
             does not have, so reporting it as compatible would describe a
             healthy system while every lane is denied. A registered project
             whose root checkout no longer exists is not consistent either,
-            and the `projects` component names each such root. The report
+            and the `projects` component names each such root. A damaged
+            decisions record a writer kept aside is not consistent until
+            the operator recovers and removes it, and the `decisions`
+            component names each copy. The report
             also names
             the kernel release, the WSL generation or ``none``, and whether
             ``pidfd_open`` is available, so a platform gap is read here
@@ -479,9 +507,20 @@ class StatusMixin(BridgeCore):
             outbound and inbound notification are active; notification that
             is off is consistent, and one configured but unable to send is
             not. The `approvals` component names each lane
-            `supervision.opt_in_missing` reports as a setup gap; it is the
-            operator's choice, so it leaves the set consistent.
+            `supervision.opt_in_missing` reports as a setup gap, and each
+            lane whose recorded opt-in `supervision.opt_in_unsupported` says
+            its CLI cannot carry; it is the operator's choice, so it leaves
+            the set consistent. The
+            `dialogs` component names each lane `dialogs.drift` reports,
+            a client newer than its recorded dialog matchers or a dialog
+            none of them read, as a matcher drift that also leaves the set
+            consistent, because the lane still escalates what it cannot read.
+            The `tokens` component names the defined providers whose
+            lanes report tokens and those no reader measures, so a token
+            limit's blind spots are visible before one is set; it never
+            makes the set inconsistent.
         """
+        from agent_parley import decisions, plugins
         from agent_parley.cli import (
             inbound_status,
             json,
@@ -503,21 +542,28 @@ class StatusMixin(BridgeCore):
                 "compatible": True,
             }
         ]
-        for client, manifest in protocol.manifests(
-            protocol.plugin_root()
-        ).items():
-            declared = protocol.installed(manifest)
-            accepted = protocol.compatible(declared)
-            components.append(
-                {
-                    "component": f"{client} plugin",
-                    "version": "",
-                    "protocol": declared,
-                    "state": protocol.OK if accepted else protocol.MISMATCH,
-                    "remedy": "" if accepted else protocol.UPDATE,
-                    "compatible": accepted,
-                }
-            )
+        bundled = protocol.manifests(protocol.plugin_root())
+        for client in protocol.CLIENTS:
+            rows = []
+            for label, directory in plugins.config_dirs(self.home, client):
+                manifest = plugins.installed_manifest(client, directory)
+                if manifest is not None:
+                    suffix = f" ({label})" if label else ""
+                    rows.append(
+                        {
+                            "component": f"{client} plugin{suffix}",
+                            **plugins.assessed(manifest),
+                        }
+                    )
+            if not rows:
+                rows.append(
+                    {
+                        "component": f"{client} plugin",
+                        **plugins.assessed(bundled[client]),
+                        "version": "bundled",
+                    }
+                )
+            components.extend(rows)
         schema = store.schema_version(self.home)
         state = store.schema_state(schema)
         components.append(
@@ -574,6 +620,19 @@ class StatusMixin(BridgeCore):
                 "compatible": not gone,
             }
         )
+        kept = decisions.damaged(self.home)
+        components.append(
+            {
+                "component": "decisions",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": protocol.DAMAGED if kept else protocol.OK,
+                "remedy": (
+                    protocol.RECOVER_DECISIONS + ", ".join(kept) if kept else ""
+                ),
+                "compatible": not kept,
+            }
+        )
         outbound = notify.reported(notify.environment(self.home))
         received = inbound_status(self.home)
         components.append(
@@ -598,17 +657,70 @@ class StatusMixin(BridgeCore):
             for name in manifest.get("participants") or {}
             if supervision.opt_in_missing(self.home, manifest, name)
         )
+        unsupported = sorted(
+            f"{manifest['root']} {name}"
+            for manifest in manifests
+            if manifest.get("root")
+            for name in manifest.get("participants") or {}
+            if supervision.opt_in_unsupported(self.home, manifest, name)
+        )
+        remedies = []
+        if unapproved:
+            remedies.append(
+                supervision.OPT_IN_REMEDY + ": " + ", ".join(unapproved)
+            )
+        if unsupported:
+            remedies.append(
+                "the CLI cannot carry the recorded bridge tool approval, so "
+                "resume these lanes in your own terminal: "
+                + ", ".join(unsupported)
+            )
         components.append(
             {
                 "component": "approvals",
                 "version": "",
                 "protocol": protocol.PROTOCOL,
-                "state": protocol.SETUP_GAP if unapproved else protocol.OK,
-                "remedy": (
-                    supervision.OPT_IN_REMEDY + ": " + ", ".join(unapproved)
-                    if unapproved
-                    else ""
+                "state": protocol.SETUP_GAP if remedies else protocol.OK,
+                "remedy": "; ".join(remedies),
+                "compatible": True,
+            }
+        )
+        from agent_parley import dialogs
+
+        drifted = [
+            line
+            for path in sorted((self.home / "projects").glob("*/project.json"))
+            for line in dialogs.drift(path.parent, json.loads(path.read_text()))
+        ]
+        components.append(
+            {
+                "component": "dialogs",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": protocol.DRIFT if drifted else protocol.OK,
+                "remedy": "; ".join(drifted),
+                "compatible": True,
+            }
+        )
+        from agent_parley import records, roster
+
+        defined = roster.providers(self.home)
+        measured = sorted(
+            name
+            for name, entry in defined.items()
+            if str(entry.get("adapter", "")) in records.readers()
+        )
+        unmeasured = sorted(set(defined) - set(measured))
+        components.append(
+            {
+                "component": "tokens",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": TOKEN_READERS.format(
+                    read=", ".join(measured) or "none",
+                    unread=", ".join(unmeasured) or "none",
                 ),
+                "remedy": "",
                 "compatible": True,
             }
         )
@@ -1216,6 +1328,7 @@ class StatusMixin(BridgeCore):
             roster,
             store,
             supervision,
+            tables,
             views,
         )
 
@@ -1243,7 +1356,9 @@ class StatusMixin(BridgeCore):
                         advances.get(agent, []),
                         context=context,
                     )
-                    for agent in sorted(data["participants"])
+                    for agent in sorted(
+                        data["participants"], key=tables.natural_key
+                    )
                 ]
                 projects.append(
                     {
@@ -1278,6 +1393,7 @@ class StatusMixin(BridgeCore):
                         **self._integration(path.parent, data, context),
                     }
                 )
+        projects.sort(key=lambda project: project["root"])
         return {
             "server": {"ready": healthy, "state": state},
             "state_directory": str(self.home),
@@ -1327,19 +1443,20 @@ class StatusMixin(BridgeCore):
         }
 
     def _health(self, report: dict) -> None:
-        """Prints the server, code, store, notify and state directory lines.
+        """Prints the service, code, store, notify and state directory lines.
 
         Args:
             report: Reading produced by `status_snapshot`.
         """
-        from agent_parley.cli import notification_line, protocol, store
+        from agent_parley.cli import notification_line, store
 
-        ready = "ready" if report["server"]["ready"] else "not ready"
-        print(f"Server: {ready}")
+        print(f"Service: {service_state(report['server'])}")
         if report["server"].get("state") == protocol.STALE:
             print(f"Code: {protocol.STALE}; {protocol.RELAUNCH}")
         schema = store.schema_state(store.schema_version(self.home))
         if repair := store.remedy(schema):
+            if schema == store.SCHEMA_DAMAGED:
+                schema = f"{schema} ({store.damage(self.home)})"
             print(f"Store: {schema}; {repair}")
         if "outbound" in report:
             print(notification_line(report["outbound"], report["inbound"]))
@@ -1463,7 +1580,14 @@ class StatusMixin(BridgeCore):
         if forge.select(Path(root), manifest) != "github":
             return reading(issues, limit, now - read_at, False, "no GitHub")
         failed = float(cached.get("failed_at") or 0) > read_at
-        reason = "forge unreachable" if failed else "service not refreshing"
+        failure = cached.get("failure")
+        kind = failure.get("kind") if isinstance(failure, dict) else None
+        reason = (
+            "forge unreachable"
+            + (f": {kind}" if kind and kind != "error" else "")
+            if failed
+            else "service not refreshing"
+        )
         return reading(issues, limit, now - read_at, False, reason)
 
     def _board_project(
@@ -1617,8 +1741,12 @@ class StatusMixin(BridgeCore):
         if selection.filtered() and not matched:
             print(f"No participant matches {selection.describe()}.")
             return matched
-        for path in sorted((self.home / "projects").glob("*/project.json")):
-            data = roster.normalize(json.loads(path.read_text()))
+        readings = [
+            (path, roster.normalize(json.loads(path.read_text())))
+            for path in (self.home / "projects").glob("*/project.json")
+        ]
+        readings.sort(key=lambda item: item[1]["root"])
+        for path, data in readings:
             project = kept.get(data["root"])
             if project is None:
                 continue

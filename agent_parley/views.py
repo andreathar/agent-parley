@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import shlex
 
 from agent_parley import issues as issues_state
 
@@ -77,34 +78,34 @@ LANE_METRICS: tuple[tuple[str, str, str, str], ...] = (
         "Seconds the lane has been idle in the reported window.",
     ),
     (
-        "agent_parley_lane_context_bytes_total",
-        "counter",
+        "agent_parley_lane_context_bytes_window",
+        "gauge",
         "injected_bytes",
         "Coordination context bytes injected in the reported window.",
     ),
     (
-        "agent_parley_lane_hook_events_total",
-        "counter",
+        "agent_parley_lane_hook_events_window",
+        "gauge",
         "hook_events",
         "Hook events recorded in the reported window.",
     ),
     (
-        "agent_parley_lane_hook_denials_total",
-        "counter",
+        "agent_parley_lane_hook_denials_window",
+        "gauge",
         "denials",
         "Hook events that denied an action in the reported window.",
     ),
     (
-        "agent_parley_lane_served_calls_total",
-        "counter",
+        "agent_parley_lane_served_calls_retained",
+        "gauge",
         "calls",
-        "Coordination tool calls served for this participant.",
+        "Retained coordination tool calls served for this participant.",
     ),
     (
-        "agent_parley_lane_served_rejections_total",
-        "counter",
+        "agent_parley_lane_served_rejections_retained",
+        "gauge",
         "errors",
-        "Coordination tool calls rejected for this participant.",
+        "Retained coordination tool calls rejected for this participant.",
     ),
     (
         "agent_parley_lane_tokens_total",
@@ -113,20 +114,21 @@ LANE_METRICS: tuple[tuple[str, str, str, str], ...] = (
         "Tokens the native client counted, never billed spend.",
     ),
     (
-        "agent_parley_lane_pull_requests_opened_total",
-        "counter",
+        "agent_parley_lane_pull_requests_opened_window",
+        "gauge",
         "pull_requests_opened",
         "Pull requests first seen open in the outcome window.",
     ),
     (
-        "agent_parley_lane_pull_requests_merged_total",
-        "counter",
+        "agent_parley_lane_pull_requests_merged_window",
+        "gauge",
         "pull_requests_merged",
-        "Pull requests a claim resolution recorded as merged.",
+        "Pull requests a claim resolution recorded as merged in the outcome "
+        "window.",
     ),
     (
-        "agent_parley_lane_pull_requests_closed_total",
-        "counter",
+        "agent_parley_lane_pull_requests_closed_window",
+        "gauge",
         "pull_requests_closed",
         "Pull requests that left the open list without a recorded merge.",
     ),
@@ -157,19 +159,19 @@ LANE_METRICS: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
-NO_OUTCOMES: dict[str, int | float] = {
+NO_OUTCOMES: dict[str, int | float | None] = {
     "pull_requests_opened": 0,
     "pull_requests_merged": 0,
     "pull_requests_closed": 0,
     "first_pass": 0,
     "first_pass_known": 0,
-    "first_pass_rate": 0.0,
+    "first_pass_rate": None,
     "ci_rounds_unknown": 0,
-    "ci_rounds_median": 0.0,
-    "claim_to_merge_seconds": 0.0,
+    "ci_rounds_median": None,
+    "claim_to_merge_seconds": None,
 }
 
-DENIAL_CAUSES = "agent_parley_lane_hook_denials_by_cause_total"
+DENIAL_CAUSES = "agent_parley_lane_hook_denials_by_cause_window"
 
 PROJECT_METRICS: tuple[tuple[str, str, str, str], ...] = (
     (
@@ -185,20 +187,20 @@ PROJECT_METRICS: tuple[tuple[str, str, str, str], ...] = (
         "Idle seconds summed over the project's reported lanes.",
     ),
     (
-        "agent_parley_project_context_bytes_total",
-        "counter",
+        "agent_parley_project_context_bytes_window",
+        "gauge",
         "injected_bytes",
         "Context bytes injected across the project's reported lanes.",
     ),
     (
-        "agent_parley_project_hook_events_total",
-        "counter",
+        "agent_parley_project_hook_events_window",
+        "gauge",
         "hook_events",
         "Hook events recorded across the project's reported lanes.",
     ),
     (
-        "agent_parley_project_hook_denials_total",
-        "counter",
+        "agent_parley_project_hook_denials_window",
+        "gauge",
         "denials",
         "Denials recorded across the project's reported lanes.",
     ),
@@ -413,9 +415,17 @@ def plan_diff(reported: dict) -> dict:
             {"issue": issue, "waits_on": blocker}
             for issue, blocker in reported["add"]
         ],
+        "satisfied": [
+            {"issue": issue, "waits_on": blocker}
+            for issue, blocker in reported.get("satisfied", [])
+        ],
         "unlisted": [
             {"issue": issue, "waits_on": blocker}
             for issue, blocker in reported["unlisted"]
+        ],
+        "revoked": [
+            {"issue": issue, "waits_on": blocker, "proposal": proposal}
+            for issue, blocker, proposal in reported["revoked"]
         ],
     }
 
@@ -503,11 +513,13 @@ def history(reported: dict) -> dict:
         The subject queried, each ownership generation of an issue, and one
         record per matching coordination event. A record that carries no claim
         identifier reports null: the correlation was never recorded, and
-        history does not invent one.
+        history does not invent one. ``truncated`` is true when the row cap
+        omitted older matching mail or reservations.
     """
     return {
         "subject": reported["subject"],
         "value": reported["value"],
+        "truncated": bool(reported.get("truncated")),
         "holdings": [
             {
                 **generation,
@@ -520,6 +532,26 @@ def history(reported: dict) -> dict:
             {**record, "at": timestamp(record["at"])}
             for record in reported["records"]
         ],
+    }
+
+
+def usage(reading: dict) -> dict:
+    """Reports per-claim usage with RFC 3339 instants.
+
+    Args:
+        reading: Report produced by ``history.usage``.
+
+    Returns:
+        The window floor, null for all recorded history, one row per
+        resolved claim and the totals. ``estimated_spend`` is present only
+        where the operator recorded a price, and is an estimate.
+    """
+    return {
+        "since": timestamp(reading["since"]) if reading["since"] else None,
+        "rows": [
+            {**row, "at": timestamp(row["at"])} for row in reading["rows"]
+        ],
+        "totals": reading["totals"],
     }
 
 
@@ -634,14 +666,176 @@ def credential_detail(name: str, entry: dict) -> dict:
     Returns:
         The config home the native CLI signs in under, the override names the
         launcher sets, and the variables it requires from the caller's shell.
-        No recorded value is reported.
+        No recorded value is reported. A profile recorded before empty
+        profiles were refused sets none of the three and launches on the
+        default account, so it also carries ``account`` reading ``selects no
+        account``.
     """
-    return {
+    shown = {
         "credential": name,
         "config_home": entry.get("home", ""),
         "env": redacted(entry.get("env") or {}),
         "require_env": list(entry.get("require_env") or []),
     }
+    if not (shown["config_home"] or shown["env"] or shown["require_env"]):
+        shown["account"] = "selects no account"
+    return shown
+
+
+def setup_text(manifest: dict, suggestion: list[str] | None = None) -> str:
+    """Summarizes a registered project as labeled lines a reader can act on.
+
+    An empty merge gate is stated rather than left silent, because
+    ``participant merge`` then runs no check at all.
+
+    Args:
+        manifest: Project manifest ``setup`` created or verified.
+        suggestion: Check command the repository's committed files declare,
+            printed as the ``verify set`` call to record it while the gate
+            is empty; None when nothing was detected.
+
+    Returns:
+        Root, abbreviated base commit, forge, merge gate and lane
+        initialization, the suggested ``verify set`` call where one applies,
+        then the command that starts the first lane.
+    """
+    verify = manifest.get("verify") or []
+    initialize = manifest.get("initialize") or []
+    lines = [
+        f"Root: {manifest['root']}",
+        f"Base: {manifest['base'][:12]}",
+        f"Forge: {manifest.get('forge') or 'none'}",
+        "Verify: "
+        + (
+            shlex.join(verify)
+            if verify
+            else "none; participant merge runs no gate"
+        ),
+    ]
+    if not verify and suggestion:
+        lines.append(
+            f'Suggested: agent-parley verify set "{shlex.join(suggestion)}"'
+        )
+    lines += [
+        f"Init: {shlex.join(initialize) if initialize else 'none'}",
+        "Next: agent-parley run claude",
+    ]
+    return "\n".join(lines)
+
+
+def _settings(entry: dict) -> list[str]:
+    """Names the environment a definition sets and requires, never values."""
+    shown = []
+    if names := sorted(entry.get("env") or {}):
+        shown.append(f"sets {', '.join(names)}")
+    if required := list(entry.get("require_env") or []):
+        shown.append(f"requires {', '.join(required)}")
+    return shown
+
+
+def credential_text(name: str, entry: dict) -> str:
+    """Confirms one defined account profile without printing its values.
+
+    Args:
+        name: Profile name used by ``run --credentials``.
+        entry: Stored profile.
+
+    Returns:
+        One sentence naming the config home and the environment variables
+        the profile sets and requires, then the command that launches with
+        it.
+    """
+    parts = [f"config home {entry['home']}"] if entry.get("home") else []
+    parts += _settings(entry)
+    detail = f" ({'; '.join(parts)})" if parts else ""
+    return (
+        f"Defined credential profile {name}{detail}.\n"
+        f"Next: agent-parley run claude --credentials {name}"
+    )
+
+
+def provider_text(name: str, entry: dict) -> str:
+    """Confirms one defined provider in a sentence and a next command.
+
+    Args:
+        name: Provider name used by ``run --provider``.
+        entry: Stored provider definition.
+
+    Returns:
+        The adapter and executable the provider launches, the environment
+        variables it sets and requires, then the command that prints it.
+    """
+    parts = [f"{entry['adapter']} adapter", f"runs {entry['command']}"]
+    parts += _settings(entry)
+    return (
+        f"Defined provider {name} ({'; '.join(parts)}).\n"
+        f"Next: agent-parley provider show {name}"
+    )
+
+
+def resolution(result: dict) -> dict:
+    """Reports an operator resolution with its observation time in RFC 3339.
+
+    Args:
+        result: Outcome ``issue resolve`` returned.
+
+    Returns:
+        The same fields, with the forge evidence's ``observed_at`` rendered
+        the way every other document renders a time.
+    """
+    evidence = dict(result.get("evidence") or {})
+    if "observed_at" in evidence:
+        evidence["observed_at"] = timestamp(evidence["observed_at"])
+    return {**result, "evidence": evidence}
+
+
+def resolution_text(result: dict) -> str:
+    """Says what ``issue resolve`` ended, on which forge evidence.
+
+    Args:
+        result: Outcome ``issue resolve`` returned.
+
+    Returns:
+        One sentence naming the issue, the outcome recorded, the former
+        holder and the pull request state, then the command that shows it.
+    """
+    evidence = result.get("evidence") or {}
+    ended = (
+        "returned to the queue"
+        if result["outcome"] == "release"
+        else "recorded complete"
+    )
+    return (
+        f"Resolved issue #{result['issue']}: {ended}, ending "
+        f"{result['holder']}'s claim on {evidence.get('branch', '')} "
+        f"({str(evidence.get('state', '')).lower()}).\n"
+        f"Next: agent-parley issue show {result['issue']}"
+    )
+
+
+def recovery(approval: dict) -> dict:
+    """Reports a recovery approval with its approval time in RFC 3339."""
+    return {
+        **approval,
+        "authorized_at": timestamp(approval.get("authorized_at")),
+    }
+
+
+def recovery_text(approval: dict) -> str:
+    """Says which live claim ``issue recover`` approved stopping.
+
+    Args:
+        approval: Approval ``issue recover`` recorded.
+
+    Returns:
+        One sentence naming the issue and its owner, and that the approval
+        alone moves nothing until a matching capacity observation arrives.
+    """
+    return (
+        f"Recovery approved for issue #{approval['issue']}: "
+        f"{approval['owner']}'s claim stops once a matching capacity "
+        "observation is published; nothing has moved yet."
+    )
 
 
 def _count(value: object) -> int | None:
@@ -685,6 +879,7 @@ def _row(row: dict) -> dict:
         "calls": row["calls"],
         "errors": row["errors"],
         "tokens": row["tokens"],
+        "unmeasured": list(row.get("unmeasured") or []),
         "idle_seconds": row["idle_seconds"],
         "idle_complete": row["idle_complete"],
         "over_budget": row.get("over_budget", False),
@@ -823,7 +1018,7 @@ def families(view: dict) -> list[dict]:
     reported.append(
         {
             "name": DENIAL_CAUSES,
-            "type": "counter",
+            "type": "gauge",
             "help": "Hook denials in the reported window by reason and tool.",
             "samples": [
                 {

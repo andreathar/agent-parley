@@ -353,6 +353,10 @@ JSON_HELP = (
     "Print one JSON document on standard output instead of the table. "
     "Field names are documented in docs/operations.md."
 )
+REPO_HELP = (
+    "Repository root or any of its worktrees; defaults to the current "
+    "directory."
+)
 RETRY_HELP = (
     "Idempotency key. Retry a failed command with the key it first used and "
     "the repeat returns the first result without applying the change again. "
@@ -1106,12 +1110,13 @@ def inbound_status(home: Path | None = None) -> dict:
             or None to read the process environment alone.
 
     Returns:
-        Whether the reader was asked for and the fault, if any, stopping it.
+        Whether the reader was asked for, the fault, if any, stopping it,
+        and the Unix time a passcode lock ends, zero when none holds.
     """
     values = notify.environment(home)
     if not values.get("AGENT_PARLEY_INBOUND", "").strip():
-        return {"enabled": False, "fault": ""}
-    return inbound.reported(values)
+        return {"enabled": False, "fault": "", "locked_until": 0.0}
+    return inbound.reported(values, home)
 
 
 def notification_line(outbound: dict, received: dict) -> str:
@@ -1130,6 +1135,11 @@ def notification_line(outbound: dict, received: dict) -> str:
         sent = "outbound on (" + ", ".join(outbound["transports"]) + ")"
     if received["fault"]:
         read = f"inbound off: {received['fault']}"
+    elif received["enabled"] and received.get("locked_until"):
+        moment = time.strftime(
+            "%Y-%m-%d %H:%M UTC", time.gmtime(received["locked_until"])
+        )
+        read = f"inbound locked until {moment} after wrong passcodes"
     elif received["enabled"]:
         read = "inbound on"
     else:
@@ -1358,25 +1368,34 @@ def budget_changes(args: argparse.Namespace) -> dict | None:
     return changes
 
 
-def operator_only(action: str) -> None:
-    """Refuses an operator-authority command run from inside a lane.
-
-    Every launched lane carries its registration token in its environment
-    and the operator's own shell does not, so the check stops a lane from
-    raising, removing or clearing its run budget by accident. It is not an
-    authority boundary: a process that drops the variable passes it.
+def unmeasured_lanes(
+    bridge: Bridge,
+    repository: Path,
+    args: argparse.Namespace,
+    names: list[str] | None = None,
+) -> list[str]:
+    """Warns about the project lanes a token limit just given cannot count.
 
     Args:
-        action: Command named in the refusal.
+        bridge: Bridge whose state root defines the providers.
+        repository: Repository whose project the limit applies to.
+        args: Parsed budget flags; only a positive ``--tokens`` is checked.
+        names: Lanes the limit covers; every participant when omitted.
 
-    Raises:
-        BridgeError: If the environment belongs to a launched lane.
+    Returns:
+        Sorted active lanes without a token reader, each named on one
+        stderr warning line, or an empty list when no positive token limit
+        was given.
     """
-    if os.environ.get("AGENT_PARLEY_TOKEN"):
-        raise BridgeError(
-            f"{action} needs operator authority and is refused from a lane; "
-            "run it from the operator's own shell."
-        )
+    from agent_parley import records
+
+    if not getattr(args, "tokens", None):
+        return []
+    _, directory = bridge.project(repository, create=False)
+    lanes = records.unmeasured(bridge.home, roster.read(directory), names)
+    if lanes:
+        print(records.unmeasured_warning(lanes), file=sys.stderr)
+    return lanes
 
 
 def selected(args: argparse.Namespace) -> bool:
@@ -2096,7 +2115,7 @@ def pull_request_body(
 
 
 def reserved_overlaps(
-    changed: list[str], held: dict[str, list[str]]
+    changed: list[str], held: dict[str, list[str]], *, fold: bool = False
 ) -> list[str]:
     """Names the peer reservations a lane's own changed paths run into.
 
@@ -2104,6 +2123,7 @@ def reserved_overlaps(
         changed: Repository-relative paths the lane's branch changed.
         held: Active reservation keys per peer identity, with the lane's own
             identity already removed.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         One sentence per overlap, ordered by path and then by peer, naming
@@ -2114,7 +2134,7 @@ def reserved_overlaps(
         for path in sorted(changed)
         for peer, patterns in sorted(held.items())
         for pattern in sorted(patterns)
-        if store.overlapping(path, pattern)
+        if store.overlapping(path, pattern, fold=fold)
     ]
 
 
@@ -2233,7 +2253,8 @@ class Bridge(
             if participant is None:
                 raise BridgeError(
                     f"{name} is not a participant in this project; "
-                    "run agent-parley participant list."
+                    "run agent-parley participant list.",
+                    next_command="agent-parley participant list",
                 )
             lane = Path(participant["lane"])
             branch = participant["branch"]
@@ -2733,7 +2754,9 @@ class Bridge(
                 f"no overlap with a peer can be ruled out: {exc}"
             ) from exc
         held.pop(participant["display"], None)
-        if overlaps := reserved_overlaps(changed, held):
+        if overlaps := reserved_overlaps(
+            changed, held, fold=roster.case_insensitive(data)
+        ):
             raise BridgeError(
                 f"{refused} A peer reservation covers what {branch} changed: "
                 + "; ".join(overlaps[:MAX_OVERLAPS])
@@ -3114,7 +3137,9 @@ class Bridge(
         rows = reclaim.relocations(directory, manifest)
         if not apply:
             return rows
-        return [reclaim.relocate(manifest["root"], row) for row in rows]
+        return [
+            reclaim.relocate(manifest["root"], directory, row) for row in rows
+        ]
 
 
 COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -3175,6 +3200,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "run",
             "plan",
             "state",
+            "store",
             "gc",
             "version",
             "plugins",
@@ -3371,7 +3397,9 @@ def add_say_arguments(command: argparse.ArgumentParser) -> None:
         default="",
         help="Message body the participant reads.",
     )
-    command.add_argument("--repo", type=Path, default=Path.cwd())
+    command.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     command.add_argument(
         "--subject",
         default="",
@@ -3613,7 +3641,13 @@ def issue_lines(reading: dict) -> str:
     if reading.get("convergence"):
         lines.append(convergence.describe(reading["convergence"]))
     reported = reading["history"]
-    lines.append(history.describe(reported["records"], reported["holdings"]))
+    lines.append(
+        history.describe(
+            reported["records"],
+            reported["holdings"],
+            truncated=bool(reported.get("truncated")),
+        )
+    )
     return "\n".join(lines)
 
 
@@ -3662,7 +3696,9 @@ def secret(prompt: str) -> str:
     return sys.stdin.readline().strip()
 
 
-def secret_settings(chat: str, answering: bool) -> dict[str, str]:
+def secret_settings(
+    chat: str, answering: bool, users: str = ""
+) -> dict[str, str]:
     """Reads the notification secrets without placing them in argv.
 
     A terminal is prompted without echo; otherwise each secret is one line
@@ -3671,13 +3707,21 @@ def secret_settings(chat: str, answering: bool) -> dict[str, str]:
     Args:
         chat: Telegram chat id the notifications go to.
         answering: Whether to read and store the inbound passcode as well.
+        users: Comma-separated Telegram user ids allowed to answer, empty
+            to allow the chat itself.
 
     Returns:
         The settings to store, keyed by environment variable name.
 
     Raises:
-        BridgeError: If the token is empty or the passcode is too short.
+        BridgeError: If the token is empty, the passcode is too short, or
+            inbound answers are asked for in a group chat without users.
     """
+    if answering and chat.strip().startswith("-") and not users.strip():
+        raise BridgeError(
+            "A group chat needs --users with the Telegram user ids allowed "
+            "to answer; nothing stored."
+        )
     token = secret("Telegram bot token: ")
     if not token:
         raise BridgeError("The Telegram bot token is empty; nothing stored.")
@@ -3686,6 +3730,8 @@ def secret_settings(chat: str, answering: bool) -> dict[str, str]:
         "AGENT_PARLEY_TELEGRAM_CHAT": chat.strip(),
         "AGENT_PARLEY_TELEGRAM_TOKEN": token,
     }
+    if users.strip():
+        values["AGENT_PARLEY_TELEGRAM_USERS"] = users.strip()
     if answering:
         passcode = secret("Inbound passcode: ")
         if len(passcode) < inbound.MINIMUM_PASSCODE:
@@ -3696,6 +3742,51 @@ def secret_settings(chat: str, answering: bool) -> dict[str, str]:
         values["AGENT_PARLEY_INBOUND"] = "telegram"
         values["AGENT_PARLEY_INBOUND_PASSCODE"] = passcode
     return values
+
+
+def webhook_settings(
+    current: dict[str, str], answering: bool
+) -> dict[str, str]:
+    """Reads a webhook URL and signing secret without placing them in argv.
+
+    A webhook URL is a bearer secret, so it is read like the bot token: from
+    a prompt without echo, or as the first line of standard input, with the
+    optional signing secret on the second. The webhook is added to the
+    transports already stored, so a Telegram setup keeps notifying.
+
+    Args:
+        current: Settings already stored in the state root.
+        answering: Whether inbound answering was requested, which only
+            Telegram carries.
+
+    Returns:
+        The settings to store, keyed by environment variable name.
+
+    Raises:
+        BridgeError: If inbound answering is requested, or the URL is empty
+            or not allowed.
+    """
+    if answering:
+        raise BridgeError(
+            "Inbound answering is Telegram only; run `agent-parley notify "
+            "setup --chat CHAT_ID --inbound`."
+        )
+    url = secret("Webhook URL: ")
+    fault = notify.webhook_fault(url)
+    if fault:
+        raise BridgeError(fault + " Nothing stored.")
+    names = [
+        name.strip()
+        for name in current.get("AGENT_PARLEY_NOTIFY", "").split(",")
+        if name.strip() and name.strip() != "webhook"
+    ]
+    return {
+        "AGENT_PARLEY_NOTIFY": ",".join([*names, "webhook"]),
+        "AGENT_PARLEY_WEBHOOK_URL": url,
+        "AGENT_PARLEY_WEBHOOK_SECRET": secret(
+            "Webhook signing secret (empty for none): "
+        ),
+    }
 
 
 def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
@@ -3714,10 +3805,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     completing = commands.add_parser(
         "completion",
         help="Print a shell completion script for this command.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Install it for the current shell session:\n"
+            '  bash: eval "$(agent-parley completion bash)"\n'
+            '  zsh:  eval "$(agent-parley completion zsh)"\n'
+            "  fish: agent-parley completion fish | source"
+        ),
     )
-    completing.add_argument("shell", choices=completion.SHELLS)
+    completing.add_argument(
+        "shell",
+        choices=completion.SHELLS,
+        help="Shell to print the script for.",
+    )
     candidates = commands.add_parser("__complete", help=argparse.SUPPRESS)
-    candidates.add_argument("kind", choices=completion.KINDS)
+    candidates.add_argument(
+        "kind",
+        choices=completion.KINDS,
+        help="Kind of value to list from local state.",
+    )
     released = commands.add_parser(
         "version",
         help="Print the installed version and the state directory in use.",
@@ -3728,6 +3834,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help=(
             "Run the coordination story with stub lanes in a throwaway "
             "sandbox; no native CLI, model or network."
+        ),
+        description=(
+            "Run the coordination story with stub lanes in a throwaway "
+            "sandbox: lanes claim, collide, are refused, hand off and appear "
+            "in top. No native CLI, model, account or network is used, and "
+            "your state and repositories are never touched. It takes about "
+            "30 seconds; press q or Ctrl-C to stop early, and the sandbox is "
+            "removed either way."
         ),
     )
     starting = commands.add_parser(
@@ -3742,7 +3856,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     health = commands.add_parser(
         "status",
         help=(
-            "Show server health and registered workspaces as one table; "
+            "Show this project's open work and the service's health; "
             "`top` draws the live dashboard and `watch` follows one lane."
         ),
     )
@@ -3802,6 +3916,18 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         type=float,
         default=1.0,
         help="Seconds between redraws of the live view.",
+    )
+    watch.add_argument(
+        "--serve",
+        type=int,
+        nargs="?",
+        const=0,
+        metavar="PORT",
+        help=(
+            "Serve a read-only web page, its JSON frame and Prometheus "
+            "metrics on 127.0.0.1 at PORT, a free one when omitted, "
+            "behind a random path token the command prints."
+        ),
     )
     watch.add_argument(
         "--provider",
@@ -3942,7 +4068,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     follow.add_argument("participant", help="Participant name to follow.")
-    follow.add_argument("--repo", type=Path, default=Path.cwd())
+    follow.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
     follow.add_argument(
         "--json",
         action="store_true",
@@ -3990,8 +4116,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     ):
         listing = subjects.add_parser(subject, help=summary)
-        listing.add_argument(argument)
-        listing.add_argument("--repo", type=Path, default=Path.cwd())
+        listing.add_argument(argument, help=f"The {subject} to read.")
+        listing.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         listing.add_argument("--json", action="store_true", help=JSON_HELP)
         listing.add_argument(
             "--kind",
@@ -4004,9 +4132,19 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 + ". Repeat the flag to report several."
             ),
         )
-        listing.add_argument("--participant", default="")
-        listing.add_argument("--provider", default="")
-        listing.add_argument("--issue", default="")
+        listing.add_argument(
+            "--participant",
+            default="",
+            help="Report only records this lane filed.",
+        )
+        listing.add_argument(
+            "--provider",
+            default="",
+            help="Report only records of lanes on this provider.",
+        )
+        listing.add_argument(
+            "--issue", default="", help="Report only records of this issue."
+        )
         listing.add_argument(
             "--output",
             type=Path,
@@ -4039,7 +4177,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 else "Print the retained records on standard output."
             ),
         )
-        export.add_argument("--repo", type=Path, default=Path.cwd())
+        export.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         export.add_argument(
             "--participant",
             action="append",
@@ -4088,12 +4228,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     showing = archives.add_parser(
         "show", help="List what an archive holds without importing it."
     )
-    showing.add_argument("archive", type=Path)
+    showing.add_argument(
+        "archive", type=Path, help="Archive written by state export."
+    )
     showing.add_argument("--json", action="store_true", help=JSON_HELP)
     importing = archives.add_parser(
         "import", help="Restore an archive into the state directory."
     )
-    importing.add_argument("archive", type=Path)
+    importing.add_argument(
+        "archive", type=Path, help="Archive written by state export."
+    )
     importing.add_argument(
         "--project",
         type=Path,
@@ -4105,11 +4249,44 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         action="store_true",
         help="Add archived projects beside existing state.",
     )
+    storing_state = commands.add_parser(
+        "store", help="Check or repair the coordination store."
+    )
+    store_actions = storing_state.add_subparsers(dest="action", required=True)
+    store_actions.add_parser(
+        "repair",
+        help=(
+            "Keep a damaged store aside as <name>.corrupt-<time> and create "
+            "an empty one."
+        ),
+    )
     setup = commands.add_parser(
         "setup",
         help="Register a repository for coordination from committed HEAD.",
     )
-    setup.add_argument("repo", type=Path)
+    setup.add_argument(
+        "repo",
+        type=Path,
+        help="Repository root or any of its worktrees to register.",
+    )
+    setup.add_argument(
+        "--verify",
+        dest="verify_command",
+        metavar="COMMAND",
+        help=(
+            "Also record the command every merge must pass, as "
+            "`verify set` does and under the same guards."
+        ),
+    )
+    setup.add_argument(
+        "--init",
+        dest="init_command",
+        metavar="COMMAND",
+        help=(
+            "Also record the command every new lane runs before it starts, "
+            "as `init set` does and under the same guards."
+        ),
+    )
     setup.add_argument("--json", action="store_true", help=JSON_HELP)
     run = commands.add_parser(
         "run", help="Launch one participant's native CLI in this terminal."
@@ -4125,10 +4302,22 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     run.add_argument(
         "--credentials", help="Credential profile selecting one account."
     )
-    run.add_argument("--repo", type=Path, default=Path.cwd())
-    run.add_argument("--resume", action="store_true")
+    run.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
     run.add_argument(
-        "--task", default="Check shared coordination state and await my task."
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume the lane's last recorded native session instead of "
+            "starting a new one."
+        ),
+    )
+    run.add_argument(
+        "--task",
+        default="Check shared coordination state and await my task.",
+        help=(
+            "Opening prompt for the session, not an issue; use --issue to "
+            "claim one."
+        ),
     )
     run.add_argument(
         "--issue",
@@ -4154,29 +4343,55 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "Record a partial, blocked, ready-for-review or waiting handoff."
         ),
     )
-    report.add_argument("--repo", type=Path, default=Path.cwd())
+    report.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
     report.add_argument(
-        "--state", choices=("partial", "blocked", "ready", "waiting")
+        "--state",
+        choices=("partial", "blocked", "ready", "waiting"),
+        help="Where the work stands.",
     )
-    report.add_argument("--summary", default="")
+    report.add_argument(
+        "--summary", default="", help="One line on what was done."
+    )
     records = report.add_subparsers(dest="action")
     showing_report = records.add_parser(
         "show", help="Print one recorded report of this lane."
     )
-    showing_report.add_argument("report_id")
-    showing_report.add_argument("--repo", type=Path, default=Path.cwd())
+    showing_report.add_argument("report_id", help="Report to print.")
+    showing_report.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     showing_report.add_argument(
         "--full",
         action="store_true",
         help="Print the whole attached evidence after the record.",
     )
     showing_report.add_argument("--json", action="store_true", help=JSON_HELP)
+    usage_report = records.add_parser(
+        "usage",
+        help=(
+            "List what each resolved claim used: tokens, calls, hours and "
+            "its pull request outcome."
+        ),
+    )
+    usage_report.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
+    usage_report.add_argument(
+        "--since",
+        type=duration,
+        default=0.0,
+        metavar="WINDOW",
+        help="Report only claims resolved inside this window, such as 7d.",
+    )
+    usage_report.add_argument("--json", action="store_true", help=JSON_HELP)
     reviewing_report = records.add_parser(
         "review",
         help="Record this lane's verdict on another lane's report.",
     )
-    reviewing_report.add_argument("report_id")
-    reviewing_report.add_argument("--repo", type=Path, default=Path.cwd())
+    reviewing_report.add_argument("report_id", help="Report to review.")
+    reviewing_report.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     reviewing_report.add_argument(
         "--verdict",
         choices=metrics.VERDICTS,
@@ -4192,8 +4407,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="What was checked; longer evidence is attached as a report's is.",
     )
     reviewing_report.add_argument("--json", action="store_true", help=JSON_HELP)
-    report.add_argument("--remaining", default="")
-    report.add_argument("--evidence", default="")
+    report.add_argument(
+        "--remaining", default="", help="What is still left to do."
+    )
+    report.add_argument(
+        "--evidence",
+        default="",
+        help="What was checked; longer evidence is attached to the report.",
+    )
     report.add_argument(
         "--issue",
         default="",
@@ -4231,6 +4452,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     report.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        metavar="PID",
+        help=(
+            "Process still doing this report's work; while it runs the "
+            "supervisor holds the reported claim."
+        ),
+    )
+    report.add_argument(
+        "--output-file",
+        default="",
+        metavar="PATH",
+        help=(
+            "File the running work writes; a write after this report holds "
+            "the reported claim while it is recent."
+        ),
+    )
+    report.add_argument(
         "--idempotency-key", default="", metavar="KEY", help=RETRY_HELP
     )
     steer = commands.add_parser(
@@ -4258,11 +4498,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ("request", "Ask the holder of an issue to hand it to this lane."),
     ):
         command = actions.add_parser(action, help=summary)
-        command.add_argument("--repo", type=Path, default=Path.cwd())
+        command.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         if action == "list":
             command.add_argument("--json", action="store_true", help=JSON_HELP)
         else:
-            command.add_argument("number")
+            command.add_argument("number", help="Issue number.")
             command.add_argument(
                 "--idempotency-key",
                 default="",
@@ -4292,8 +4534,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 ),
             )
         if action == "offer":
-            command.add_argument("--to", required=True)
-            command.add_argument("--summary", required=True)
+            command.add_argument(
+                "--to", required=True, help="Lane the ownership is offered to."
+            )
+            command.add_argument(
+                "--summary",
+                required=True,
+                help="Where the work stands, for the receiving lane.",
+            )
             command.add_argument(
                 "--remaining",
                 action="append",
@@ -4330,9 +4578,18 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 ),
             )
         if action in ("accept", "decline"):
-            command.add_argument("--offer-id", required=True)
+            command.add_argument(
+                "--offer-id",
+                required=True,
+                help="Offer being answered, as issue list prints it.",
+            )
         if action in ("block", "unblock"):
-            command.add_argument("--on", required=True)
+            command.add_argument(
+                "--on",
+                required=True,
+                metavar="NUMBER",
+                help="Issue this one depends on.",
+            )
     recovering = actions.add_parser(
         "recover",
         help=(
@@ -4340,13 +4597,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "capacity observation is later published."
         ),
     )
-    recovering.add_argument("number")
-    recovering.add_argument("--repo", type=Path, default=Path.cwd())
+    recovering.add_argument("number", help="Issue number.")
+    recovering.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     recovering.add_argument(
         "--reason",
         required=True,
         help="Operator rationale persisted with this exact claim approval.",
     )
+    recovering.add_argument("--json", action="store_true", help=JSON_HELP)
     resolving = actions.add_parser(
         "resolve",
         help=(
@@ -4354,8 +4614,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "request already landed, recording the forge evidence."
         ),
     )
-    resolving.add_argument("number")
-    resolving.add_argument("--repo", type=Path, default=Path.cwd())
+    resolving.add_argument("number", help="Issue number.")
+    resolving.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     resolving.add_argument(
         "--reason",
         default="",
@@ -4371,6 +4633,7 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "because nothing was integrated."
         ),
     )
+    resolving.add_argument("--json", action="store_true", help=JSON_HELP)
     choosing = actions.add_parser(
         "next",
         help=(
@@ -4378,7 +4641,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "reason for each; it claims nothing."
         ),
     )
-    choosing.add_argument("--repo", type=Path, default=Path.cwd())
+    choosing.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     choosing.add_argument("--json", action="store_true", help=JSON_HELP)
     choosing.add_argument(
         "--limit",
@@ -4394,7 +4659,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "the forge tracks is claimed rather than opened twice."
         ),
     )
-    matching.add_argument("--repo", type=Path, default=Path.cwd())
+    matching.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     matching.add_argument("--json", action="store_true", help=JSON_HELP)
     matching.add_argument(
         "goal",
@@ -4411,8 +4678,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "assign",
         help="Offer an issue to a lane as the operator, or withdraw it.",
     )
-    assigning.add_argument("--repo", type=Path, default=Path.cwd())
-    assigning.add_argument("number")
+    assigning.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
+    assigning.add_argument("number", help="Issue number.")
     assigning.add_argument(
         "name",
         nargs="?",
@@ -4444,8 +4713,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "offer, held reservations and recorded history."
         ),
     )
-    inspecting.add_argument("number")
-    inspecting.add_argument("--repo", type=Path, default=Path.cwd())
+    inspecting.add_argument("number", help="Issue number.")
+    inspecting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     inspecting.add_argument("--json", action="store_true", help=JSON_HELP)
     checking = commands.add_parser(
         "doctor",
@@ -4501,8 +4772,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "unanswered, clearing that condition and nothing else."
         ),
     )
-    acking.add_argument("message_id", type=int)
-    acking.add_argument("--repo", type=Path, default=Path.cwd())
+    acking.add_argument(
+        "message_id", type=int, help="Message to acknowledge, as listed."
+    )
+    acking.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
     acking.add_argument("--json", action="store_true", help=JSON_HELP)
     collecting = commands.add_parser(
         "gc",
@@ -4513,7 +4786,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "`reclaim` is a compatibility alias."
         ),
     )
-    collecting.add_argument("--repo", type=Path, default=Path.cwd())
+    collecting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     sweeping = collecting.add_mutually_exclusive_group()
     sweeping.add_argument(
         "--apply",
@@ -4530,6 +4805,29 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "Only report what would be removed and what would be kept, with "
             "each worktree's size on disk; the default."
         ),
+    )
+    sweeping.add_argument(
+        "--preserved",
+        action="store_true",
+        help=(
+            "List the recovery checkpoints written before a sweep removed "
+            "or rebuilt a worktree, with each one's source path and age."
+        ),
+    )
+    sweeping.add_argument(
+        "--restore",
+        default="",
+        metavar="ID",
+        help=(
+            "Recreate the worktree a preserved checkpoint holds, its "
+            "branch head and staged and unstaged changes, at --to PATH."
+        ),
+    )
+    collecting.add_argument(
+        "--to",
+        type=Path,
+        metavar="PATH",
+        help="With --restore, the path the worktree is recreated at.",
     )
     collecting.add_argument(
         "--force",
@@ -4572,22 +4870,42 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "whether the service is reading inbound queries."
         ),
     )
-    probing.add_argument("--repo", type=Path, default=Path.cwd())
+    probing.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     probing.add_argument("--json", action="store_true", help=JSON_HELP)
     storing = notices.add_parser(
         "setup",
         help=(
-            "Store the Telegram chat and bot token in the state root, "
-            "owner-only; the token is read from a prompt or standard input."
+            "Store the Telegram chat and bot token, or a webhook URL, in the "
+            "state root, owner-only; secrets are read from a prompt or "
+            "standard input."
         ),
     )
-    storing.add_argument("--chat", required=True, help="Telegram chat id.")
+    destination = storing.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--chat", help="Telegram chat id.")
+    destination.add_argument(
+        "--webhook",
+        action="store_true",
+        help=(
+            "Post to a Slack, Discord, Teams or other HTTPS webhook; the URL "
+            "and an optional signing secret are read after it."
+        ),
+    )
     storing.add_argument(
         "--inbound",
         action="store_true",
         help=(
             "Also answer status queries from the chat; the passcode is read "
             "after the token."
+        ),
+    )
+    storing.add_argument(
+        "--users",
+        default="",
+        help=(
+            "Comma-separated Telegram user ids allowed to answer; required "
+            "with --inbound for a group chat."
         ),
     )
     planning = commands.add_parser(
@@ -4600,13 +4918,21 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ("show", "Print the applied plan as a tree with owners."),
     ):
         command = steps.add_parser(action, help=summary)
-        command.add_argument("--repo", type=Path, default=Path.cwd())
+        command.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         if action != "show":
             command.add_argument(
                 "path", type=Path, help="TOML plan file to read."
             )
         if action != "apply":
             command.add_argument("--json", action="store_true", help=JSON_HELP)
+        else:
+            command.add_argument(
+                "--force",
+                action="store_true",
+                help="Restore edges accepted revisions removed.",
+            )
     revising = {
         "propose": "File a revision that adds or removes plan edges.",
         "approve": "Approve and apply one open revision as operator.",
@@ -4615,11 +4941,17 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     }
     for action, summary in revising.items():
         command = steps.add_parser(action, help=summary)
-        command.add_argument("--repo", type=Path, default=Path.cwd())
+        command.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         command.add_argument("--json", action="store_true", help=JSON_HELP)
         if action in ("approve", "reject"):
-            command.add_argument("proposal_id")
-            command.add_argument("--reason", default="")
+            command.add_argument(
+                "proposal_id", help="Revision, as plan proposals lists it."
+            )
+            command.add_argument(
+                "--reason", default="", help="Rationale kept with the verdict."
+            )
         elif action == "propose":
             command.add_argument(
                 "--base",
@@ -4633,9 +4965,17 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                     action="append",
                     default=[],
                     metavar="ISSUE:BLOCKER",
+                    help=f"Dependency edge to {edge}; repeatable.",
                 )
-            command.add_argument("--reason", required=True)
-            command.add_argument("--evidence", action="append", default=[])
+            command.add_argument(
+                "--reason", required=True, help="Why the plan should change."
+            )
+            command.add_argument(
+                "--evidence",
+                action="append",
+                default=[],
+                help="What supports the change; repeatable.",
+            )
     mail = commands.add_parser(
         "mail",
         help=(
@@ -4647,16 +4987,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     reading = letters.add_parser(
         "thread", help="Read this lane's messages in one thread."
     )
-    reading.add_argument("thread_id")
-    reading.add_argument("--repo", type=Path, default=Path.cwd())
-    reading.add_argument("--after-id", type=int, default=0)
+    reading.add_argument("thread_id", help="Thread to read.")
+    reading.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
+    reading.add_argument(
+        "--after-id",
+        type=int,
+        default=0,
+        help="Read only messages after this message id.",
+    )
     add_reader_argument(reading)
     reading.add_argument("--json", action="store_true", help=JSON_HELP)
     showing_mail = letters.add_parser(
         "show", help="Print one message you sent or received."
     )
-    showing_mail.add_argument("message_id", type=int)
-    showing_mail.add_argument("--repo", type=Path, default=Path.cwd())
+    showing_mail.add_argument("message_id", type=int, help="Message to print.")
+    showing_mail.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     showing_mail.add_argument(
         "--full",
         action="store_true",
@@ -4665,9 +5014,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     add_reader_argument(showing_mail)
     showing_mail.add_argument("--json", action="store_true", help=JSON_HELP)
     finding = letters.add_parser("search", help="Search this lane's mail.")
-    finding.add_argument("query")
-    finding.add_argument("--repo", type=Path, default=Path.cwd())
-    finding.add_argument("--limit", type=int, default=store.MAX_SEARCH_HITS)
+    finding.add_argument("query", help="Text to search for.")
+    finding.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
+    finding.add_argument(
+        "--limit",
+        type=int,
+        default=store.MAX_SEARCH_HITS,
+        help="Most messages to list.",
+    )
     add_reader_argument(finding)
     finding.add_argument("--json", action="store_true", help=JSON_HELP)
     inbox = letters.add_parser(
@@ -4677,8 +5033,13 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "query to write."
         ),
     )
-    inbox.add_argument("--repo", type=Path, default=Path.cwd())
-    inbox.add_argument("--limit", type=int, default=store.MAX_SEARCH_HITS)
+    inbox.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
+    inbox.add_argument(
+        "--limit",
+        type=int,
+        default=store.MAX_SEARCH_HITS,
+        help="Most messages to list.",
+    )
     add_reader_argument(inbox)
     inbox.add_argument("--json", action="store_true", help=JSON_HELP)
     sending = letters.add_parser(
@@ -4692,13 +5053,19 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     waiting = letters.add_parser(
         "pending", help="List operator items recorded but not delivered."
     )
-    waiting.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     waiting.add_argument("--json", action="store_true", help=JSON_HELP)
     dropping = letters.add_parser(
         "cancel", help="Remove one recorded operator item before delivery."
     )
-    dropping.add_argument("item_id", type=int)
-    dropping.add_argument("--repo", type=Path, default=Path.cwd())
+    dropping.add_argument(
+        "item_id", type=int, help="Pending item, as mail pending lists it."
+    )
+    dropping.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     dropping.add_argument("--json", action="store_true", help=JSON_HELP)
     deciding = commands.add_parser(
         "decide",
@@ -4708,7 +5075,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ),
     )
     deciding.add_argument("text", help="Decision text participants read.")
-    deciding.add_argument("--repo", type=Path, default=Path.cwd())
+    deciding.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     deciding.add_argument(
         "--subject", default="", help="Subject the decision is found under."
     )
@@ -4738,9 +5107,14 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         default="",
         help="Text to match; without it the newest decisions are listed.",
     )
-    decision_list.add_argument("--repo", type=Path, default=Path.cwd())
     decision_list.add_argument(
-        "--limit", type=int, default=store.MAX_SEARCH_HITS
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
+    decision_list.add_argument(
+        "--limit",
+        type=int,
+        default=store.MAX_SEARCH_HITS,
+        help="Most decisions to list.",
     )
     decision_list.add_argument(
         "--since",
@@ -4760,7 +5134,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     listing = roles.add_parser(
         "list", help="List the project's lanes and their identities."
     )
-    listing.add_argument("--repo", type=Path, default=Path.cwd())
+    listing.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     listing.add_argument("--json", action="store_true", help=JSON_HELP)
     reporting_lane = roles.add_parser(
         "show",
@@ -4769,16 +5145,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "current claims and last coordination."
         ),
     )
-    reporting_lane.add_argument("name")
-    reporting_lane.add_argument("--repo", type=Path, default=Path.cwd())
+    reporting_lane.add_argument("name", help="Lane to print.")
+    reporting_lane.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     reporting_lane.add_argument("--json", action="store_true", help=JSON_HELP)
     joining = roles.add_parser(
         "add", help="Create a lane with an optional provider and credentials."
     )
-    joining.add_argument("name")
-    joining.add_argument("--provider")
-    joining.add_argument("--credentials")
-    joining.add_argument("--repo", type=Path, default=Path.cwd())
+    joining.add_argument("name", help="Name of the new lane.")
+    joining.add_argument(
+        "--provider",
+        help="Provider definition; defaults to the participant name.",
+    )
+    joining.add_argument(
+        "--credentials", help="Credential profile selecting one account."
+    )
+    joining.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     for action, summary in (
         ("restore", "Restore the assigned branch while preserving work."),
         ("retire", "Retire a lane while preserving recoverable work."),
@@ -4791,12 +5176,23 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ):
         command = roles.add_parser(action, help=summary)
         if action in BULK_PARTICIPANT or action == "merge":
-            command.add_argument("name", nargs="?", default="")
+            command.add_argument(
+                "name",
+                nargs="?",
+                default="",
+                help="Lane to act on; a lane selector may replace it.",
+            )
         else:
-            command.add_argument("name")
-        command.add_argument("--repo", type=Path, default=Path.cwd())
+            command.add_argument("name", help="Lane to act on.")
+        command.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
         if action == "merge":
-            command.add_argument("--preview", action="store_true")
+            command.add_argument(
+                "--preview",
+                action="store_true",
+                help="Report what the merge would do; change nothing.",
+            )
             command.add_argument(
                 "--renew-recovery",
                 action="store_true",
@@ -4848,7 +5244,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         elif action in BULK_PARTICIPANT:
             add_selector(command)
         if action == "restart":
-            command.add_argument("--task", default="")
+            command.add_argument(
+                "--task",
+                default="",
+                help="Opening prompt for the new session.",
+            )
         if action == "retire":
             command.add_argument(
                 "--yes",
@@ -4865,8 +5265,10 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "crossing one marks the lane and stops nothing."
         ),
     )
-    limiting.add_argument("name")
-    limiting.add_argument("--repo", type=Path, default=Path.cwd())
+    limiting.add_argument("name", help="Lane whose limits are shown or set.")
+    limiting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     add_budget_flags(limiting)
     granting = commands.add_parser(
         "approve",
@@ -4875,7 +5277,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     granting.add_argument(
         "participant", help="Participant whose ready report you approve."
     )
-    granting.add_argument("--repo", type=Path, default=Path.cwd())
+    granting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     granting.add_argument("--json", action="store_true", help=JSON_HELP)
     refusing = commands.add_parser(
         "reject",
@@ -4887,7 +5291,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     refusing.add_argument(
         "reason", help="Explanation delivered to the lane as operator mail."
     )
-    refusing.add_argument("--repo", type=Path, default=Path.cwd())
+    refusing.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     refusing.add_argument("--json", action="store_true", help=JSON_HELP)
     requirement = commands.add_parser(
         "approval",
@@ -4897,7 +5303,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     stating = requirements.add_parser(
         "show", help="Show which steps require a recorded approval first."
     )
-    stating.add_argument("--repo", type=Path, default=Path.cwd())
+    stating.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     stating.add_argument("--json", action="store_true", help=JSON_HELP)
     requiring = requirements.add_parser(
         "set", help="Require an approval before merge, pr, both or none."
@@ -4913,7 +5321,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             + "; pass none to require no approval."
         ),
     )
-    requiring.add_argument("--repo", type=Path, default=Path.cwd())
+    requiring.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     resuming = requirements.add_parser(
         "resume",
         help=(
@@ -4936,7 +5346,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         default="",
         help="Lane to record on; the project default when omitted.",
     )
-    resuming.add_argument("--repo", type=Path, default=Path.cwd())
+    resuming.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     gate = commands.add_parser(
         "verify",
         help="Show or set the command a repository requires before a merge.",
@@ -4945,7 +5357,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     showing = gates.add_parser(
         "show", help="Show the project's configured pre-merge command."
     )
-    showing.add_argument("--repo", type=Path, default=Path.cwd())
+    showing.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     showing.add_argument("--json", action="store_true", help=JSON_HELP)
     setting = gates.add_parser(
         "set", help="Set the pre-merge command; empty removes it."
@@ -4958,7 +5372,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "empty string to remove the gate. No flag skips it."
         ),
     )
-    setting.add_argument("--repo", type=Path, default=Path.cwd())
+    setting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     standing = commands.add_parser(
         "unattended",
         help="Show, set or run the project's unattended integration policy.",
@@ -4967,7 +5383,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     standing_show = standings.add_parser(
         "show", help="Show the unattended integration policy."
     )
-    standing_show.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     standing_set = standings.add_parser(
         "set", help="Authorize unattended integration of named issues."
     )
@@ -4984,7 +5402,17 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "--target",
         help="Branch the base checkout must have checked out.",
     )
-    standing_set.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_set.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "Let the service integrate ready listed lanes on its own "
+            "instead of waiting for `unattended run`."
+        ),
+    )
+    standing_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     standing_run = standings.add_parser(
         "run", help="Integrate one eligible lane under the policy."
     )
@@ -4999,7 +5427,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "defaults to its only ready claim."
         ),
     )
-    standing_run.add_argument("--repo", type=Path, default=Path.cwd())
+    standing_run.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     waiting_kind = commands.add_parser(
         "timeout",
         help=(
@@ -5011,7 +5441,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     waiting_show = waiting_kinds.add_parser(
         "show", help="List every decision kind with its timeout."
     )
-    waiting_show.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     waiting_set = waiting_kinds.add_parser(
         "set", help="Make a reversible kind always ask, or wait longer."
     )
@@ -5032,7 +5464,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "--after the kind returns to its default."
         ),
     )
-    waiting_set.add_argument("--repo", type=Path, default=Path.cwd())
+    waiting_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     blueprint = commands.add_parser(
         "blueprint",
         help="Set, show or run the ordered steps a claim runs through.",
@@ -5044,40 +5478,92 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     blueprint_show = blueprint_actions.add_parser(
         "show", help="Show one blueprint node by node, or list them all."
     )
-    blueprint_show.add_argument("name", nargs="?", metavar="NAME")
-    blueprint_set = blueprint_actions.add_parser(
-        "set", help="Record a blueprint from a JSON file. Base checkout only."
+    blueprint_show.add_argument(
+        "name",
+        nargs="?",
+        metavar="NAME",
+        help="Blueprint to show; all are listed when omitted.",
     )
-    blueprint_set.add_argument("name", metavar="NAME")
-    blueprint_set.add_argument("file", type=Path, metavar="FILE")
+    blueprint_templates = blueprint_actions.add_parser(
+        "templates", help="List the starter blueprints shipped with the tool."
+    )
+    blueprint_templates.add_argument(
+        "--json", action="store_true", help=JSON_HELP
+    )
+    blueprint_set = blueprint_actions.add_parser(
+        "set",
+        help="Record a blueprint from a JSON file or a starter template. "
+        "Base checkout only.",
+    )
+    blueprint_set.add_argument(
+        "name", metavar="NAME", help="Name to record the blueprint under."
+    )
+    blueprint_source = blueprint_set.add_mutually_exclusive_group(required=True)
+    blueprint_source.add_argument(
+        "file",
+        type=Path,
+        nargs="?",
+        metavar="FILE",
+        help="JSON file holding the blueprint.",
+    )
+    blueprint_source.add_argument(
+        "--template",
+        metavar="TEMPLATE",
+        help="Starter blueprint to record; see blueprint templates.",
+    )
+    blueprint_set.add_argument(
+        "--verify",
+        metavar="CMD",
+        help="Command the template's verify steps run; the project's "
+        "verification command when omitted.",
+    )
     blueprint_remove = blueprint_actions.add_parser(
         "remove", help="Remove a recorded blueprint. Base checkout only."
     )
-    blueprint_remove.add_argument("name", metavar="NAME")
+    blueprint_remove.add_argument(
+        "name", metavar="NAME", help="Blueprint to remove."
+    )
     blueprint_run = blueprint_actions.add_parser(
         "run",
         help="Start a lane's claim on a blueprint. Base checkout only.",
     )
-    blueprint_run.add_argument("participant", metavar="NAME")
-    blueprint_run.add_argument("blueprint", metavar="BLUEPRINT")
-    blueprint_run.add_argument("--issue", required=True)
+    blueprint_run.add_argument(
+        "participant", metavar="NAME", help="Lane whose claim runs."
+    )
+    blueprint_run.add_argument(
+        "blueprint", metavar="BLUEPRINT", help="Recorded blueprint to run."
+    )
+    blueprint_run.add_argument(
+        "--issue", required=True, help="Claimed issue the run belongs to."
+    )
     blueprint_advance = blueprint_actions.add_parser(
         "advance",
         help="Move a claim's run on after its lane reports. Base checkout "
         "only.",
     )
-    blueprint_advance.add_argument("--issue", required=True)
+    blueprint_advance.add_argument(
+        "--issue", required=True, help="Claimed issue whose run moves on."
+    )
     blueprint_progress = blueprint_actions.add_parser(
         "progress", help="Show each run's current node and nodes passed."
     )
-    blueprint_progress.add_argument("--issue")
+    blueprint_progress.add_argument(
+        "--issue", help="Show only the run of this issue."
+    )
     blueprint_default = blueprint_actions.add_parser(
         "default",
         help="Map an issue label to the blueprint run --issue starts; omit "
         "BLUEPRINT to clear it. Base checkout only.",
     )
-    blueprint_default.add_argument("label", metavar="LABEL")
-    blueprint_default.add_argument("blueprint", nargs="?", metavar="BLUEPRINT")
+    blueprint_default.add_argument(
+        "label", metavar="LABEL", help="Issue label to map."
+    )
+    blueprint_default.add_argument(
+        "blueprint",
+        nargs="?",
+        metavar="BLUEPRINT",
+        help="Blueprint the label starts; omit to clear the mapping.",
+    )
     for blueprint_action in (
         blueprint_list,
         blueprint_show,
@@ -5088,7 +5574,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         blueprint_progress,
         blueprint_default,
     ):
-        blueprint_action.add_argument("--repo", type=Path, default=Path.cwd())
+        blueprint_action.add_argument(
+            "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+        )
     preparation = commands.add_parser(
         "init",
         help="Show or set the command every new lane runs before it starts.",
@@ -5097,7 +5585,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     reporting = preparations.add_parser(
         "show", help="Show the command every new lane runs before it starts."
     )
-    reporting.add_argument("--repo", type=Path, default=Path.cwd())
+    reporting.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     reporting.add_argument("--json", action="store_true", help=JSON_HELP)
     recording = preparations.add_parser(
         "set", help="Set the command every new lane runs before it starts."
@@ -5111,7 +5601,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "checkout while it runs. No flag skips it."
         ),
     )
-    recording.add_argument("--repo", type=Path, default=Path.cwd())
+    recording.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     pooling = commands.add_parser(
         "pool",
         help="Show or set how many prepared spare worktrees new lanes take.",
@@ -5120,7 +5612,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     pool_show = pools.add_parser(
         "show", help="Show the pool size and the condition of each spare."
     )
-    pool_show.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     pool_show.add_argument("--json", action="store_true", help=JSON_HELP)
     pool_set = pools.add_parser(
         "set", help="Set how many spare worktrees to keep prepared."
@@ -5134,11 +5628,15 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "with init already run; 0 keeps none."
         ),
     )
-    pool_set.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     pool_fill = pools.add_parser(
         "fill", help="Prepare missing spares now and remove stale ones."
     )
-    pool_fill.add_argument("--repo", type=Path, default=Path.cwd())
+    pool_fill.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     naming = commands.add_parser(
         "branch",
         help="Show or set the prefix new lane branches are created under.",
@@ -5147,7 +5645,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     naming_show = namings.add_parser(
         "show", help="Show the lane branch prefix and integration branch."
     )
-    naming_show.add_argument("--repo", type=Path, default=Path.cwd())
+    naming_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     naming_show.add_argument("--json", action="store_true", help=JSON_HELP)
     naming_set = namings.add_parser(
         "set", help="Set the prefix new lane branches are created under."
@@ -5160,7 +5660,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "keep the branch they were created with."
         ),
     )
-    naming_set.add_argument("--repo", type=Path, default=Path.cwd())
+    naming_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     naming_base = namings.add_parser(
         "integration",
         help=(
@@ -5177,7 +5679,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "empty string removes it."
         ),
     )
-    naming_base.add_argument("--repo", type=Path, default=Path.cwd())
+    naming_base.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     tracker = commands.add_parser(
         "forge",
         help="Show or set the issue tracker this project coordinates over.",
@@ -5186,7 +5690,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     tracker_show = trackers.add_parser(
         "show", help="Show the issue tracker this project coordinates over."
     )
-    tracker_show.add_argument("--repo", type=Path, default=Path.cwd())
+    tracker_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     tracker_show.add_argument("--json", action="store_true", help=JSON_HELP)
     tracker_set = trackers.add_parser(
         "set", help="Select the issue tracker; only github opens PRs."
@@ -5200,7 +5706,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "carries a .beads/ ledger, and null keeps issue numbers bare."
         ),
     )
-    tracker_set.add_argument("--repo", type=Path, default=Path.cwd())
+    tracker_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     budgets = commands.add_parser(
         "deadlines",
         help="Show or set this project's deadline and attempt defaults.",
@@ -5209,12 +5717,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     budget_show = budget_actions.add_parser(
         "show", help="Show the deadline and attempt defaults."
     )
-    budget_show.add_argument("--repo", type=Path, default=Path.cwd())
+    budget_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     budget_show.add_argument("--json", action="store_true", help=JSON_HELP)
     budget_set = budget_actions.add_parser(
         "set", help="Set the deadline windows and attempt limit."
     )
-    budget_set.add_argument("--repo", type=Path, default=Path.cwd())
+    budget_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     for field, described in (
         ("claim", "a claim"),
         ("offer", "a handoff offer"),
@@ -5250,12 +5762,16 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ceiling_show = ceiling_actions.add_parser(
         "show", help="Show the advisory limits every lane inherits."
     )
-    ceiling_show.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     ceiling_show.add_argument("--json", action="store_true", help=JSON_HELP)
     ceiling_set = ceiling_actions.add_parser(
         "set", help="Set the advisory limits every lane inherits."
     )
-    ceiling_set.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     add_budget_flags(ceiling_set)
     ceiling_enforce = ceiling_actions.add_parser(
         "enforce",
@@ -5264,7 +5780,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "lane that stop new wakes, dispatch, retries and launches."
         ),
     )
-    ceiling_enforce.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_enforce.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     for field, kind in (("tokens", int), ("calls", int), ("hours", float)):
         ceiling_enforce.add_argument(
             f"--{field}",
@@ -5275,11 +5793,21 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
                 "consumes together; 0 removes it."
             ),
         )
+    ceiling_enforce.add_argument(
+        "--allow-unmeasured",
+        action="store_true",
+        help=(
+            "Enforce a token limit even though some lanes run a provider "
+            "whose tokens are not read."
+        ),
+    )
     ceiling_resume = ceiling_actions.add_parser(
         "resume",
         help="Clear an exhausted run budget so the service dispatches again.",
     )
-    ceiling_resume.add_argument("--repo", type=Path, default=Path.cwd())
+    ceiling_resume.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     ceiling_resume.add_argument(
         "--reset",
         action="store_true",
@@ -5293,7 +5821,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     declared_show = declarations.add_parser(
         "show", help="Show the named resources lanes may reserve."
     )
-    declared_show.add_argument("--repo", type=Path, default=Path.cwd())
+    declared_show.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     declared_show.add_argument("--json", action="store_true", help=JSON_HELP)
     declared_set = declarations.add_parser(
         "set", help="Declare the named resources lanes may reserve."
@@ -5306,7 +5836,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "pass an empty string to accept any well-formed name again."
         ),
     )
-    declared_set.add_argument("--repo", type=Path, default=Path.cwd())
+    declared_set.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help=REPO_HELP
+    )
     provider = commands.add_parser(
         "provider", help="Inspect or define providers that drive a native CLI."
     )
@@ -5316,21 +5848,51 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ).add_argument("--json", action="store_true", help=JSON_HELP)
     definitions.add_parser(
         "remove", help="Delete a local definition, restoring any preset."
-    ).add_argument("name")
+    ).add_argument("name", help="Provider definition to delete.")
     provider_show = definitions.add_parser(
         "show", help="Print one provider definition and its hook support."
     )
-    provider_show.add_argument("name")
+    provider_show.add_argument("name", help="Provider to print.")
     provider_show.add_argument("--json", action="store_true", help=JSON_HELP)
     defining = definitions.add_parser(
         "add", help="Define a provider; warn when shadowing a preset."
     )
-    defining.add_argument("name")
-    defining.add_argument("--adapter", choices=roster.ADAPTERS, required=True)
-    defining.add_argument("--executable", required=True)
-    defining.add_argument("--home-env", default="")
-    defining.add_argument("--env", action="append", default=[])
-    defining.add_argument("--require-env", action="append", default=[])
+    defining.add_argument("name", help="Name of the provider to define.")
+    defining.add_argument(
+        "--adapter",
+        choices=roster.ADAPTERS,
+        required=True,
+        help="Native CLI family whose launch and hooks the provider uses.",
+    )
+    defining.add_argument(
+        "--executable",
+        required=True,
+        help="Command resolved on PATH that starts the native CLI.",
+    )
+    defining.add_argument(
+        "--home-env",
+        default="",
+        metavar="NAME",
+        help=(
+            "Variable naming the CLI's config home, which a credential "
+            "profile's --config-home sets."
+        ),
+    )
+    defining.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Variable set for every launch; repeatable, never a secret.",
+    )
+    defining.add_argument(
+        "--require-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Variable the launching shell must export; repeatable.",
+    )
+    defining.add_argument("--json", action="store_true", help=JSON_HELP)
     capping = definitions.add_parser(
         "budget",
         help=(
@@ -5338,8 +5900,25 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "inherits unless its own budget says otherwise."
         ),
     )
-    capping.add_argument("name")
+    capping.add_argument("name", help="Provider whose limits are shown or set.")
     add_budget_flags(capping)
+    pricing = definitions.add_parser(
+        "price",
+        help=(
+            "Show or record the operator's price per million tokens, which "
+            "report usage turns into an estimated spend."
+        ),
+    )
+    pricing.add_argument("name", help="Provider whose price is shown or set.")
+    pricing.add_argument(
+        "--per-mtok",
+        type=float,
+        metavar="AMOUNT",
+        help=(
+            "Price per million recorded tokens; 0 removes it. Never "
+            "fetched, and refused from a lane."
+        ),
+    )
     accounts = commands.add_parser(
         "credentials", help="Inspect or define per-account profiles."
     )
@@ -5349,20 +5928,43 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
     ).add_argument("--json", action="store_true", help=JSON_HELP)
     profiles.add_parser(
         "remove", help="Delete a profile; keep native files and logins."
-    ).add_argument("name")
+    ).add_argument("name", help="Profile to delete.")
     credential_show = profiles.add_parser(
         "show",
         help=("Print one account profile with every recorded value redacted."),
     )
-    credential_show.add_argument("name")
+    credential_show.add_argument("name", help="Profile to print.")
     credential_show.add_argument("--json", action="store_true", help=JSON_HELP)
     profile = profiles.add_parser(
         "add", help="Define a config home and environment requirements."
     )
-    profile.add_argument("name")
-    profile.add_argument("--config-home", default="")
-    profile.add_argument("--env", action="append", default=[])
-    profile.add_argument("--require-env", action="append", default=[])
+    profile.add_argument(
+        "name", help="Profile name that run --credentials selects."
+    )
+    profile.add_argument(
+        "--config-home",
+        default="",
+        metavar="DIR",
+        help=(
+            "Separate config directory for this account, set as the "
+            "provider's config-home variable at launch; sign in there once."
+        ),
+    )
+    profile.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Variable set for this account's launches; repeatable.",
+    )
+    profile.add_argument(
+        "--require-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Variable the launching shell must export; repeatable.",
+    )
+    profile.add_argument("--json", action="store_true", help=JSON_HELP)
     parser.epilog = command_help(commands)
 
 
@@ -5521,9 +6123,9 @@ def main() -> int:
         from agent_parley import plugins
 
         if args.action == "status":
-            print("\n".join(plugins.status()))
+            print("\n".join(plugins.status(home)))
             return 0
-        outcome, succeeded = plugins.install()
+        outcome, succeeded = plugins.install(home)
         print("\n".join(outcome))
         return 0 if succeeded else 1
     if args.command == "demo":
@@ -5586,28 +6188,36 @@ def main() -> int:
                     f"Unknown sort column {args.sort}. Choose from: "
                     f"{', '.join(dashboard.SORT_KEYS)}."
                 )
-            if args.json:
-                print(
-                    views.render(
-                        "top",
-                        views.frame(
-                            dashboard.select(
-                                dashboard.collect(
-                                    bridge.home,
-                                    bool(bridge.server_process()),
-                                    {},
-                                    tuple(args.provider or ()),
-                                    args.since,
-                                    operator_edits=not args.no_operator_edits,
-                                ),
-                                args.sort or "",
-                                args.reverse,
-                                tuple(args.project or ()),
-                                tuple(args.participant or ()),
-                            )
-                        ),
-                    )
+            if args.serve is not None and (args.json or args.once):
+                parser.error(
+                    "--serve cannot be combined with --json or --once."
                 )
+            if args.serve is not None and not 0 <= args.serve <= 65535:
+                parser.error("--serve takes a port from 0 to 65535.")
+
+            def top_view() -> dict:
+                """Reads one frame narrowed and ordered by the top filters."""
+                return dashboard.select(
+                    dashboard.collect(
+                        bridge.home,
+                        bool(bridge.server_process()),
+                        {},
+                        tuple(args.provider or ()),
+                        args.since,
+                        operator_edits=not args.no_operator_edits,
+                    ),
+                    args.sort or "",
+                    args.reverse,
+                    tuple(args.project or ()),
+                    tuple(args.participant or ()),
+                )
+
+            if args.serve is not None:
+                from agent_parley import webview
+
+                webview.serve(args.serve, top_view, args.interval)
+            elif args.json:
+                print(views.render("top", views.frame(top_view())))
             else:
                 dashboard.run(
                     bridge.home,
@@ -5687,7 +6297,9 @@ def main() -> int:
                     document
                     if args.json
                     else history.describe(
-                        reported["records"], reported["holdings"]
+                        reported["records"],
+                        reported["holdings"],
+                        truncated=reported["truncated"],
                     )
                 )
         elif args.command == "events":
@@ -5714,12 +6326,36 @@ def main() -> int:
             )
         elif args.command == "state":
             print(bridge.state_archive(args))
+        elif args.command == "store":
+            fault, damaged_copies = store.repair(bridge.home)
+            print(
+                f"Store was damaged ({fault}); kept "
+                f"{', '.join(map(str, damaged_copies))} and created an "
+                "empty store."
+                if fault
+                else "Store passed its integrity check; nothing was moved."
+            )
         elif args.command == "setup":
-            registered = bridge.setup(args.repo.resolve())
+            from agent_parley.core import suggested_gate
+
+            repository = args.repo.resolve()
+            registered = bridge.setup(repository)
+            if args.verify_command is not None:
+                bridge.verification(repository, args.verify_command)
+            if args.init_command is not None:
+                bridge.initialization(repository, args.init_command)
+            configured = bridge.commands(repository)
+            registered["verify"] = configured["verify"]
+            registered["initialize"] = configured["initialize"]
             print(
                 views.render("setup", registered)
                 if args.json
-                else json.dumps(registered, indent=2)
+                else views.setup_text(
+                    registered,
+                    None
+                    if registered["verify"]
+                    else suggested_gate(Path(registered["root"])),
+                )
             )
         elif args.command == "run":
             status = bridge.launch(
@@ -5732,6 +6368,8 @@ def main() -> int:
                 issue=args.issue,
                 blueprint=args.blueprint,
             )
+            if bridge.preserved and sys.stdin.isatty():
+                print(bridge.preserved, file=sys.stderr, flush=True)
             if args.json:
                 print(
                     views.render(
@@ -5755,6 +6393,19 @@ def main() -> int:
                 views.render("report_show", record)
                 if args.json
                 else shown_record(record)
+            )
+        elif args.command == "report" and args.action == "usage":
+            _, directory = bridge.project(args.repo.resolve(), create=False)
+            spent = history.usage(
+                bridge.home,
+                directory,
+                roster.read(directory),
+                time.time() - args.since if args.since else 0.0,
+            )
+            print(
+                views.render("report_usage", views.usage(spent))
+                if args.json
+                else history.describe_usage(spent)
             )
         elif args.command == "report" and args.action == "review":
             recorded = bridge.review_report(
@@ -5786,6 +6437,8 @@ def main() -> int:
                 resume_on=args.resume_on,
                 backlog=args.backlog,
                 until=args.until,
+                pid=args.pid,
+                output=args.output_file,
             )
             print(f"Recorded outcome: {args.state}")
             if owed:
@@ -5857,12 +6510,20 @@ def main() -> int:
                 reason=args.reason,
                 release=args.release,
             )
-            print(json.dumps(ended, indent=2))
+            print(
+                views.render("issue_resolve", views.resolution(ended))
+                if args.json
+                else views.resolution_text(ended)
+            )
         elif args.command == "issue" and args.action == "recover":
             approved = bridge.authorize_recovery(
                 args.repo.resolve(), args.number, args.reason
             )
-            print(json.dumps(approved, indent=2))
+            print(
+                views.render("issue_recover", views.recovery(approved))
+                if args.json
+                else views.recovery_text(approved)
+            )
         elif args.command == "issue":
             result = bridge.issue(
                 args.repo.resolve(),
@@ -5914,6 +6575,41 @@ def main() -> int:
                 parser.error("--force needs --apply.")
             if args.yes and not args.project:
                 parser.error("--yes needs --project.")
+            if bool(args.restore) != bool(args.to):
+                parser.error("--restore and --to need each other.")
+            if args.preserved or args.restore:
+                from agent_parley import recovery
+
+                _, directory = bridge.project(args.repo.resolve(), create=False)
+                if args.restore:
+                    restored = recovery.restore_preserved(
+                        directory,
+                        Path(roster.read(directory)["root"]),
+                        args.restore,
+                        args.to.absolute(),
+                    )
+                    print(
+                        views.render("gc", {"restored": restored})
+                        if args.json
+                        else f"Restored {args.restore} to "
+                        f"{restored['restored_to']}"
+                    )
+                    return 0
+                kept = recovery.preserved(directory)
+                listed = []
+                for saved in kept:
+                    age = time.time() - float(saved.get("captured_at") or 0)
+                    listed.append(
+                        f"{saved['id']}: {saved.get('source_worktree')} "
+                        f"({saved.get('branch') or 'detached'}), "
+                        f"{age / 3600:.1f} hours old"
+                    )
+                print(
+                    views.render("gc", {"preserved": kept})
+                    if args.json
+                    else "\n".join(listed) or "No preserved worktree."
+                )
+                return 0
             if args.project:
                 if args.force:
                     parser.error("--force does not apply to --project.")
@@ -5950,7 +6646,10 @@ def main() -> int:
             )
         elif args.command == "notify" and args.action == "setup":
             path = notify.store(
-                bridge.home, secret_settings(args.chat, args.inbound)
+                bridge.home,
+                webhook_settings(notify.stored(bridge.home), args.inbound)
+                if args.webhook
+                else secret_settings(args.chat, args.inbound, args.users),
             )
             print(
                 f"Notification settings stored in {path}.\n"
@@ -5963,6 +6662,11 @@ def main() -> int:
                 print(
                     "A running service reads inbound settings at start: "
                     "agent-parley down && agent-parley up"
+                )
+            if args.inbound and args.chat.strip().startswith("-"):
+                print(
+                    "In a group chat, typed queries reach the bot only after "
+                    "its privacy mode is disabled with BotFather."
                 )
         elif args.command == "notify":
             probed = notify.probe(args.repo.resolve().name, bridge.home)
@@ -6009,9 +6713,17 @@ def main() -> int:
                 return 1
         elif args.command == "plan":
             applied = bridge.work_plan(
-                args.repo.resolve(), args.action, getattr(args, "path", None)
+                args.repo.resolve(),
+                args.action,
+                getattr(args, "path", None),
+                force=getattr(args, "force", False),
             )
-            if args.action == "apply":
+            if args.action == "apply" and applied.get("replayed"):
+                print(
+                    f"Plan {applied['name']} is already applied; "
+                    "nothing changed."
+                )
+            elif args.action == "apply":
                 print(
                     f"Applied plan {applied['name']} "
                     f"({applied['digest'][:12]}): "
@@ -6102,9 +6814,13 @@ def main() -> int:
                 added = bridge.add_participant(
                     repository, args.name, args.provider, args.credentials
                 )
-                if supervision.opt_in_missing(bridge.home, added, args.name):
+                if gap := supervision.opt_in_adapter(
+                    bridge.home, added, args.name
+                ):
                     print(
-                        supervision.OPT_IN_WARNING.format(name=args.name),
+                        supervision.OPT_IN_WARNING.format(
+                            name=args.name, adapter=gap
+                        ),
                         file=sys.stderr,
                     )
             elif args.action == "restore":
@@ -6136,6 +6852,7 @@ def main() -> int:
                         budget_changes(args),
                     )
                 )
+                unmeasured_lanes(bridge, repository, args, [args.name])
                 return 0
             if getattr(args, "json", False):
                 _, directory = bridge.project(repository)
@@ -6231,21 +6948,25 @@ def main() -> int:
                     )
                 )
             elif args.action == "enforce":
-                changes = budget_changes(args)
-                if changes is not None:
-                    operator_only("budget enforce")
-                print(bridge.enforce(repository, changes))
-            elif args.action == "resume":
-                operator_only("budget resume")
-                _, directory = bridge.project(repository, create=False)
-                print(
-                    budgets.resume(
-                        bridge.home,
-                        directory,
-                        roster.read(directory),
-                        args.reset,
+                if (
+                    unmeasured_lanes(bridge, repository, args)
+                    and not args.allow_unmeasured
+                ):
+                    raise BridgeError(
+                        "An enforced token limit would never stop the lanes "
+                        "named above, so it is not recorded; pass "
+                        "--allow-unmeasured to enforce it anyway."
                     )
+                print(bridge.enforce(repository, budget_changes(args)))
+            elif args.action == "resume":
+                from agent_parley import unattended
+
+                root, directory = bridge.project(repository, create=False)
+                data = roster.read(directory)
+                unattended.operator_only(
+                    repository, root, data, "A run budget is resumed"
                 )
+                print(budgets.resume(bridge.home, directory, data, args.reset))
             else:
                 print(
                     bridge.budget(
@@ -6255,6 +6976,7 @@ def main() -> int:
                         budget_changes(args) if args.action == "set" else None,
                     )
                 )
+                unmeasured_lanes(bridge, repository, args)
         elif args.command == "resources":
             repository = args.repo.resolve()
             if getattr(args, "json", False):
@@ -6363,10 +7085,17 @@ def main() -> int:
         elif args.command == "blueprint":
             from agent_parley import blueprints
 
-            repository = args.repo.resolve()
-            if args.action == "set":
+            repository = getattr(args, "repo", Path.cwd()).resolve()
+            if args.action == "templates":
+                account = blueprints.catalog(args.json)
+            elif args.action == "set":
                 account = blueprints.define(
-                    bridge, repository, args.name, args.file
+                    bridge,
+                    repository,
+                    args.name,
+                    args.file,
+                    args.template,
+                    args.verify,
                 )
             elif args.action == "remove":
                 account = blueprints.define(bridge, repository, args.name, None)
@@ -6398,7 +7127,11 @@ def main() -> int:
             if args.action == "set":
                 print(
                     unattended.configure(
-                        bridge, repository, args.target, args.issues
+                        bridge,
+                        repository,
+                        args.target,
+                        args.issues,
+                        args.auto,
                     )
                 )
             elif args.action == "run":
@@ -6505,6 +7238,18 @@ def main() -> int:
                         Path.cwd(), "provider", args.name, budget_changes(args)
                     )
                 )
+                from agent_parley import records
+
+                if args.tokens and not records.measures_tokens(
+                    bridge.home, args.name
+                ):
+                    print(
+                        records.unmeasured_warning([args.name]),
+                        file=sys.stderr,
+                    )
+                return 0
+            elif args.action == "price":
+                print(bridge.price(Path.cwd(), args.name, args.per_mtok))
                 return 0
             defined = roster.inspect(bridge.home)
             print(
@@ -6518,10 +7263,14 @@ def main() -> int:
                     },
                 )
                 if getattr(args, "json", False)
+                else views.provider_text(args.name, defined[args.name])
+                if args.action == "add"
                 else json.dumps(defined, indent=2)
             )
         elif args.command == "credentials":
             if args.action == "add":
+                if not (args.config_home or args.env or args.require_env):
+                    parser.error(roster.EMPTY_CREDENTIAL)
                 roster.define_credential(
                     bridge.home,
                     args.name,
@@ -6546,6 +7295,10 @@ def main() -> int:
                     },
                 )
                 if getattr(args, "json", False)
+                else views.credential_text(
+                    args.name, roster.credential(bridge.home, args.name)
+                )
+                if args.action == "add"
                 else json.dumps(registered, indent=2)
             )
         else:
@@ -6594,9 +7347,11 @@ def main() -> int:
 def _error_message(exc: Exception) -> str:
     """Words one runtime failure as the line the CLI prints.
 
-    A missing key reads as its quoted key alone, so it is named as a record
-    that vanished, which is how one reaches the handler: another process
-    retired or removed it between the command's read and its use.
+    A missing key reads as its quoted key alone. State files name themselves
+    when they lack a required key, so one reaching the handler is either a
+    record another process removed meanwhile or a fault in the code, and the
+    message carries the innermost frame that raised it so a rerun that fails
+    the same way can be traced.
 
     Args:
         exc: Failure the command handler caught.
@@ -6605,9 +7360,11 @@ def _error_message(exc: Exception) -> str:
         The message both the human line and the error document carry.
     """
     if isinstance(exc, KeyError):
+        place = supervision.raised_at(exc)
+        where = f" (at {place})" if place else ""
         return (
-            f"No record {exc.args[0]!r} any more; another command changed "
-            "the project while this one ran. Rerun it."
+            f"No record {exc.args[0]!r}{where}; if another command changed "
+            "the project meanwhile, rerun it, otherwise report this line."
         )
     return str(exc)
 
@@ -6636,7 +7393,8 @@ def _error_document(exc: Exception) -> str:
 
     The document carries the shared snapshot envelope with ``kind`` set to
     ``error``, a stable ``type`` for the exception class and the same
-    ``message`` the human line prints. It fits on one line so it stays a
+    ``message`` the human line prints. A missing key also carries ``where``,
+    the innermost frame that raised it. It fits on one line so it stays a
     separate record after any partial output a command already wrote.
 
     Args:
@@ -6657,10 +7415,11 @@ def _error_document(exc: Exception) -> str:
         kind = "store"
     else:
         kind = "value"
-    message = _error_message(exc)
+    error = {"type": kind, "message": _error_message(exc)}
+    if isinstance(exc, KeyError):
+        error["where"] = supervision.raised_at(exc)
     return json.dumps(
-        views.document("error", {"error": {"type": kind, "message": message}}),
-        ensure_ascii=False,
+        views.document("error", {"error": error}), ensure_ascii=False
     )
 
 

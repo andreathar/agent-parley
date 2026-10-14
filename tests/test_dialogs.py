@@ -73,6 +73,106 @@ CODEX_TRUST = (
     "No, quit\r\n\r\n  Press enter to continue\r\n"
 )
 
+CODEX_RUN = (
+    "\x1b[2J\x1b[H  Would you like to run the following command?\r\n\r\n"
+    "  $ python3 -P -m agent_parley.cli inbox\r\n\r\n\x1b[1m› 1. Yes, "
+    "proceed (y)\x1b[0m\r\n  2. Yes, and don't ask again for this command "
+    "in this session (a)\r\n  3. No, and tell Codex what to do differently "
+    "(esc)\r\n\r\n  Press enter to confirm or esc to cancel\r\n"
+)
+
+CODEX_EDITS = (
+    "\x1b[2J\x1b[H  Would you like to make the following edits?\r\n\r\n"
+    "  README.md (+1 -0)\r\n\r\n\x1b[1m› 1. Yes, proceed (y)\x1b[0m\r\n"
+    "  2. Yes, and don't ask again for these files (a)\r\n  3. No, and "
+    "tell Codex what to do differently (esc)\r\n\r\n  Press enter to "
+    "confirm or esc to cancel\r\n"
+)
+
+CODEX_GRANT = (
+    "\x1b[2J\x1b[H  Would you like to grant these permissions?\r\n\r\n"
+    "  network access\r\n\r\n\x1b[1m› 1. Yes, grant these permissions for "
+    "this turn (y)\x1b[0m\r\n  2. Yes, grant these permissions for this "
+    "session (a)\r\n  3. No, and tell Codex what to do differently (esc)"
+    "\r\n\r\n  Press enter to confirm or esc to cancel\r\n"
+)
+
+UNRECORDED_APPROVAL = (
+    "\x1b[2J\x1b[H  ⚠ Tool call held\r\n  $ rm -rf build\r\n"
+    "  [a] Approve   [d] Deny\r\n"
+)
+
+GEMINI_RUN = (
+    "\x1b[2J\x1b[H\x1b[38;2;249;226;175m╭──────────────────────────────────"
+    "──────────╮\r\n│ ?  Shell rm -rf build                       │\r\n│"
+    "                                            │\r\n│   rm -rf build    "
+    "                         │\r\n│                                       "
+    "     │\r\n│ Allow execution of [Shell]?                │\r\n│      "
+    "                                      │\r\n│ ● 1. Allow once         "
+    "                   │\r\n│   2. Allow for this session              "
+    "  │\r\n│   3. Allow this command for all future sessions │\r\n│   4."
+    " No, suggest changes (esc)               │\r\n╰──────────────────────"
+    "──────────────────────╯\x1b[0m\r\n"
+)
+
+GEMINI_EDIT = (
+    "\x1b[2J\x1b[H╭────────────────────────────────────────────╮\r\n│ ?"
+    "  WriteFile Writing to README.md          │\r\n│   1 + Install with "
+    "uv.                      │\r\n│ Apply this change?                    "
+    "     │\r\n│ ● 1. Allow once                            │\r\n│   2. "
+    "Allow for this session                 │\r\n│   3. Allow for this fi"
+    "le in all future sessions │\r\n│   4. Modify with external editor    "
+    "       │\r\n│   5. No, suggest changes (esc)               │\r\n╰────"
+    "────────────────────────────────────────╯\r\n"
+)
+
+COPILOT_RUN = (
+    "\x1b[2J\x1b[H ╭───────────────────────────────────────────────────────"
+    "──╮\r\n │ Run command                                             │\r\n"
+    " │ $ sed -i 's/old/new/' README.md                         │\r\n │ Do"
+    " you want to run this command?                          │\r\n │      "
+    "                                                   │\r\n │ ❯ 1. Yes   "
+    "                                             │\r\n │   2. Yes, and appr"
+    "ove `sed` for the rest of the running session │\r\n │   3. No, and tel"
+    "l Copilot what to do differently (Esc)       │\r\n ╰─────────────────"
+    "────────────────────────────────────────╯\r\n"
+)
+
+OPENCODE_PERMISSION = (
+    "\x1b[2J\x1b[H┃  \x1b[38;2;245;167;66m△\x1b[0m Permission required\r\n"
+    "┃  ← Bash  Remove the build directory\r\n┃\r\n┃  $ rm -rf build\r\n"
+    "┃\r\n┃  \x1b[48;2;250;178;131m Allow once \x1b[0m  Always allow   Reject"
+    "      ctrl+f fullscreen   ⇆ select   enter confirm\r\n"
+)
+
+AMP_APPROVAL = (
+    "\x1b[2J\x1b[H╭─ Approval Required ───────────────────────────────╮\r\n"
+    "│ Bash  rm -rf build                                │\r\n│           "
+    "                                        │\r\n│ ▸ Allow Once            "
+    "                          │\r\n│   Allow All for This Session         "
+    "             │\r\n│   Allow All for Every Session                     "
+    "│\r\n│   Reject with feedback                            │\r\n╰──────"
+    "─────────────────────────────────────────────╯\r\n"
+)
+
+AMP_GUARDED = (
+    "\x1b[2J\x1b[H╭─ Guarded File Modification ───────────────────────╮\r\n"
+    "│ edit_file  .github/workflows/check.yml            │\r\n│ ▸ Allow On"
+    "ce                                        │\r\n│   Always Allow This Pa"
+    "th                            │\r\n│   Reject                         "
+    "                 │\r\n╰───────────────────────────────────────────────"
+    "────╯\r\n"
+)
+
+APPROVALS = {
+    "claude": TOOL_PERMISSION,
+    "codex": CODEX_RUN,
+    "copilot": COPILOT_RUN,
+    "gemini": GEMINI_RUN,
+    "opencode": OPENCODE_PERMISSION,
+    "amp": AMP_APPROVAL,
+}
+
 CLAUDE_TRUST = (
     "\x1b[2J\x1b[H╭────╮\r\n│ Do you trust the files in this folder? │\r\n"
     "│ /home/operator/lane │\r\n│ Claude Code may read, write, or execute "
@@ -623,7 +723,8 @@ def test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog(report):
             os.waitpid(pid, 0)
 
 
-def test_an_operator_digit_still_answers_a_held_dialog():
+@pytest.mark.parametrize("key", [b"1", b"\x1b", b"\x03"])
+def test_an_operator_digit_esc_or_interrupt_releases_a_held_dialog(key):
     with tempfile.TemporaryDirectory(prefix="dialog-") as temporary:
         directory = Path(temporary)
         (directory / "lane").mkdir()
@@ -638,7 +739,7 @@ def test_an_operator_digit_still_answers_a_held_dialog():
             os.write(master, b"\x1b[I")
             marked(master, b"DRAWN")
             assert published(directory)["dialog"]["name"] == "hook-review"
-            os.write(master, b"1")
+            os.write(master, key)
             deadline = time.monotonic() + 10
             state = {}
             while time.monotonic() < deadline:
@@ -717,7 +818,7 @@ def test_status_names_the_prompt_and_how_long_it_has_waited(tmp_path):
     assert "; waiting 90s" in line
 
 
-BRIDGE_RULES = [protocol.TOOL_PREFIX, protocol.cli_rule()]
+BRIDGE_RULES = [protocol.TOOL_PREFIX, *protocol.cli_rules()]
 
 
 @pytest.mark.parametrize("scope", ["project", "lane"])
@@ -1025,13 +1126,25 @@ def _shell_prompt(command: str, row: str = "\r\n") -> str:
 def test_the_prompt_and_the_launch_rule_spell_one_command():
     """Keeps the allow rule on the exact string the prompt orders."""
     assert protocol.cli_rule() == f"Bash({protocol.cli_command()} *)"
-    assert protocol.cli_command().endswith(" -m agent_parley.cli")
+    assert protocol.cli_command().endswith(" -P -m agent_parley.cli")
+    assert protocol.cli_rules() == [
+        protocol.cli_rule(),
+        f"Bash({protocol.legacy_cli_command()} *)",
+    ]
+    assert protocol.legacy_cli_command() == protocol.cli_command().replace(
+        " -P ", " "
+    )
 
 
-def test_an_opted_in_lane_answers_a_prompt_for_the_bridge_cli(tmp_path):
+@pytest.mark.parametrize(
+    "command", [protocol.cli_command(), protocol.legacy_cli_command()]
+)
+def test_an_opted_in_lane_answers_a_prompt_for_the_bridge_cli(
+    tmp_path, command
+):
     """Unparks a lane on the command the protocol prompt ordered."""
     write_json(tmp_path / "lane-activity.json", {"activity": "working"})
-    screen = _shell_prompt(protocol.cli_command() + " issue list")
+    screen = _shell_prompt(command + " issue list")
     watch = dialogs.Watch(tmp_path, "lane", bridge=True)
     watch.advance(screen.encode(), 0.0)
     assert watch.advance(b"", 0.5) == b"1\r"
@@ -1244,3 +1357,283 @@ def test_an_unreadable_prompt_is_named_terminal_only(tmp_path, delivered):
     [fields] = delivered
     assert "decision" not in fields
     assert fields["detail"].startswith(dialogs.TERMINAL_ONLY)
+
+
+MISE_TRUST = (
+    "\x1b[2J ╭──────────╮\r\n│ Bash command │\r\n│   mise trust .\r\n"
+    "│   Trust the mise config so tools in this directory load?\r\n│\r\n"
+    "│ Do you want to proceed?\r\n│ ❯ 1. Yes\r\n│   2. Yes, and don't ask "
+    "again for mise trust commands in /home/operator/lane\r\n│   3. No\r\n"
+    "Esc to cancel · Tab to amend"
+)
+
+
+@pytest.mark.parametrize(
+    ("screen", "command"),
+    [
+        (MISE_TRUST, "mise trust ."),
+        (
+            "● Should the launcher trust a lane directory it did not create?"
+            "\r\n" + _shell_prompt("rm -rf build"),
+            "rm -rf build",
+        ),
+        (_shell_prompt("echo hooks need review"), "echo hooks need review"),
+    ],
+)
+def test_dialog_wording_around_a_permission_prompt_is_not_that_dialog(
+    tmp_path, delivered, screen, command
+):
+    """Never presses a trust or hook answer on a tool permission prompt."""
+    write_json(tmp_path / "lane-activity.json", {"activity": "working"})
+    answers = {"directory-trust": "Yes", "hook-review": "Trust all"}
+    watch = dialogs.Watch(tmp_path, "lane", answers, bridge=False)
+    found = dialogs.match(dialogs.flatten(screen.encode()))
+    assert found is not None
+    assert found.name == dialogs.PERMISSION
+    assert watch.advance(screen.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b""
+    record = json.loads((tmp_path / "lane-activity.json").read_text())
+    record = record["dialog"]
+    assert record["name"] == dialogs.PERMISSION
+    assert dialogs.lane_cause(record) == lanes.APPROVAL
+    assert record["command"].startswith(command)
+    [decision] = decisions.list_open(tmp_path)
+    [widening] = decision["confirm"]
+    assert widening.startswith("Yes, and don't ask again")
+
+
+def test_a_decision_is_never_pressed_on_another_commands_prompt(
+    tmp_path, delivered
+):
+    """Retires an answer for one command when another command is drawn."""
+    prompt = " Do you want to proceed? ❯ 1. Yes 2. No Esc to cancel "
+    first = "  ls build " + prompt
+    second = "  rm -rf ~/.ssh " + prompt
+    watch = dialogs.Watch(tmp_path, "lane")
+    watch.advance(first.encode(), 0.0)
+    watch.advance(b"", 0.5)
+    [record] = decisions.list_open(tmp_path)
+    assert "ls build" in record["detail"]
+    decisions.answer(tmp_path, record["id"], "Yes", "operator")
+    assert watch.advance(second.encode(), 1.0) == b""
+    assert watch.advance(b"", 1.5) == b""
+    assert decisions.get(tmp_path, record["id"])["state"] == decisions.STALE
+    [fresh] = decisions.list_open(tmp_path)
+    assert "rm -rf ~/.ssh" in fresh["detail"]
+    assert "ls build" not in fresh["detail"]
+
+
+DRIFTED_PERMISSION = (
+    "  make test  Do you want to proceed? ❯ 1. Yes, and don't ask again for "
+    "make commands 2. No Esc to cancel "
+)
+
+
+def test_a_configured_answer_never_widens_a_permission_by_prefix(
+    tmp_path, delivered
+):
+    """Escalates when the only option the answer begins widens it."""
+    reordered = dialogs.flatten(
+        DRIFTED_PERMISSION.replace("2. No", "2. Yes, allow once 3. No").encode()
+    )
+    assert dialogs.keys(reordered, "Yes") == b"2\r"
+    screen = dialogs.flatten(DRIFTED_PERMISSION.encode())
+    assert dialogs.keys(screen, "Yes") == b""
+    assert dialogs.keys(screen, "Yes", allow_widening=True) == b"1\r"
+    exact = "Yes, and don't ask again for make commands"
+    assert dialogs.keys(screen, exact) == b"1\r"
+    watch = dialogs.Watch(tmp_path, "lane", {"tool-permission": "Yes"})
+    assert watch.advance(DRIFTED_PERMISSION.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b""
+    [record] = decisions.list_open(tmp_path)
+    assert record["options"][0].startswith("Yes, and don't ask again")
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["dialog"]["escalated"] is True
+
+
+@pytest.mark.parametrize(
+    ("capture", "answer", "command"),
+    [
+        (CODEX_RUN, "Yes, proceed", "$ python3 -P -m agent_parley.cli inbox"),
+        (CODEX_EDITS, "Yes, proceed", "README.md (+1 -0)"),
+        (
+            CODEX_GRANT,
+            "Yes, grant these permissions for this turn",
+            "network access",
+        ),
+    ],
+)
+def test_a_codex_approval_is_a_tool_permission_with_its_command(
+    tmp_path, delivered, capture, answer, command
+):
+    """Recognizes the Codex approvals and asks the operator about each."""
+    screen = dialogs.flatten(capture.encode())
+    assert dialogs.match(screen).name == dialogs.PERMISSION
+    assert dialogs.keys(screen, answer) == b"1\r"
+    watch = dialogs.Watch(tmp_path, "lane")
+    assert watch.advance(capture.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b""
+    record = json.loads((tmp_path / "lane-activity.json").read_text())
+    record = record["dialog"]
+    assert record["name"] == dialogs.PERMISSION
+    assert record["command"] == command
+    assert dialogs.lane_cause(record) == lanes.APPROVAL
+    [decision] = decisions.list_open(tmp_path)
+    assert len(decision["options"]) == 3
+    assert decision["confirm"] == [decision["options"][1]]
+    assert decision["recommended"].startswith("No, and tell Codex")
+    assert command in decision["detail"]
+
+
+def test_a_configured_answer_is_pressed_on_a_codex_approval(tmp_path):
+    watch = dialogs.Watch(tmp_path, "lane", {"tool-permission": "Yes, proceed"})
+    assert watch.advance(CODEX_RUN.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b"1\r"
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["dialog"]["answer"] == "Yes, proceed"
+
+
+def test_a_silent_screen_after_a_tool_call_escalates_after_the_deadline(
+    tmp_path, delivered
+):
+    """Escalates wording nobody recorded once a tool call stays unanswered."""
+    write_json(
+        tmp_path / "lane-activity.json",
+        {"activity": "working", "event": "PreToolUse"},
+    )
+    screen = dialogs.flatten(UNRECORDED_APPROVAL.encode())
+    assert dialogs.match(screen) is None
+    assert dialogs.prompted(screen) is False
+    watch = dialogs.Watch(tmp_path, "lane", deadline=1.0)
+    assert watch.advance(UNRECORDED_APPROVAL.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b""
+    assert watch.holding is False
+    assert watch.advance(b"", 1.6) == b""
+    assert watch.holding is True
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["activity"] == dialogs.MARKER + dialogs.STALLED
+    assert state["dialog"]["name"] == "unknown"
+    assert dialogs.lane_cause(state["dialog"]) == lanes.PROMPT
+    [fields] = delivered
+    assert fields["detail"].startswith(dialogs.TERMINAL_ONLY)
+    assert "[a] Approve" in fields["detail"]
+
+
+def test_a_silent_screen_with_no_pending_tool_call_never_escalates(tmp_path):
+    write_json(
+        tmp_path / "lane-activity.json", {"activity": "idle", "event": "Stop"}
+    )
+    watch = dialogs.Watch(tmp_path, "lane", deadline=1.0)
+    for now in (0.0, 1.0, 40.0, 400.0):
+        output = UNRECORDED_APPROVAL.encode() if now == 0.0 else b""
+        assert watch.advance(output, now) == b""
+    assert watch.holding is False
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert "dialog" not in state
+
+
+def test_every_provider_has_a_recorded_approval_fixture():
+    assert set(APPROVALS) == set(roster.ADAPTERS)
+    assert set(dialogs.RECORDED) == set(roster.ADAPTERS)
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [*APPROVALS.values(), GEMINI_EDIT, AMP_GUARDED],
+    ids=[*APPROVALS, "gemini-edit", "amp-guarded"],
+)
+def test_a_recorded_approval_escalates_within_the_deadline(
+    tmp_path, delivered, capture
+):
+    """Escalates every provider's approval with no hook naming a tool."""
+    write_json(
+        tmp_path / "lane-activity.json", {"activity": "idle", "event": "Stop"}
+    )
+    screen = dialogs.flatten(capture.encode())
+    assert dialogs.match(screen) or dialogs.prompted(screen)
+    watch = dialogs.Watch(tmp_path, "lane", deadline=dialogs.ESCALATE_AFTER)
+    assert watch.advance(capture.encode(), 0.0) == b""
+    assert watch.advance(b"", 0.5) == b""
+    assert watch.advance(b"", dialogs.ESCALATE_AFTER + 0.5) == b""
+    assert watch.holding is True
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["dialog"]["escalated"] is True
+    assert dialogs.lane_cause(state["dialog"]) in {lanes.APPROVAL, lanes.PROMPT}
+    assert delivered
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [COPILOT_RUN, GEMINI_RUN, OPENCODE_PERMISSION, AMP_APPROVAL],
+    ids=["copilot", "gemini", "opencode", "amp"],
+)
+def test_another_providers_approval_is_never_answered(tmp_path, capture):
+    """Leaves a prompt without a recorded option list to the operator."""
+    watch = dialogs.Watch(
+        tmp_path, "lane", {dialogs.PERMISSION: "yes"}, deadline=1.0
+    )
+    for now in (0.0, 0.5, 1.5, 40.0):
+        output = capture.encode() if now == 0.0 else b""
+        assert watch.advance(output, now) == b""
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["dialog"]["name"] == "unknown"
+    assert state["activity"] == "dialog: an unrecognized native prompt"
+
+
+def test_an_allow_once_mention_in_output_is_not_a_prompt():
+    screen = dialogs.flatten(
+        b"  \xe2\x8e\xbf  Documented that Gemini offers Allow once on each "
+        b"tool prompt. Read 4 files, ran 2 shell commands"
+    )
+    assert dialogs.prompted(screen) is False
+
+
+def test_a_published_dialog_names_the_client_version_that_drew_it(
+    tmp_path, delivered
+):
+    write_json(
+        tmp_path / "lane-activity.json",
+        {"activity": "working", "client_version": "codex-cli 0.153.4"},
+    )
+    watch = dialogs.Watch(tmp_path, "lane")
+    watch.advance(CODEX_RUN.encode(), 0.0)
+    watch.advance(b"", 0.5)
+    state = json.loads((tmp_path / "lane-activity.json").read_text())
+    assert state["dialog"]["client_version"] == "codex-cli 0.153.4"
+    [fields] = delivered
+    assert fields["detail"].endswith("drawn by codex-cli 0.153.4")
+
+
+def test_the_client_version_is_the_first_line_it_prints(tmp_path):
+    client = tmp_path / "client"
+    client.write_text("#!/bin/sh\necho 'codex-cli 0.153.4'\necho more\n")
+    client.chmod(0o755)
+    assert dialogs.version_of(str(client)) == "codex-cli 0.153.4"
+    failing = tmp_path / "failing"
+    failing.write_text("#!/bin/sh\necho 'unknown option'\nexit 2\n")
+    failing.chmod(0o755)
+    assert dialogs.version_of(str(failing)) == ""
+    assert dialogs.version_of(str(tmp_path / "missing")) == ""
+
+
+def test_drift_names_a_newer_client_and_an_unread_dialog(tmp_path):
+    seen = {
+        "newer": {"client": "claude", "client_version": "2.1.295 (Claude)"},
+        "unread": {
+            "client": "codex",
+            "client_version": "codex-cli 0.153.4",
+            "dialog": {"name": "unknown", "screen": ["Allow once  Reject"]},
+        },
+        "current": {"client": "claude", "client_version": "2.1.270"},
+        "untracked": {"client": "", "client_version": "9.0.0"},
+        "recorded": {"client": "gemini", "client_version": "0.64.0"},
+        "unversioned": {"client": "claude"},
+    }
+    for name, state in seen.items():
+        write_json(tmp_path / f"{name}-activity.json", state)
+    manifest = {"root": "/repo", "participants": dict.fromkeys(seen, {})}
+    assert dialogs.drift(tmp_path, manifest) == [
+        "/repo newer: claude 2.1.295 (Claude) is newer than the 2.1.270 the "
+        "dialog matchers were recorded from",
+        "/repo unread: codex drew an unrecognized prompt: Allow once  Reject",
+    ]

@@ -23,6 +23,7 @@ MAX_RESERVATIONS = 32
 MAX_RESERVATION_BYTES = 240
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
 ENDED = "pull request ended"
+FORGE_SKIP_LABELS = ("blocked", "wontfix", "question", "duplicate")
 
 
 def delivered(record: dict) -> bool:
@@ -546,6 +547,13 @@ def with_forge(directory: Path, state: dict) -> dict:
     and `recommend.rank` treat it as free, unblocked work. The opened issue
     itself is the operator's authorization to work on it.
 
+    An issue the forge lists as assigned to any login other than the
+    operator's own, or carrying a label in the cached ``skip_labels``
+    (`FORGE_SKIP_LABELS` when the cache names none), is somebody's work or
+    not ready, so it is left out; it can still be claimed by number. A
+    cached entry without assignees or labels reads as unassigned and
+    unlabelled.
+
     The result is a reading for candidate selection only and is never
     published: claiming the issue still writes its first ledger record. A
     number the ledger already records keeps its record, so a closed, ended
@@ -553,13 +561,21 @@ def with_forge(directory: Path, state: dict) -> dict:
     `status.FORGE_STALE` seconds, or a missing or unreadable one, adds
     nothing.
 
+    An issue the cached ``integration_closed`` names was closed by keyword
+    in a commit on the integration base, so its fix landed though the forge
+    keeps it open until the base crosses to the default branch. It is not
+    added, and its record leaves the reading unless a lane owns it or an
+    offer for it is pending, so finished work is never offered again.
+
     Args:
         directory: Private project state directory holding the cache.
         state: Published issue ledger.
 
     Returns:
-        The ledger itself when the cache adds nothing, otherwise a shallow
-        copy whose ``issues`` mapping also holds the forge-only records.
+        The ledger itself when the cache changes nothing, otherwise a
+        shallow copy whose ``issues`` mapping also holds the forge-only
+        records and leaves out the unowned issues the integration base
+        closed.
     """
     from agent_parley.status import FORGE_ISSUES, FORGE_STALE
 
@@ -578,9 +594,27 @@ def with_forge(directory: Path, state: dict) -> dict:
     if time.time() - read_at >= FORGE_STALE:
         return state
     recorded = state.get("issues", {})
+    named = cached.get("skip_labels", FORGE_SKIP_LABELS)
+    skip = set(named if isinstance(named, list | tuple) else FORGE_SKIP_LABELS)
+    merged = cached.get("integration_closed")
+    landed = {str(n) for n in merged} if isinstance(merged, list) else set()
+    kept = {
+        number: record
+        for number, record in recorded.items()
+        if number not in landed or record.get("owner") or record.get("offer")
+    }
     added: dict[str, dict] = {}
     for number, item in listed.items():
-        if str(number) in recorded or not str(number).isdigit():
+        if (
+            str(number) in recorded
+            or str(number) in landed
+            or not str(number).isdigit()
+        ):
+            continue
+        if isinstance(item, dict) and (
+            set(item.get("assignees") or []) - {cached.get("login")}
+            or skip & set(item.get("labels") or [])
+        ):
             continue
         title = item.get("title") if isinstance(item, dict) else item
         added[str(number)] = {
@@ -591,9 +625,31 @@ def with_forge(directory: Path, state: dict) -> dict:
             "forge_only": True,
             "execution": {"authorized": True},
         }
-    if not added:
+    if not added and len(kept) == len(recorded):
         return state
-    return {**state, "issues": {**recorded, **added}}
+    return {**state, "issues": {**kept, **added}}
+
+
+def forge_assignees(directory: Path, number: str) -> list[str]:
+    """Names who else the cached forge reading lists as an issue's assignees.
+
+    Args:
+        directory: Private project state directory holding the cache.
+        number: Bare repository issue number.
+
+    Returns:
+        Sorted logins other than the operator's own, empty when the cache
+        is missing, unreadable or names nobody else.
+    """
+    from agent_parley.status import FORGE_ISSUES
+
+    try:
+        cached = json.loads((directory / FORGE_ISSUES).read_text())
+        item = cached["issues"][number]
+        people = set(item.get("assignees") or [])
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return []
+    return sorted(str(person) for person in people - {cached.get("login")})
 
 
 def holders(state: dict) -> dict[str, list[str]]:
@@ -617,14 +673,19 @@ def holders(state: dict) -> dict[str, list[str]]:
     return owned
 
 
-def waiters(state: dict) -> dict[str, list[str]]:
-    """Maps each blocking issue to the owned issues recorded as waiting on it.
+def waiters(state: dict, *, owned_only: bool = True) -> dict[str, list[str]]:
+    """Maps each blocking issue to the issues recorded as waiting on it.
 
-    Only owned issues are counted, because finishing a blocker matters when a
-    lane is actually held up by it and an unowned waiter is nobody's wait.
+    By default only owned issues are counted, because a lane is held up by
+    an owned waiter and an unowned waiter is nobody's wait. A lane can never
+    claim a waiter while its blocker is open, though, so the waiters of a
+    plan's open blocker are always unowned; ranking reads every authorized,
+    unfinished waiter so the plan's critical path still orders the work.
 
     Args:
         state: Published issue ledger.
+        owned_only: Whether to count owned waiters only, or every
+            authorized waiter that is not yet complete.
 
     Returns:
         Blocker number to the issue numbers waiting on it, ordered
@@ -633,8 +694,16 @@ def waiters(state: dict) -> dict[str, list[str]]:
     waiting: dict[str, list[str]] = {}
     issues = state.get("issues", {})
     for number in sorted(issues, key=int):
-        if not issues[number].get("owner"):
-            continue
+        record = issues[number]
+        if owned_only:
+            if not record.get("owner"):
+                continue
+        else:
+            execution = lifecycle.state(record)
+            if not execution["authorized"] or (
+                execution["state"] == lifecycle.COMPLETE
+            ):
+                continue
         for blocker in issues[number].get("blocked_by", []):
             waiting.setdefault(blocker, []).append(number)
     return waiting
@@ -651,9 +720,16 @@ def unclaimed(state: dict) -> list[str]:
     ``lifecycle.actionable`` leaves it out, so finished work is never offered
     as the next thing to claim; claiming it again clears the mark.
 
-    The order puts first the issues that other owned issues wait on, because
-    finishing one of those releases a peer, and falls back to the issue number
-    so the same ledger always produces the same list.
+    A released claim that kept its recorded external blocker stays
+    ``blocked`` with no owner, as `lifecycle.released` leaves it, and is
+    left out until a lane claims it on purpose, so a gated issue is not
+    offered to lane after lane that each rediscover the same condition.
+
+    The order puts first the issues the most authorized, unfinished work
+    waits on, planned or owned, because finishing one of those moves the
+    plan's critical path; then the issues more owned work waits on, because
+    finishing one of those releases a peer; and falls back to the issue
+    number so the same ledger always produces the same list.
 
     Args:
         state: Published issue ledger.
@@ -662,6 +738,7 @@ def unclaimed(state: dict) -> list[str]:
         Issue numbers a lane could claim, most unblocking first.
     """
     issues = state.get("issues", {})
+    planned = waiters(state, owned_only=False)
     waiting = waiters(state)
     return sorted(
         (
@@ -672,9 +749,14 @@ def unclaimed(state: dict) -> list[str]:
             and not record.get("blocked_by")
             and not record.get("ended_on_forge")
             and lifecycle.state(record)["authorized"]
-            and lifecycle.state(record)["state"] != lifecycle.COMPLETE
+            and lifecycle.state(record)["state"]
+            not in (lifecycle.COMPLETE, lifecycle.BLOCKED)
         ),
-        key=lambda number: (-len(waiting.get(number, [])), int(number)),
+        key=lambda number: (
+            -len(planned.get(number, [])),
+            -len(waiting.get(number, [])),
+            int(number),
+        ),
     )
 
 
@@ -720,6 +802,7 @@ def change(
     take_orphaned: bool = False,
     takeover: dict | None = None,
     cap: int | None = None,
+    usage: dict | None = None,
 ) -> dict:
     """Applies one issue transition once, however often it is retried.
 
@@ -765,6 +848,10 @@ def change(
             a takeover request. None applies no cap. Like a title it is
             project configuration read at execution time, so it is excluded
             from the arguments a key is compared against.
+        usage: The acting lane's consumption reading, recorded on a claim
+            or an acceptance as the start its resolution is measured from.
+            It is a reading, not intent, so it is excluded from the
+            arguments a key is compared against.
 
     Returns:
         The persisted issue record, including its capped transition history.
@@ -795,6 +882,7 @@ def change(
             take_orphaned=take_orphaned,
             takeover=takeover,
             cap=cap,
+            usage=usage,
             **transition,
         )
     key = retries.validate(key)
@@ -817,6 +905,7 @@ def change(
             take_orphaned=take_orphaned,
             takeover=takeover,
             cap=cap,
+            usage=usage,
             **transition,
         )
     except Transient:
@@ -1020,7 +1109,9 @@ def _operator_offer(entry: dict, issue: str, budgets: dict) -> dict:
     }
 
 
-def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
+def grant_requests(
+    directory: Path, grace: float, budgets: dict, participants: set[str]
+) -> list[str]:
     """Grants a peer's takeover request its holder let lapse.
 
     A request that needs the holder's agreement stays pending for ever when
@@ -1030,22 +1121,47 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
     it into an offer to the peer, recorded in history, and the peer's
     acceptance moves ownership as any accepted handoff does. An operator
     request still waits for the holder, because the operator can withdraw or
-    restate it.
+    restate it. A peer's request from a lane that retired or left the
+    project is withdrawn by the supervisor instead, since nobody would ever
+    accept the offer and it would hide the claim from idle peers.
 
     Args:
         directory: Private state directory for the common repository.
         grace: Seconds the holder has to answer or record progress.
         budgets: Project deadline and attempt-budget defaults.
+        participants: Unretired participants a request may be granted to.
 
     Returns:
         Issue numbers whose request was granted.
     """
     granted = []
+    changed = False
     now = time.time()
     with lock(directory / "issues.lock", timeout=1):
         state = snapshot(directory)
         for number, record in state["issues"].items():
             request = record.get("request") or {}
+            if (
+                request
+                and offer_source(request) == PEER
+                and request.get("to") not in participants
+            ):
+                record["request"] = None
+                lifecycle.append_history(
+                    record,
+                    {
+                        "action": "withdraw",
+                        "actor": "supervisor",
+                        "at": now,
+                        "owner": record.get("owner"),
+                        "offer": record.get("offer"),
+                        "request": None,
+                        "offer_id": request.get("id"),
+                        "claim_id": record.get("claim_id"),
+                    },
+                )
+                changed = True
+                continue
             if (
                 not request
                 or offer_source(request) != PEER
@@ -1071,7 +1187,7 @@ def grant_requests(directory: Path, grace: float, budgets: dict) -> list[str]:
                 },
             )
             granted.append(number)
-        if granted:
+        if granted or changed:
             state["revision"] += 1
             write_json(directory / "issues.json", state)
     return granted
@@ -1258,6 +1374,7 @@ def _change(
     take_orphaned: bool = False,
     takeover: dict | None = None,
     cap: int | None = None,
+    usage: dict | None = None,
 ) -> dict:
     """Applies one issue transition while holding the repository lock.
 
@@ -1300,6 +1417,8 @@ def _change(
             gone without progress. Acceptance moves ownership exactly as a
             claim does, so an uncapped acceptance let a lane collect claims
             past the cap one offer at a time.
+        usage: The acting lane's consumption reading, kept on a claim or an
+            acceptance it makes as the start of the new generation.
 
     A transition that ends an ownership generation, by releasing it, by
     handing it to another lane, by taking it from an orphaned owner or by the
@@ -1415,7 +1534,7 @@ def _change(
                 "claim_id": uuid.uuid4().hex[:16],
                 "execution": previous.get("execution"),
             }
-            lifecycle.claimed(record, record["claim_id"])
+            lifecycle.claimed(record, record["claim_id"], usage)
             resolved = title if title else previous.get("title")
             if resolved:
                 record["title"] = resolved
@@ -1484,7 +1603,7 @@ def _change(
                         budget=budgets.get("attempts") or None,
                         claim_id=uuid.uuid4().hex[:16],
                     )
-                    lifecycle.claimed(record, record["claim_id"])
+                    lifecycle.claimed(record, record["claim_id"], usage)
                     cleared = _clear_recovery(record)
                     if ended := record.pop("ended_on_forge", None):
                         cleared["ended_on_forge"] = ended

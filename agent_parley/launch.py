@@ -419,7 +419,11 @@ reported.
         and only where the operator recorded the opt-in for this project or
         this lane, the launch allows that one MCP server through those native
         settings. No other tool is named, no permission decision is weakened
-        and no bypass flag is ever passed. A lane without that opt-in that the
+        and no bypass flag is ever passed. A recorded opt-in the client
+        cannot carry, because its adapter has no such setting or its `codex`
+        release predates one, is named on standard error through
+        `supervision.opt_in_unsupported` instead of being dropped silently.
+        A lane without that opt-in that the
         service could resume is named on standard error, because the service
         withholds its resume rather than start a session nobody can answer.
         A client whose adapter `denials.EVENTS` names also runs the lane's
@@ -439,6 +443,11 @@ reported.
         launcher is told the setting so it can end an idle session at a
         rotation point, which the service then resumes this way; it is
         withheld for a lane the service would not resume.
+
+        The activity record names the client's adapter as ``client`` and
+        the first line its ``--version`` prints as ``client_version``, so
+        the dialog watcher and ``doctor`` can name the release that drew a
+        dialog; a client that cannot say leaves the version empty.
 
         Args:
             agent: Participant name within the project.
@@ -464,8 +473,10 @@ reported.
                 retirement removes the worktree under the same lock, or
                 ``issue`` is not an issue number or its claim is refused,
                 or a blueprint is named without ``issue``, from a lane, or
-                is unknown.
+                is unknown, or a ``copilot`` lane's profile already runs
+                another live lane's hooks.
         """
+        from agent_parley import plugins, records
         from agent_parley.cli import (
             COPILOT_EVENTS,
             LAUNCH_LOCK_SECONDS,
@@ -490,6 +501,8 @@ reported.
             terminal,
             write_json,
         )
+        from agent_parley.copilot import occupants
+        from agent_parley.hook import PARTICIPANT_ENV
 
         began = time.monotonic()
         number = parse_issue(issue) if issue else ""
@@ -511,9 +524,10 @@ reported.
                 next_command="agent-parley budget resume",
             )
         data = self.add_participant(repo, agent, provider, credential)
-        if supervision.opt_in_missing(self.home, data, agent):
+        if gap := supervision.opt_in_adapter(self.home, data, agent):
             print(
-                supervision.OPT_IN_WARNING.format(name=agent), file=sys.stderr
+                supervision.OPT_IN_WARNING.format(name=agent, adapter=gap),
+                file=sys.stderr,
             )
         if number:
             from agent_parley import blueprints
@@ -532,22 +546,53 @@ reported.
                 f"Install and sign in to the native {entry['command']} CLI "
                 "first."
             )
-        manifest = protocol.manifests(protocol.plugin_root()).get(
+        loaded = None
+        if entry["adapter"] in plugins.HOME_ENV:
+            selected = account.get(entry.get("home_env", ""))
+            loaded = plugins.installed_manifest(
+                entry["adapter"],
+                Path(selected)
+                if selected
+                else Path(records.DEFAULT_HOMES[entry["adapter"]]).expanduser(),
+            )
+        manifest = loaded or protocol.manifests(protocol.plugin_root()).get(
             entry["adapter"]
         )
         if manifest is not None and manifest.exists():
-            declared = protocol.installed(manifest)
-            if not protocol.compatible(declared):
+            reading = plugins.assessed(manifest)
+            if reading["state"] == protocol.MISMATCH:
                 raise BridgeError(
-                    protocol.mismatch("installed plugin", declared),
+                    protocol.mismatch("installed plugin", reading["protocol"]),
                     next_command="agent-parley plugins install",
+                )
+            if loaded and reading["state"] == protocol.STALE:
+                print(
+                    f"The {entry['adapter']} plugin this lane loads is "
+                    f"{reading['version'] or 'of unknown version'}, the "
+                    f"launcher is {protocol.launcher_version()}. "
+                    f"{protocol.UPDATE}",
+                    file=sys.stderr,
                 )
         missing = [
             event
             for event in roster.REQUIRED_HOOKS
             if event in roster.unavailable_hooks(entry["adapter"])
         ]
-        if missing:
+        degraded = (
+            roster.delivery_path(entry["adapter"]) == roster.POLLED_DELIVERY
+            and bool(missing)
+            and not set(missing) & set(roster.POLLED_REQUIRED_HOOKS)
+        )
+        if degraded:
+            print(
+                roster.DEGRADED_WARNING.format(
+                    name=agent,
+                    adapter=entry["adapter"],
+                    missing=", ".join(missing),
+                ),
+                file=sys.stderr,
+            )
+        elif missing:
             raise BridgeError(
                 f"The {entry['adapter']!r} adapter cannot deliver "
                 f"{', '.join(missing)}, so its lanes would run without the "
@@ -604,12 +649,20 @@ reported.
                     supervision.forget_delivered(lane.parent, agent)
             prompt = self.protocol(agent, data)
             hooks = self.hooks(agent, lane.parent)
+            inherited = dict(os.environ)
+            inherited.pop(entry.get("home_env") or "", None)
             env = {
-                **os.environ,
+                **inherited,
                 **account,
                 "AGENT_PARLEY_TOKEN": identity["registration_token"],
                 "AGENT_PARLEY_HOME": str(self.home),
+                PARTICIPANT_ENV: agent,
             }
+            client_version = dialogs.version_of(executable)
+            if limit := supervision.opt_in_unsupported(
+                self.home, data, agent, client_version
+            ):
+                print(limit, file=sys.stderr)
             if entry["adapter"] == "claude":
                 config = lane.parent / f"{agent}-mcp.json"
                 write_json(
@@ -643,7 +696,7 @@ reported.
                 }
                 if dialogs.pre_approved(data, agent):
                     native["permissions"] = {
-                        "allow": [protocol.TOOL_PREFIX, protocol.cli_rule()]
+                        "allow": [protocol.TOOL_PREFIX, *protocol.cli_rules()]
                     }
                 if dialogs.auto_mode(data, agent):
                     native.setdefault("permissions", {})["defaultMode"] = "auto"
@@ -666,6 +719,7 @@ reported.
                         self.url + "/mcp/",
                         hooks,
                         env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH"),
+                        trusted=dialogs.pre_approved(data, agent),
                     )
                 )
                 command = [
@@ -681,6 +735,7 @@ reported.
                         self.url + "/mcp/",
                         hooks,
                         env.get("OPENCODE_CONFIG_DIR"),
+                        trusted=dialogs.pre_approved(data, agent),
                     )
                 )
                 command = [
@@ -719,6 +774,19 @@ reported.
                         "DIR`, sign in to it once, and launch with "
                         "--credentials NAME."
                     )
+                sharing = occupants(
+                    self.home, Path(config_home), lane.parent, agent
+                )
+                if sharing:
+                    raise BridgeError(
+                        f"Copilot profile {participant['credential']!r} "
+                        f"already runs the hooks of {', '.join(sharing)}, "
+                        "and Copilot runs every hook in a profile for every "
+                        "session on it, so each lane would decide the "
+                        "other's tool calls. Define a second profile with "
+                        "`agent-parley credentials add NAME --config-home "
+                        "DIR` and launch this lane with --credentials NAME."
+                    )
                 configure_copilot(
                     Path(config_home),
                     {
@@ -742,12 +810,15 @@ reported.
                         for event, groups in hooks.items()
                         if event in COPILOT_EVENTS
                     },
+                    agent,
                 )
                 command = [
                     executable,
-                    "-p",
+                    "-i",
                     prompt + "\nUser task:\n" + task,
                 ]
+                if dialogs.pre_approved(data, agent):
+                    command += ["--allow-tool", "agent_parley"]
             else:
                 command = [
                     executable,
@@ -757,6 +828,15 @@ reported.
                     "-c",
                     'mcp_servers.agent_parley.bearer_token_env_var="AGENT_PARLEY_TOKEN"',
                 ]
+                if dialogs.pre_approved(data, agent) and (
+                    dialogs.release_of(client_version)
+                    >= roster.CODEX_APPROVAL_RELEASE
+                ):
+                    command += [
+                        "-c",
+                        "mcp_servers.agent_parley."
+                        'default_tools_approval_mode="approve"',
+                    ]
                 for event, groups in hooks.items():
                     hook = groups[0]["hooks"][0]
                     value = (
@@ -837,6 +917,9 @@ reported.
                     launcher_ticks=process.start_ticks(os.getpid()),
                     session_started=time.time(),
                     attached=sys.stdin.isatty(),
+                    client=entry["adapter"],
+                    client_version=client_version,
+                    degraded=degraded,
                 )
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)

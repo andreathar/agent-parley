@@ -31,11 +31,65 @@ that provider.
 | `delivery` | How a lane is told | Which adapters | What it cannot do |
 | --- | --- | --- | --- |
 | `hooks` | a native lifecycle event returns bounded context at a turn boundary | `claude`, `codex`, `copilot`, `gemini`, `opencode` and every preset built on them | nothing further; this is the full path |
-| `polled` | a launcher-owned thread reads the mailbox on an interval and publishes it to `STATE/projects/PROJECT_KEY/NAME-delivery.md`, which the lane's prompt tells it to read each turn | any adapter missing `SessionStart`, `UserPromptSubmit`, `PreToolUse` or `Stop`; `amp` today | deny a tool call, hold a turn open, or guarantee the lane reads the file; budget threshold notices are not carried, and a missing required guard still refuses the launch |
+| `polled` | a launcher-owned thread reads the mailbox on an interval and publishes it to `STATE/projects/PROJECT_KEY/NAME-delivery.md`, which the lane's prompt tells it to read each turn | an adapter that lacks a delivery event (`SessionStart`, `UserPromptSubmit`, `PreToolUse` or `Stop`) but has every required guard; no shipped adapter qualifies today, and `amp`, which `provider list` reports as `polled`, is refused at launch | deny a tool call, hold a turn open, or guarantee the lane reads the file; budget threshold notices are not carried, and a missing required guard still refuses the launch |
 
 `AGENT_PARLEY_DELIVERY_SECONDS` sets the interval for a polled lane, 20s by
 default. Delivery is recorded in that lane's event log like a served
 checkpoint, so `agent-parley top` reports its delivered context in `CONTEXT`.
+
+### What each adapter does
+
+| Capability | `claude` | `codex` | `copilot` | `gemini` | `opencode` | `amp` |
+| --- | --- | --- | --- | --- | --- | --- |
+| MCP registration | `--mcp-config` file | `-c mcp_servers.*` | profile `mcp-config.json` | overlay `mcpServers` | overlay `mcp` | overlay `amp.mcpServers`, literal token |
+| Hooks | `--settings` | `-c hooks.*` | profile `settings.json` | overlay `hooks` | overlay plugin | overlay `amp.hooks`, tool events only |
+| Task handed over | positional, interactive | positional, interactive | `-p` | `--prompt-interactive` | `--prompt` | refused before launch |
+| Resume argument | `--resume ID` | `resume ID` | `--resume ID` | `--resume ID` | `--session ID` | `threads continue ID` |
+| Rotation to a fresh session | yes | yes | yes | yes | yes | n/a |
+| Service-resume opt-ins applied | yes | no | no | no | no | n/a |
+| Refused-tool event | `PermissionDenied` | none | none | none | none | none |
+| Blocked-on-approval source | hook | hook | hook | dialog watcher | hook | dialog watcher |
+| Removed by `participant retire` | `-mcp.json` | nothing to remove | the lane's hooks in the profile, and the MCP entry once no lane hook remains | overlay file | overlay directory | overlay file |
+| Forked-session rebind | Linux and macOS | Linux and macOS | Linux and macOS | Linux and macOS | Linux and macOS | Linux and macOS |
+| Token reading | transcript `usage` | rollout `token_count` totals | `session.shutdown` totals | chat log message `tokens` | `opencode.db` session counters | not measured |
+
+Every row is read from the adapter branches in `agent_parley/launch.py`, the
+retire path and `agent_parley/process.py`; the token row is read from
+`agent_parley/records.py`. A forked or resumed session started outside the
+launcher is found by the working directory of its process, which Linux reads
+from `/proc` and macOS from `lsof`.
+
+### Token reading
+
+`TOKENS` and token budgets read what each native client already wrote to
+disk, under the config home the lane launched with. No vendor is asked.
+
+- `claude` reads the `usage` of each assistant message in the session
+  transcripts.
+- `codex` reads the running total of the `token_count` events in the lane's
+  rollouts.
+- `copilot` reads the `session.shutdown` event in
+  `session-state/<id>/events.jsonl` under `COPILOT_HOME` (default
+  `~/.copilot`). The event carries the session total across resumes, and
+  Parley sums its input and output tokens over every model. Copilot CLI
+  keeps per-call usage only in its live event stream, so a session that is
+  still running reads 0 until it ends.
+- `gemini` reads `tokens.total` of each `gemini` message in the chat logs
+  under `.gemini/tmp/<project>/chats` in `GEMINI_CLI_HOME` (default `~`).
+  The project directory comes from `.gemini/projects.json`. A message that
+  the client rewrites after an update is counted once.
+- `opencode` reads the input, output, reasoning, cache read and cache write
+  counters of each session in `opencode.db` under `$XDG_DATA_HOME/opencode`
+  (default `~/.local/share/opencode`), or in the file `OPENCODE_DB` names. A
+  subagent session is folded into its parent. `OPENCODE_CONFIG_DIR` does not
+  move that database, so every OpenCode account in one lane directory shares
+  it. Releases before the SQLite store kept JSON files, which are not read.
+- `amp` keeps no local usage record, so an `amp` lane is not measured. Its
+  `TOKENS` cell prints `n/a`, a token limit warns, and `budget enforce
+  --tokens` refuses unless `--allow-unmeasured` is given.
+
+`agent-parley doctor` lists the providers with and without a token reader on
+its `tokens` line.
 
 ### How idle, blocked and prompt states are detected
 
@@ -84,8 +138,10 @@ repository, and a project holds at most 32 participants.
 
 `--provider` defaults to the participant name. `agent-parley run claude-2` with
 no other flag therefore looks for a provider called `claude-2` and refuses with
-`Unknown provider 'claude-2'`, even though the `claude` preset exists. Name the
-provider whenever the participant is not named after it.
+`No provider named 'claude-2'; a new lane name needs --provider.` and
+`next: agent-parley run claude-2 --provider claude`, even though the `claude`
+preset exists. Name the provider whenever the participant is not named after
+it.
 
 ### Which names are already taken
 
@@ -116,6 +172,31 @@ in the launching shell; the launcher refuses to start when a required variable
 is unset rather than falling back to another account. Coordination state records
 variable names and config directories, never credential values.
 
+The service-resume opt-in `approve_bridge_tools` (see
+[Lanes](lanes.md#requiring-your-own-decision)) is carried into each CLI's own
+per-server allow, scoped to the `agent_parley` MCP server and nothing else:
+
+| Adapter | How a recorded `approve_bridge_tools` reaches the session |
+| --- | --- |
+| `claude` | `permissions.allow` in the `--settings` the launch passes |
+| `codex` | `-c mcp_servers.agent_parley.default_tools_approval_mode="approve"`, from Codex CLI 0.153.0 |
+| `copilot` | `--allow-tool agent_parley` |
+| `gemini` | `trust: true` on the `agent_parley` server in the lane's settings overlay |
+| `opencode` | `permission` `agent_parley_*: allow` in the lane's `opencode.json` overlay |
+| `amp` | none; Amp offers no per-server approval the launcher can pass |
+
+A lane on any adapter but `amp` that the service could resume, with no opt-in
+recorded, gets the same standard-error warning and `setup gap: bridge tool
+approval not recorded` wake result as a `claude` lane. An opt-in the CLI
+cannot carry is never dropped silently: `approval resume --bridge-tools on
+--participant NAME` refuses it for an `amp` lane, a project-wide opt-in is
+named on standard error when such a lane launches and under `approvals` in
+`doctor`, and a `codex` lane whose `codex --version` is older than 0.153.0 or
+unreadable starts without the override and says so. `auto_mode` is the
+`claude` CLI's own auto permission mode; it applies to `claude` lanes only,
+and `approval resume --auto-mode on --participant NAME` refuses any other
+adapter by name.
+
 Each preset names one configuration-home variable. A credential profile's
 `--config-home` is applied to that variable for the launch, which is what makes
 a second account of the same provider possible.
@@ -145,7 +226,9 @@ built from the file or directory the profile selected. A `copilot` lane instead
 gets `mcp-config.json` and `settings.json` written into the `COPILOT_HOME` its
 profile names, which is why that adapter refuses to launch without a profile
 rather than writing this lane's hooks into the configuration directory your own
-sessions use.
+sessions use. Give every `copilot` lane its own profile; two lanes on one
+profile refuse each other's tool calls, because both lanes' hooks run in both
+sessions.
 
 ### Run a second account of the same provider
 
@@ -174,7 +257,7 @@ and `agent-parley participant list` reports the same binding afterwards. If
 either prints `default account`, the profile was not bound; see the next
 section, because a relaunch with the flag will not change it.
 
-### Provider and account are fixed once the participant exists
+### Provider and profile are recorded once the participant exists
 
 The provider and profile are recorded when the lane is created, and a later
 `run` or `participant add` for the same name with a different pair is refused:
@@ -182,6 +265,12 @@ The provider and profile are recorded when the lane is created, and a later
 ```
 Participant claude-2 already uses provider claude with the default account.
 ```
+
+A default-account lane runs on the client's own default configuration home on
+every launch and resume. A configuration-home variable such as
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` exported by the shell that runs `run`, or
+by the one that started the service, is removed from the lane's environment;
+only a credential profile selects another account.
 
 Passing the same pair again is accepted and changes nothing. There is no command
 that rebinds a lane, because the lane's configuration, its registered identity
@@ -263,7 +352,9 @@ arguments. `copilot` reads them from files instead, so Agent Parley writes
 `mcp-config.json` and `settings.json` into that lane's own Copilot
 configuration directory; a `copilot` lane therefore requires a credential
 profile, and the launcher refuses without one rather than writing hooks into the
-configuration directory your own sessions use. `gemini`, `opencode` and `amp`
+configuration directory your own sessions use. Give every `copilot` lane its
+own profile; two lanes on one profile refuse each other's tool calls.
+`gemini`, `opencode` and `amp`
 each receive a lane-private copy of their native configuration that lives in
 Agent Parley's state directory, never in the repository, and is rebuilt on every
 launch and removed by `participant retire`. `amp` is refused at launch until Amp

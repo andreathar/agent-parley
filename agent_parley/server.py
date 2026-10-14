@@ -19,6 +19,7 @@ from pathlib import Path
 from types import FrameType
 
 from agent_parley import (
+    attachments,
     checkpoints,
     hook,
     metrics,
@@ -33,8 +34,20 @@ from agent_parley import (
 from agent_parley.state import BridgeError, trim_log
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
-MAX_REQUEST_BYTES = 16384
+MAX_REQUEST_BYTES = 2 * attachments.MAX_ATTACHMENT_BYTES + 16384
 MAX_HOOK_BYTES = 1_048_576
+OVERSIZED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": (
+            f"Request exceeds {MAX_REQUEST_BYTES} bytes; send_message bodies "
+            f"above {store.MAX_BODY_BYTES} bytes spill to an attachment up to "
+            f"{attachments.MAX_ATTACHMENT_BYTES} bytes."
+        ),
+    },
+}
 HOOK_PATH = "/hook/"
 REVISION_SECONDS = 2.0
 LOG_NAME = "server.log"
@@ -172,7 +185,13 @@ TOOLS = [
                 "maxItems": store.MAX_RECIPIENTS,
             },
             "subject": {**TEXT, "maxLength": 160},
-            "body_md": {**TEXT, "description": "At most 4096 UTF-8 bytes."},
+            "body_md": {
+                **TEXT,
+                "description": (
+                    f"Max {attachments.MAX_ATTACHMENT_BYTES} bytes; above "
+                    f"{store.MAX_BODY_BYTES} it spills to an attachment."
+                ),
+            },
             "idempotency_key": {**TEXT, "maxLength": 80},
             "thread_id": {**TEXT, "maxLength": 80},
             "reply_to": {
@@ -364,7 +383,7 @@ TOOLS = [
             "verdict": {"type": "string", "enum": list(metrics.VERDICTS)},
             "evidence": {
                 **TEXT,
-                "description": "What you checked; at most 4096 UTF-8 bytes.",
+                "description": "What you checked.",
             },
         },
         ["report_id", "verdict", "evidence"],
@@ -633,11 +652,14 @@ class Server(ThreadingHTTPServer):
                     owed.get("evidence"),
                 )
             except Exception as exc:
+                from agent_parley import supervision
+
                 self.coalesce(
                     "unrecovered",
                     lane,
                     f"{lane[1]} recovery checkpoint not written; the next "
-                    f"event captures again: {type(exc).__name__}",
+                    f"event captures again: "
+                    f"{supervision.failure('recovery', exc)}",
                 )
             with self.counting:
                 waiting = self.recovering.get(lane)
@@ -752,6 +774,35 @@ class Server(ThreadingHTTPServer):
         log(self.home, "failed", "request handling\n" + traceback.format_exc())
 
 
+def argument_refusal(tool: dict, args: dict) -> str | None:
+    """Names what is wrong with the keys of one tool call, if anything.
+
+    An agent told only that its arguments were wrong re-sends the same
+    call, so the refusal names the tool, each unexpected key, each missing
+    required key and every accepted key. It names keys only and never
+    echoes an argument value, which may carry a message body, and it is
+    clipped so an oversized key cannot inflate the reply.
+
+    Args:
+        tool: Declared tool whose input schema the call must match.
+        args: Arguments object the caller sent.
+
+    Returns:
+        The refusal text, or None when the keys match the schema.
+    """
+    schema = tool["inputSchema"]
+    accepted = sorted(schema["properties"])
+    extra = sorted(set(args) - set(accepted))
+    missing = sorted(set(schema["required"]) - set(args))
+    if not extra and not missing:
+        return None
+    parts = [f"unexpected {', '.join(extra)}" if extra else ""]
+    parts.append(f"missing {', '.join(missing)}" if missing else "")
+    named = "; ".join(part for part in parts if part)
+    text = f"{tool['name']}: {named}. Accepted: {', '.join(accepted)}."
+    return text if len(text) <= 300 else text[:297] + "..."
+
+
 class Handler(BaseHTTPRequestHandler):
     """Implements the JSON-response subset of stateless Streamable HTTP."""
 
@@ -806,7 +857,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path in ("/mcp/", HOOK_PATH):
             try:
                 actor = store.authenticate(self.server.home, token)
-            except sqlite3.Error:
+            except (sqlite3.Error, BridgeError):
                 self._reply(503)
                 return None
             if actor:
@@ -830,6 +881,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Authenticates and handles one size-limited JSON-RPC request.
 
+        The request cap admits the largest ``send_message`` body the store
+        accepts, ``attachments.MAX_ATTACHMENT_BYTES``, at twice its size for
+        JSON escaping plus room for the envelope. A larger request is refused
+        with HTTP 413 and a JSON-RPC error naming those limits, so an agent
+        reads why the call failed and can shorten or split the message.
+
         A service whose sources have moved refuses before it reaches the code
         that would import them. The refusal is the status a client already
         treats as an outage, so a hook decides in-process on the same path a
@@ -852,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
         if version not in VERSIONS:
             self._reply(400)
             return
-        message = self._body(MAX_REQUEST_BYTES)
+        message = self._body(MAX_REQUEST_BYTES, OVERSIZED)
         if message is _REFUSED:
             return
         if message is _INVALID:
@@ -902,11 +959,14 @@ class Handler(BaseHTTPRequestHandler):
             response["error"] = {"code": -32601, "message": "Method not found"}
         self._reply(200, response)
 
-    def _body(self, limit: int) -> object:
+    def _body(self, limit: int, oversized: dict | None = None) -> object:
         """Reads one bounded JSON body, or replies and returns ``_REFUSED``.
 
         Args:
             limit: Largest body accepted on this path, in bytes.
+            oversized: JSON body sent with the 413 refusal of a body over
+                ``limit``, so the caller can read the limit it crossed; an
+                empty refusal when omitted.
 
         Returns:
             The decoded JSON value, ``_INVALID`` when the body was not JSON,
@@ -928,7 +988,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Transfer-Encoding"
             ):
                 self.rfile.read(length)
-            self._reply(413)
+            self._reply(413, oversized)
             return _REFUSED
         try:
             return json.loads(self.rfile.read(length))
@@ -1091,7 +1151,10 @@ class Handler(BaseHTTPRequestHandler):
         lock until one of them lost and denied a native call. Expiry is
         therefore answered with `hook.DECIDING`, which tells the client the
         decision is held here: it emits no context and exits successfully
-        rather than repeating the event.
+        rather than repeating the event. A tool call a guard refuses from
+        its command line and the roster alone is the exception: it is
+        answered with that denial, by `checkpoints.deadline_refusal`, so a
+        slow decision drops only coordination context, never a refusal.
 
         Only the decisions a lane abandoned are counted, keyed by the lane's
         project and name because one service serves every project and lane
@@ -1197,12 +1260,21 @@ class Handler(BaseHTTPRequestHandler):
         if finished and isinstance(late, dict):
             if owed := late.pop("recovery", None):
                 self.server.recover(lane, owed)
+        refused = checkpoints.deadline_refusal(request)
         log(
             self.server.home,
             "expired",
             f"{self.path} {participant} undecided after {spent:.3f} "
-            "seconds; answered as still deciding: " + stages.report(),
+            "seconds; answered as "
+            + (
+                "refused by a command guard: "
+                if refused
+                else "still deciding: "
+            )
+            + stages.report(),
         )
+        if refused is not None:
+            return refused
         self._reply(hook.DECIDING, {"detail": UNDECIDED})
         return None
 
@@ -1269,13 +1341,16 @@ class Handler(BaseHTTPRequestHandler):
                 (t for t in TOOLS if t["name"] == params.get("name")), None
             )
             args = params.get("arguments", {})
-            if tool is None or not isinstance(args, dict):
-                raise BridgeError("Unknown tool or invalid arguments.")
-            schema = tool["inputSchema"]
-            if set(args) - set(schema["properties"]) or set(
-                schema["required"]
-            ) - set(args):
-                raise BridgeError("Unexpected or missing tool arguments.")
+            if tool is None:
+                raise BridgeError(
+                    f"Unknown tool {str(params.get('name'))[:80]!r}; "
+                    "tools/list names the available tools."
+                )
+            if not isinstance(args, dict):
+                raise BridgeError("arguments must be a JSON object.")
+            wrong = argument_refusal(tool, args)
+            if wrong is not None:
+                raise BridgeError(wrong)
             if roster.paused(self.server.home, actor["project"], actor["name"]):
                 raise BridgeError(roster.PAUSED_REASON)
             if tool["name"] == waits.TOOL:

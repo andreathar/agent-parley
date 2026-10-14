@@ -81,11 +81,84 @@ DIAGNOSTIC_TOOLS = frozenset(
 )
 READ_ONLY_TOOLS = DIAGNOSTIC_TOOLS | {"WebFetch", "WebSearch"}
 PATH_FIELDS = ("file_path", "notebook_path", "path")
+COMMAND_FIELDS = ("command", "cmd")
+KEPT_FIELDS = ("hook_event_name", "event", "tool_name", "cwd", "session_id")
 OFFER_REPLY_SECONDS = 120.0
 DIGEST_HEADER_BYTES = 120
 BRIDGE_COMMAND = "agent-parley"
 HARNESS_PROMPT_TAGS = ("<task-notification>", "<system-reminder>")
 UNCHECKED_SHELL = ("<", ">", "`", "$(", "\n", "\r")
+SHELL_KEYWORDS = frozenset(
+    {
+        "!",
+        "{",
+        "}",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "do",
+        "done",
+        "while",
+        "until",
+    }
+)
+SHELLS = frozenset({"sh", "bash", "dash", "ksh", "zsh"})
+SHELL_DEPTH = 2
+WRAPPER_VALUES = {
+    "builtin": frozenset(),
+    "command": frozenset(),
+    "env": frozenset(
+        {"-C", "-S", "-u", "--chdir", "--split-string", "--unset"}
+    ),
+    "exec": frozenset({"-a"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "rtk": frozenset(),
+    "stdbuf": frozenset({"-e", "-i", "-o", "--error", "--input", "--output"}),
+    "sudo": frozenset(
+        {
+            "-C",
+            "-D",
+            "-g",
+            "-p",
+            "-R",
+            "-r",
+            "-T",
+            "-t",
+            "-U",
+            "-u",
+            "--chdir",
+            "--group",
+            "--prompt",
+            "--user",
+        }
+    ),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    "timeout": frozenset({"-k", "-s", "--kill-after", "--signal"}),
+    "xargs": frozenset(
+        {
+            "-a",
+            "-d",
+            "-E",
+            "-I",
+            "-L",
+            "-n",
+            "-P",
+            "-s",
+            "--arg-file",
+            "--delimiter",
+            "--max-args",
+            "--max-procs",
+        }
+    ),
+}
+CHECKOUT_SWITCHES = frozenset(
+    {"-b", "-B", "-t", "--detach", "--orphan", "--track"}
+)
+CHECKOUT_PATCHES = frozenset({"-p", "--patch"})
+RESTORE_CHECK_SECONDS = 2.0
 OUTAGE_CHECK = "Run agent-parley status for the bridge's own report."
 OUTAGE_GUIDANCE = (
     "Reads and agent-parley commands still run; hold edits, commits and "
@@ -149,6 +222,22 @@ class Stages:
 def clip(text: str, budget: int) -> str:
     """Truncates UTF-8 text without splitting a multibyte character."""
     return text.encode()[:budget].decode(errors="ignore")
+
+
+def excerpt(text: str, budget: int) -> str:
+    """Flattens peer text onto one line, then clips it to a byte budget.
+
+    Collapsing every whitespace run, newlines included, keeps a subject or
+    body from opening a line that reads as a bridge-generated header.
+
+    Args:
+        text: Peer-controlled text such as a subject or message body.
+        budget: Maximum UTF-8 bytes kept.
+
+    Returns:
+        The single-line excerpt.
+    """
+    return clip(" ".join(text.split()), budget)
 
 
 def operator_prompt(prompt: str) -> bool:
@@ -217,6 +306,7 @@ class Reason(StrEnum):
     OUTSIDE_LANE = "outside_lane"
     PERMISSION_DENIED = "permission_denied"
     CHAINED_CLI = "chained_cli"
+    STATE_UNREADABLE = "state_unreadable"
 
 
 UNOBSERVED = frozenset(
@@ -227,6 +317,7 @@ UNOBSERVED = frozenset(
         Reason.SUPERSEDED,
         Reason.WAKE_REQUESTED,
         Reason.NOTIFICATION_FAILED,
+        Reason.STATE_UNREADABLE,
     }
 )
 
@@ -1016,6 +1107,13 @@ def prune(directory: Path, agent: str, now: float = 0.0) -> int:
 def shell_segments(command: str) -> list[list[str]]:
     """Splits a shell command into simple commands without executing it.
 
+    Subshell parentheses also separate commands, and the reserved words in
+    `SHELL_KEYWORDS` that open a command, such as `if`, `do`, `{` or `!`,
+    are dropped, so a compound command yields the simple commands it runs.
+    The bodies of command substitutions that the tokenizer keeps inside a
+    word, within double quotes or between backticks, follow as commands of
+    their own.
+
     Args:
         command: Shell text supplied to a native command tool.
 
@@ -1025,7 +1123,7 @@ def shell_segments(command: str) -> list[list[str]]:
         stays inside its argument. Invalid shell text returns no commands and
         remains subject to the post-action check.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n()")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -1035,31 +1133,96 @@ def shell_segments(command: str) -> list[list[str]]:
         return []
     segments: list[list[str]] = [[]]
     for token in tokens:
-        if token and not token.strip(";&|\n"):
+        if token and not token.strip(";&|\n()"):
             segments.append([])
-        else:
+        elif segments[-1] or token not in SHELL_KEYWORDS:
             segments[-1].append(token)
+    for body in substitutions(command):
+        segments.extend(shell_segments(body))
     return [segment for segment in segments if segment]
+
+
+def substitutions(command: str) -> list[str]:
+    """Finds the command substitutions the shell tokenizer keeps in a word.
+
+    Args:
+        command: Shell text supplied to a native command tool.
+
+    Returns:
+        The text between backticks outside single quotes and inside each
+        outermost `$(...)` within double quotes. An unquoted `$(...)` is
+        already split at its parentheses, so it is not repeated here.
+    """
+    bodies: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if character == "\\" and quote != "'":
+            index += 1
+        elif character == "'" and quote != '"':
+            quote = "" if quote else "'"
+        elif character == '"' and quote != "'":
+            quote = "" if quote else '"'
+        elif character == "`" and quote != "'":
+            end = command.find("`", index + 1)
+            if end < 0:
+                break
+            bodies.append(command[index + 1 : end])
+            index = end
+        elif quote == '"' and command.startswith("$(", index):
+            depth = 0
+            end = index + 1
+            while end < len(command):
+                depth += {"(": 1, ")": -1}.get(command[end], 0)
+                if not depth:
+                    break
+                end += 1
+            bodies.append(command[index + 2 : end])
+            index = end
+        index += 1
+    return bodies
 
 
 def invoked(words: list[str]) -> list[str]:
     """Strips the wrappers that hide the executable a segment really runs.
 
+    The wrappers are the programs in `WRAPPER_VALUES` that run the rest of
+    their command line, such as `env`, `timeout`, `nice`, `exec`, `sudo`,
+    `xargs` or the token proxy, with their options and the options' values.
+    `env -S TEXT` is split as the shell would split TEXT.
+
     Args:
         words: Tokenized simple command.
 
     Returns:
-        The same command without leading environment assignments, the shell's
-        ``command`` builtin, or a token-proxy wrapper, so the executable is the
-        first remaining word.
+        The same command without leading environment assignments or
+        wrappers, so the executable is the first remaining word.
     """
-    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+    while words:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words = words[1:]
+            continue
+        wrapper = words[0]
+        if wrapper not in WRAPPER_VALUES:
+            break
         words = words[1:]
-    if words[:1] == ["command"]:
-        words = words[1:]
-    if words[:1] == ["rtk"]:
-        words = words[1:]
-        if words[:1] == ["proxy"]:
+        while words and words[0].startswith("-") and words[0] != "-":
+            option = words[0]
+            words = words[1:]
+            if option == "--":
+                break
+            if option in WRAPPER_VALUES[wrapper] and words:
+                if option in {"-S", "--split-string"}:
+                    try:
+                        words = shlex.split(words[0]) + words[1:]
+                    except ValueError:
+                        return []
+                    break
+                words = words[1:]
+        if wrapper == "timeout" or (
+            wrapper == "rtk" and words[:1] == ["proxy"]
+        ):
             words = words[1:]
     return words
 
@@ -1107,8 +1270,171 @@ def git_action(
     return target, args[index], args[index + 1 :]
 
 
+def unaliased(words: list[str]) -> list[str]:
+    """Expands a Git alias the command line itself defines.
+
+    Only `git -c alias.NAME=VALUE NAME ...` is expanded: aliases in the
+    repository's configuration are not read, so the check runs nothing.
+
+    Args:
+        words: Unwrapped simple command.
+
+    Returns:
+        The command with the alias replaced by its value, a shell alias
+        (`!TEXT`) as `sh -c` running TEXT with the remaining arguments, or
+        the words unchanged when no inline alias applies.
+    """
+    if not words or Path(words[0]).name != "git":
+        return words
+    aliases = {}
+    index = 1
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] == "-c" and index + 1 < len(words):
+            key, _, value = words[index + 1].partition("=")
+            if key.startswith("alias."):
+                aliases[key.removeprefix("alias.")] = value
+        index += 2 if words[index] in GIT_OPTIONS_WITH_VALUE else 1
+    if index >= len(words) or words[index] not in aliases:
+        return words
+    value = aliases[words[index]]
+    rest = words[index + 1 :]
+    if value.startswith("!"):
+        return ["sh", "-c", f"{value[1:]} {shlex.join(rest)}"]
+    try:
+        return [*words[:index], *shlex.split(value), *rest]
+    except ValueError:
+        return words
+
+
+def shell_text(words: list[str]) -> str | None:
+    """Reads the shell text a command hands to another shell to run.
+
+    Args:
+        words: Unwrapped simple command.
+
+    Returns:
+        The argument of `sh -c` and the other shells in `SHELLS`, the joined
+        arguments of `eval`, or ``None`` when the command runs no shell text.
+    """
+    name = Path(words[0]).name
+    if name == "eval":
+        return " ".join(words[1:])
+    if name not in SHELLS:
+        return None
+    index = 1
+    while index < len(words) and words[index][:1] in {"-", "+"}:
+        option = words[index]
+        if option[:2] not in {"--", "++"} and "c" in option[1:]:
+            return words[index + 1] if index + 1 < len(words) else None
+        index += 2 if option[1:] in {"o", "O"} else 1
+    return None
+
+
+def gate_commands(
+    command: str, cwd: Path, depth: int = SHELL_DEPTH
+) -> list[tuple[Path, list[str]]]:
+    """Lists the simple commands a shell call runs and where each runs.
+
+    Every segment is unwrapped with `invoked` and `unaliased`. Shell text a
+    segment hands on through `sh -c`, `eval` or a Git shell alias is split
+    in turn, up to `depth` levels. A `cd DIR` moves the directory later
+    commands resolve against; a `cd -` or a target naming a variable or a
+    substitution returns to the tool's own directory, because the real one
+    cannot be read from the text. This is a guard, not an authority
+    boundary: code an interpreter runs, such as `python -c` or a script,
+    is out of its reach.
+
+    Args:
+        command: Shell text supplied to a native command tool.
+        cwd: Native tool working directory, resolved.
+        depth: How many levels of nested shell text are searched.
+
+    Returns:
+        Each command's words with the directory it runs in.
+    """
+    found: list[tuple[Path, list[str]]] = []
+    directory = cwd
+    for segment in shell_segments(command):
+        words = unaliased(invoked(segment))
+        if not words:
+            continue
+        if words[0] == "cd":
+            names = [word for word in words[1:] if not word.startswith("-")]
+            name = names[0] if names else "~"
+            directory = (
+                cwd
+                if "-" in words[1:] or "$" in name or "`" in name
+                else (directory / Path(name).expanduser()).resolve()
+            )
+            continue
+        nested = shell_text(words)
+        if nested is None:
+            found.append((directory, words))
+        elif depth:
+            found.extend(gate_commands(nested, directory, depth - 1))
+    return found
+
+
+def checkout_switches(directory: Path, args: list[str]) -> bool:
+    """Reports whether a `git checkout` can move HEAD rather than restore.
+
+    Branch-creating and detaching options switch, and a patch restore never
+    does. Paths after `--`, or more than one name before it, are a restore.
+    A single name that is `.` or exists in the directory is a path; any
+    other single name switches unless Git tracks it as a path, which costs
+    one `git ls-files` bounded by `RESTORE_CHECK_SECONDS`. A name Git does
+    not track is refused because Git may create a tracking branch from it.
+
+    Args:
+        directory: Directory the command runs in.
+        args: Arguments following the `checkout` subcommand.
+
+    Returns:
+        Whether the command may switch the branch.
+    """
+    options = {argument.partition("=")[0] for argument in args}
+    if options & CHECKOUT_SWITCHES:
+        return True
+    if options & CHECKOUT_PATCHES:
+        return False
+    split = args.index("--") if "--" in args else len(args)
+    names = [
+        argument
+        for argument in args[:split]
+        if argument == "-" or not argument.startswith("-")
+    ]
+    if args[split + 1 :] or len(names) != 1:
+        return False
+    name = names[0]
+    if name == "." or (name != "-" and (directory / name).exists()):
+        return False
+    try:
+        listed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(directory),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                name,
+            ],
+            capture_output=True,
+            timeout=RESTORE_CHECK_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return listed.returncode != 0
+
+
 def changes_lane_branch(payload: dict, lane: Path) -> bool:
     """Reports whether a native tool command can change the lane branch.
+
+    Commands are read through `gate_commands`, so wrappers, compound
+    syntax, nested shell text, inline Git aliases and a preceding `cd` are
+    seen through. A `git checkout` that only restores files is allowed, as
+    `checkout_switches` decides.
 
     Args:
         payload: Native lifecycle hook payload.
@@ -1122,8 +1448,8 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
         return False
     command = str(tool_input.get("command", tool_input.get("cmd", "")))
     cwd = Path(payload.get("cwd", str(lane))).resolve()
-    for segment in shell_segments(command):
-        action = git_action(segment, cwd)
+    for directory, words in gate_commands(command, cwd):
+        action = git_action(words, directory)
         if action is None:
             continue
         target, subcommand, args = action
@@ -1131,7 +1457,9 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
             continue
         if subcommand == "switch":
             return True
-        if subcommand == "checkout" and args[:1] != ["--"]:
+        if subcommand == "checkout" and (
+            Path(words[0]).name == "gh" or checkout_switches(target, args)
+        ):
             return True
         if subcommand == "branch" and any(
             argument in {"-m", "-M", "--move"} for argument in args
@@ -1147,14 +1475,17 @@ def changes_lane_branch(payload: dict, lane: Path) -> bool:
 
 
 def stray_worktree(payload: dict, lane: Path) -> tuple[Path, str] | None:
-    """Reports a `git worktree add` whose target leaves the lane's -wt.
+    """Reports a `git worktree add` or `move` whose target leaves the -wt.
 
     Git records no creator for a worktree, so the sweep attributes a lane's
     extra worktrees by where they sit. The target is the first positional
-    argument after `add`, past options such as `-b NAME`, `-B NAME`,
-    `--reason TEXT`, `--detach` and `--lock`, resolved against the directory
-    `git -C` selects or the tool's working directory, with a leading `~`
-    expanded. The check reads the command line only and runs nothing.
+    argument after `add`, or the second, the destination, after `move`,
+    past options such as `-b NAME`, `-B NAME`, `--reason TEXT`, `--detach`,
+    `--lock` and `--force`. It is resolved against the directory `git -C`
+    selects, else the directory `gate_commands` tracks, with a leading `~`
+    expanded. A target naming a variable or a substitution is reported
+    unresolved, because only the shell knows where it points. The check
+    reads the command line only and runs nothing.
 
     Args:
         payload: Native lifecycle hook payload.
@@ -1162,7 +1493,8 @@ def stray_worktree(payload: dict, lane: Path) -> tuple[Path, str] | None:
 
     Returns:
         The resolved target and the same command aimed inside the lane's
-        `-wt` directory, or ``None`` when no add leaves that directory.
+        `-wt` directory, the literal target and an empty command when it
+        cannot be resolved, or ``None`` when nothing leaves that directory.
     """
     tool_input = payload.get("tool_input") or {}
     if not isinstance(tool_input, dict):
@@ -1170,25 +1502,29 @@ def stray_worktree(payload: dict, lane: Path) -> tuple[Path, str] | None:
     command = str(tool_input.get("command", tool_input.get("cmd", "")))
     cwd = Path(payload.get("cwd", str(lane))).resolve()
     allowed = lanes.extras(lane)
-    for segment in shell_segments(command):
-        words = invoked(segment)
-        action = git_action(words, cwd)
+    for directory, words in gate_commands(command, cwd):
+        action = git_action(words, directory)
         if action is None:
             continue
         base, subcommand, args = action
-        if subcommand != "worktree" or args[:1] != ["add"]:
+        if subcommand != "worktree" or args[:1] not in (["add"], ["move"]):
             continue
+        names: list[int] = []
         index = len(words) - len(args) + 1
         while index < len(words):
             word = words[index]
             if word == "--":
-                index += 1
+                names.extend(range(index + 1, len(words)))
                 break
             if word == "-" or not word.startswith("-"):
-                break
+                names.append(index)
             index += 2 if word in WORKTREE_ADD_VALUES else 1
-        if index >= len(words):
+        wanted = 0 if args[0] == "add" else 1
+        if len(names) <= wanted:
             continue
+        index = names[wanted]
+        if "$" in words[index] or "`" in words[index]:
+            return Path(words[index]), ""
         target = (base / Path(words[index]).expanduser()).resolve()
         if target != allowed and target.is_relative_to(allowed):
             continue
@@ -1325,14 +1661,37 @@ MESSAGE_OPTIONS = {
     "merge": ("-m", "--message"),
     "tag": ("-m", "--message"),
     "revert": ("-m", "--message"),
+    "notes": ("-m", "--message"),
 }
 MESSAGE_FILES = {
     "commit": ("-F", "--file"),
     "merge": ("-F", "--file"),
     "tag": ("-F", "--file"),
+    "notes": ("-F", "--file"),
 }
 PULL_REQUEST_OPTIONS = ("-t", "--title", "-b", "--body")
 PULL_REQUEST_FILES = ("-F", "--body-file")
+FORGE_TEXT_COMMANDS = frozenset(
+    {
+        ("pr", "create"),
+        ("pr", "edit"),
+        ("pr", "comment"),
+        ("pr", "merge"),
+        ("pr", "review"),
+        ("issue", "create"),
+        ("issue", "edit"),
+        ("issue", "comment"),
+        ("release", "create"),
+        ("release", "edit"),
+    }
+)
+FORGE_TEXT_OPTIONS = PULL_REQUEST_OPTIONS + ("-n", "--notes", "--subject")
+FORGE_TEXT_FILES = PULL_REQUEST_FILES + ("--notes-file",)
+HEREDOC = re.compile(
+    r"(?<!<)<<(?!<)-?[ \t]*([\"']?)([A-Za-z_][\w.-]*)\1([^\n]*)\n"
+    r"(.*?)^[ \t]*\2[ \t]*$",
+    re.S | re.M,
+)
 MESSAGE_FILE_LIMIT = 65536
 
 
@@ -1361,14 +1720,31 @@ def message_files(base: Path, names: list[str]) -> list[str]:
     return texts
 
 
+def heredocs(command: str) -> tuple[str, list[str]]:
+    """Separates terminated here-documents from the command that feeds them.
+
+    Args:
+        command: Shell text supplied to a native command tool.
+
+    Returns:
+        The command with every here-document body and its terminator removed,
+        keeping the rest of each opening line, and the removed bodies. A body
+        is free text, so leaving it in place would split it into commands or
+        make an apostrophe end the parse.
+    """
+    bodies = [match.group(4) for match in HEREDOC.finditer(command)]
+    return HEREDOC.sub(lambda match: match.group(3), command), bodies
+
+
 def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
     """Reports the attribution a native command would publish, if any.
 
     A lane reaches Git and the forge through its own tools, so the text that
-    would land in a commit, a merge, a tag or a pull request is inspected
-    where the agent asks for it, before anything is written. The check reads
-    the command line and the message files it names: it runs nothing, writes
-    nothing and never consults the network.
+    would land in a commit, a merge, a tag, a note, or a pull request, issue,
+    comment, review or release on the forge is inspected where the agent asks
+    for it, before anything is written. The check reads the command line, the
+    message files it names and its here-documents, which stand in for standard
+    input: it runs nothing, writes nothing and never consults the network.
 
     Args:
         payload: Native lifecycle hook payload.
@@ -1383,17 +1759,21 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
         return None
     command = str(tool_input.get("command", tool_input.get("cmd", "")))
     cwd = Path(payload.get("cwd", str(lane))).resolve()
+    command, bodies = heredocs(command)
     for segment in shell_segments(command):
         words = invoked(segment)
         if not words:
             continue
         texts: list[str] = []
         if Path(words[0]).name == "gh":
-            if words[1:3] == ["pr", "create"] and cwd.is_relative_to(lane):
-                texts = option_values(
-                    words[3:], PULL_REQUEST_OPTIONS
-                ) + message_files(
-                    cwd, option_values(words[3:], PULL_REQUEST_FILES)
+            pair = tuple(words[1:3])
+            if pair in FORGE_TEXT_COMMANDS and cwd.is_relative_to(lane):
+                texts = (
+                    option_values(words[3:], FORGE_TEXT_OPTIONS)
+                    + message_files(
+                        cwd, option_values(words[3:], FORGE_TEXT_FILES)
+                    )
+                    + bodies
                 )
         else:
             action = git_action(segment, cwd)
@@ -1401,11 +1781,13 @@ def attributed_command(payload: dict, lane: Path) -> tuple[str, str] | None:
                 continue
             target, subcommand, args = action
             if subcommand in MESSAGE_OPTIONS and target.is_relative_to(lane):
-                texts = option_values(
-                    args, MESSAGE_OPTIONS[subcommand]
-                ) + message_files(
-                    target,
-                    option_values(args, MESSAGE_FILES.get(subcommand, ())),
+                texts = (
+                    option_values(args, MESSAGE_OPTIONS[subcommand])
+                    + message_files(
+                        target,
+                        option_values(args, MESSAGE_FILES.get(subcommand, ())),
+                    )
+                    + bodies
                 )
         for text in texts:
             rule = policy.matched_rule(text)
@@ -1529,8 +1911,9 @@ def bridge_invocation(words: list[str]) -> bool:
     """Reports whether one simple command runs this bridge's own CLI.
 
     The installed console script and the protocol form a lane is ordered to
-    run, an interpreter followed by ``-m agent_parley.cli``, reach the same
-    code, so an exemption granted to one is granted to the other.
+    run, an interpreter followed by ``-m agent_parley.cli`` with or without
+    ``-P`` before it, reach the same code, so an exemption granted to one is
+    granted to the other.
 
     Args:
         words: Tokenized simple command with its wrappers already stripped.
@@ -1544,18 +1927,25 @@ def bridge_invocation(words: list[str]) -> bool:
     executable = Path(words[0]).name
     if executable == BRIDGE_COMMAND:
         return True
-    return words[1:3] == ["-m", protocol.CLI_MODULE] and (
+    module = words[2:4] if words[1:2] == ["-P"] else words[1:3]
+    return module == ["-m", protocol.CLI_MODULE] and (
         words[0] == sys.executable
         or bool(re.fullmatch(r"python[0-9.]*(\.exe)?", executable))
     )
 
 
-def touched_path(payload: dict, lane: Path) -> str:
+def touched_path(payload: dict, lane: Path, *, fold: bool = False) -> str:
     """Names the lane-relative path a file tool call would write.
+
+    Resolving a path does not canonicalize its case on a case-insensitive
+    file system, so an absolute path whose lane prefix is spelled in
+    another case still names a file in the lane. Folding case accepts that
+    prefix and keeps the rest of the path as the call spelled it.
 
     Args:
         payload: Native ``PreToolUse`` hook payload.
         lane: Resolved lane worktree the call runs in.
+        fold: Whether the lane prefix is matched without regard to case.
 
     Returns:
         The POSIX path relative to the lane, or an empty string when the
@@ -1571,7 +1961,16 @@ def touched_path(payload: dict, lane: Path) -> str:
             if not path.is_absolute():
                 path = lane / path
             with contextlib.suppress(OSError, ValueError):
-                return path.resolve().relative_to(lane).as_posix()
+                resolved = path.resolve()
+                depth = len(lane.parts)
+                if (
+                    fold
+                    and not resolved.is_relative_to(lane)
+                    and Path(*resolved.parts[:depth]).as_posix().casefold()
+                    == lane.as_posix().casefold()
+                ):
+                    resolved = lane.joinpath(*resolved.parts[depth:])
+                return resolved.relative_to(lane).as_posix()
     return ""
 
 
@@ -1602,14 +2001,19 @@ def feed_notice(news: dict) -> str:
         news: Result of `store.feed` for the reading lane.
 
     Returns:
-        The bounded feed line, or an empty string when nothing is new.
+        The bounded feed line, or an empty string when nothing is new. A
+        line from a page that left newer entries for the next read says how
+        many before any entry, so clipping cannot hide the count.
     """
     if not news["items"]:
         return ""
+    omitted = news.get("omitted", 0)
     return clip(
-        "Project feed, newest first: "
+        "Project feed, newest first"
+        + (f", {omitted} newer pending: " if omitted else ": ")
         + "; ".join(
-            f"{item['sender']}: {item['subject']}" for item in news["items"]
+            f"{item['sender']}: {excerpt(item['subject'], 400)}"
+            for item in news["items"]
         )
         + f" ({news['superseded']} superseded)",
         400,
@@ -1746,8 +2150,8 @@ def digest(
         ack = " [ACK REQUIRED]" if message["ack_required"] else ""
         preview = (
             f"Message {message['id']} from {message['sender']}{ack}: "
-            f"{clip(message['subject'], 80)}\n"
-            f"{clip(message['body_md'], 160)}"
+            f"{excerpt(message['subject'], 80)}\n"
+            f"> {excerpt(message['body_md'], 160)}"
         )
         tail = str(dict(message).get("body_tail") or "")
         if "[attachment " in tail:
@@ -1783,7 +2187,13 @@ def digest(
 
 
 def hazard(
-    payload: dict, lane: Path, agent: str, mail: dict, issues: dict
+    payload: dict,
+    lane: Path,
+    agent: str,
+    mail: dict,
+    issues: dict,
+    *,
+    fold: bool = False,
 ) -> tuple[Reason, str] | None:
     """Finds the coordination hazard that makes one tool call unsafe.
 
@@ -1801,6 +2211,7 @@ def hazard(
         agent: Assigned native lane name.
         mail: Mailbox batch read for this decision.
         issues: Issue ledger snapshot read for this decision.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         The denial cause and its reason text, or None when the call is safe.
@@ -1816,7 +2227,7 @@ def hazard(
         )
     if exempt(payload):
         return None
-    if conflict := reserved_conflict(payload, lane, mail):
+    if conflict := reserved_conflict(payload, lane, mail, fold=fold):
         path, held = conflict
         return Reason.RESERVED_PATH, (
             f"{path} overlaps {held['pattern']}, reserved by "
@@ -1856,7 +2267,7 @@ def exempt(payload: dict) -> bool:
 
 
 def reserved_conflict(
-    payload: dict, lane: Path, mail: dict
+    payload: dict, lane: Path, mail: dict, *, fold: bool = False
 ) -> tuple[str, dict] | None:
     """Finds the peer reservation one tool call would write into.
 
@@ -1864,18 +2275,19 @@ def reserved_conflict(
         payload: Native ``PreToolUse`` hook payload.
         lane: Resolved lane worktree the call runs in.
         mail: Mailbox batch carrying the peers' exclusive reservations.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         The lane-relative path the call writes and the overlapping
         reservation with its ``pattern`` and ``holder``, or None.
     """
-    path = touched_path(payload, lane)
+    path = touched_path(payload, lane, fold=fold)
     if not path:
         return None
     for held in mail.get("peer_reservations") or []:
         pattern = str(held["pattern"])
         if not store.named_resource(pattern) and store.overlapping(
-            pattern, path
+            pattern, path, fold=fold
         ):
             return path, held
     return None
@@ -1930,6 +2342,8 @@ def overlaps(
     held: dict[str, list[str]],
     pulls: list[dict],
     ledger: dict,
+    *,
+    fold: bool = False,
 ) -> list[dict]:
     """Names the peer reservations and pull requests touching some paths.
 
@@ -1939,6 +2353,7 @@ def overlaps(
             own identity already excluded.
         pulls: Other lanes' open pull requests from `peer_pull_requests`.
         ledger: Issue records by number, read for claim owners.
+        fold: Whether reservation keys are compared without regard to case.
 
     Returns:
         One finding per overlap, each with a stable ``key`` the lane is
@@ -1950,7 +2365,7 @@ def overlaps(
         for peer, patterns in sorted(held.items()):
             for pattern in patterns:
                 if not store.named_resource(pattern) and store.overlapping(
-                    pattern, path
+                    pattern, path, fold=fold
                 ):
                     found.append(
                         {
@@ -2124,8 +2539,9 @@ def overlap_notice(
     """
     if exempt(payload):
         return None
+    fold = roster.case_insensitive(manifest)
     filed = filed_issue(payload, lane)
-    path = "" if filed else touched_path(payload, lane)
+    path = "" if filed else touched_path(payload, lane, fold=fold)
     paths = filed[1] if filed else [path] if path else []
     if not filed and not path:
         return None
@@ -2135,7 +2551,7 @@ def overlap_notice(
         held = store.active_reservations(home, manifest["root"])
         held.pop(name, None)
         pulls = peer_pull_requests(directory, manifest, agent)
-    found = overlaps(paths, held, pulls, issues.get("issues") or {})
+    found = overlaps(paths, held, pulls, issues.get("issues") or {}, fold=fold)
     if filed:
         found += claimed_matches(filed[0], issues, agent)
     fresh = [item for item in found if item["key"] not in shown]
@@ -2157,7 +2573,7 @@ def overlap_notice(
         }
     reminder = f"unreserved:{path}"
     unreserved = reminder not in shown and not any(
-        store.overlapping(pattern, path)
+        store.overlapping(pattern, path, fold=fold)
         for pattern in mail.get("reserved") or []
         if not store.named_resource(pattern)
     )
@@ -2210,6 +2626,8 @@ def hazard_denial(
     lane: Path,
     mail: dict,
     danger: tuple[Reason, str],
+    *,
+    fold: bool = False,
 ) -> dict:
     """Builds the native denial for a hazard and records who caused it.
 
@@ -2226,12 +2644,13 @@ def hazard_denial(
         lane: Resolved lane worktree the call runs in.
         mail: Mailbox batch the hazard was found in.
         danger: Denial cause and reason text `hazard` returned.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         Native hook output that denies the call with the reason text.
     """
     reason, unsafe = danger
-    conflict = reserved_conflict(payload, lane, mail)
+    conflict = reserved_conflict(payload, lane, mail, fold=fold)
     if reason is Reason.RESERVED_PATH and conflict:
         path, held = conflict
         with contextlib.suppress(OSError, sqlite3.Error, BridgeError):
@@ -2253,6 +2672,8 @@ def unscanned_hazard(
     payload: dict,
     lane: Path,
     agent: str,
+    *,
+    fold: bool = False,
 ) -> tuple[dict, tuple[Reason, str]] | None:
     """Finds a hazard for a call decided without the context scans.
 
@@ -2270,6 +2691,7 @@ def unscanned_hazard(
         payload: Native ``PreToolUse`` hook payload.
         lane: Resolved lane worktree the call runs in.
         agent: Assigned native lane name.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         The mailbox batch read and the hazard found, or None when the call
@@ -2279,7 +2701,9 @@ def unscanned_hazard(
         return None
     try:
         mail = mailbox(home, root, name)
-        danger = hazard(payload, lane, agent, mail, snapshot(directory))
+        danger = hazard(
+            payload, lane, agent, mail, snapshot(directory), fold=fold
+        )
     except (OSError, sqlite3.Error, BridgeError):
         return None
     return (mail, danger) if danger else None
@@ -2561,9 +2985,47 @@ def activity(directory: Path, agent: str) -> dict:
     """
     path = directory / f"{agent}-activity.json"
     try:
-        return dict(json.loads(path.read_text()))
+        state = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _lane_state(path: Path) -> tuple[dict, str]:
+    """Reads a lane's activity record for a writer, keeping a damaged one.
+
+    A writer that failed on a damaged record would fail on every later event
+    too, since its own write is what would replace the file, so every tool
+    call in the lane was refused until an operator deleted it. A record that
+    does not decode to a mapping is instead moved to
+    ``<name>.corrupt-<unix time>``, never over an earlier copy, and the
+    writer continues as from a missing record.
+
+    Args:
+        path: The lane's ``<agent>-activity.json``.
+
+    Returns:
+        The record and an empty string, an empty mapping and an empty string
+        when the file is missing, or an empty mapping and a sentence naming
+        the damage and the copy it was kept as.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {}, ""
+    try:
+        state = json.loads(text)
+    except ValueError as exc:
+        fault = str(exc)
+    else:
+        if isinstance(state, dict):
+            return state, ""
+        fault = f"a JSON {type(state).__name__}, not an object"
+    stamp = int(time.time())
+    while (kept := path.with_name(f"{path.name}.corrupt-{stamp}")).exists():
+        stamp += 1
+    os.replace(path, kept)
+    return {}, f"Damaged activity record kept as {kept.name}: {fault}"
 
 
 def work_offer(directory: Path, agent: str) -> dict | None:
@@ -2793,6 +3255,67 @@ def branch_guard(
             }
         }, Reason.BRANCH_SWITCH
     return None, Reason.BRANCH_OK
+
+
+def static_refusal(
+    payload: dict, lane: Path, expected: str
+) -> tuple[dict, Reason] | None:
+    """Runs the ``PreToolUse`` refusals a parse of the command decides.
+
+    `checkpoint` reaches these guards only after the roster, the session
+    fence and `branch_guard`'s Git subprocess, so a slow step there used
+    to leave a decision unfinished at the service's deadline and the call
+    allowed. This runs the same checks with no Git and no store: a branch
+    switch, an attributed message, a run budget lift and a stray worktree.
+    A command that switches back to ``expected`` is left to `checkpoint`,
+    which knows whether the lane drifted; a rename that restores a missing
+    branch is refused here, and the lane's next call decides it in full.
+
+    Args:
+        payload: Native ``PreToolUse`` payload, its cwd inside the lane.
+        lane: Resolved lane worktree.
+        expected: Manifest-owned branch name.
+
+    Returns:
+        The native denial and its reason, or None when no guard refuses.
+    """
+    if changes_lane_branch(payload, lane) and not restores_lane_branch(
+        payload, lane, expected
+    ):
+        reason = Reason.BRANCH_SWITCH
+        text = (
+            f"Agent Parley owns this worktree on {expected!r}; branch "
+            "switches are blocked. Create or use a separate worktree "
+            "for feature branches."
+        )
+    elif attributed := attributed_command(payload, lane):
+        reason = Reason.ATTRIBUTION_REFUSED
+        text = policy.refusal("This command's message", attributed[1])
+    elif lifts_run_budget(payload):
+        reason = Reason.BUDGET_REFUSED
+        text = (
+            "Recording or resuming the run budget is the operator's "
+            "decision; a lane does not run agent-parley budget "
+            "enforce or resume. Report the need and stop. This is a "
+            "guard, not an authority boundary."
+        )
+    elif stray := stray_worktree(payload, lane):
+        reason = Reason.WORKTREE_REFUSED
+        text = (
+            f"A lane adds extra worktrees only inside {lanes.extras(lane)}/, "
+            "so the sweep can tell which lane made them; "
+            f"{stray[0]} is outside it. Run `{stray[1]}` instead. "
+            "This is a guard, not an authority boundary."
+        )
+    else:
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": text,
+        }
+    }, reason
 
 
 def mailbox(home: Path, root: str, name: str, after: int = 0) -> dict:
@@ -3319,7 +3842,10 @@ def checkpoint(
     manifest = roster.read(directory)
     participant = manifest["participants"].get(agent)
     if participant is None:
-        raise BridgeError(f"{agent} is not a participant in this project.")
+        raise BridgeError(
+            f"{agent} is not a participant in this project.",
+            next_command="agent-parley participant list",
+        )
     if roster.retired(participant):
         told = retired_output(event, agent)
         record(directory, agent, payload, Reason.RETIRED, told, "retired")
@@ -3435,14 +3961,19 @@ def checkpoint(
         return refused
     if event == "PreToolUse" and (stray := stray_worktree(payload, lane)):
         allowed = lanes.extras(lane)
+        remedy = (
+            f"{stray[0]} is outside it. Run `{stray[1]}` instead."
+            if stray[1]
+            else f"{stray[0]} is not a literal path, so it cannot be "
+            f"checked; name a literal path inside {allowed}/ instead."
+        )
         refused = {
             "hookSpecificOutput": {
                 "hookEventName": event,
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
                     f"A lane adds extra worktrees only inside {allowed}/, "
-                    "so the sweep can tell which lane made them; "
-                    f"{stray[0]} is outside it. Run `{stray[1]}` instead. "
+                    f"so the sweep can tell which lane made them; {remedy} "
                     "This is a guard, not an authority boundary."
                 ),
             }
@@ -3452,7 +3983,16 @@ def checkpoint(
     if payload.get("agent_id"):
         record(directory, agent, payload, Reason.OBSERVED, None)
         return {}
-    identity = json.loads((directory / f"{agent}-identity.json").read_text())
+    identity_path = directory / f"{agent}-identity.json"
+    try:
+        identity = json.loads(identity_path.read_text())
+    except ValueError:
+        identity = None
+    if not isinstance(identity, dict) or "name" not in identity:
+        raise BridgeError(
+            f"Lane identity {identity_path} is damaged; run agent-parley "
+            f"run {agent} --resume to register the lane again."
+        )
     state_path = directory / f"{agent}-activity.json"
     context = not record_only and event in CONTEXT_EVENTS
     scanned: dict | Exception = {}
@@ -3473,14 +4013,23 @@ def checkpoint(
             payload,
             lane,
             agent,
+            fold=roster.case_insensitive(manifest),
         )
     stages.enter("lock")
     waits = settle if event in SETTLING or record_only else LOCK_SECONDS
     with lock(directory / f"{agent}-checkpoint.lock", timeout=waits):
         stages.enter("state")
-        state = (
-            json.loads(state_path.read_text()) if state_path.exists() else {}
-        )
+        state, damaged = _lane_state(state_path)
+        if damaged:
+            record(
+                directory,
+                agent,
+                payload,
+                Reason.STATE_UNREADABLE,
+                None,
+                "",
+                damaged,
+            )
         applied = state.get("updated")
         stale = isinstance(applied, (int, float)) and applied > arrived
         if event in SETTLING and stale:
@@ -3669,7 +4218,14 @@ def checkpoint(
                     else {"items": [], "superseded": 0}
                 )
                 danger = (
-                    hazard(payload, lane, agent, mail, issues)
+                    hazard(
+                        payload,
+                        lane,
+                        agent,
+                        mail,
+                        issues,
+                        fold=roster.case_insensitive(manifest),
+                    )
                     if event == "PreToolUse"
                     else None
                 )
@@ -3836,6 +4392,7 @@ def checkpoint(
                             lane,
                             mail,
                             danger,
+                            fold=roster.case_insensitive(manifest),
                         )
                     elif overlap and overlap["filing"]:
                         reason = Reason.FILING_OVERLAP
@@ -3898,6 +4455,7 @@ def checkpoint(
                 payload,
                 lane,
                 *urgent,
+                fold=roster.case_insensitive(manifest),
             )
         if event in RECOVERY_EVENTS and pending is not None:
             pending["recovery"] = True
@@ -4000,7 +4558,17 @@ def deliver(
         return False
     path = directory / f"{agent}-activity.json"
     with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
-        state = json.loads(path.read_text()) if path.exists() else {}
+        state, damaged = _lane_state(path)
+        if damaged:
+            record(
+                directory,
+                agent,
+                {"session_id": pending.get("session_id", "")},
+                Reason.STATE_UNREADABLE,
+                None,
+                "",
+                damaged,
+            )
         if state.get("session_id", "") != pending.get("session_id", ""):
             return False
         current = state.get("updated") == pending.get("updated")
@@ -4088,9 +4656,19 @@ def recover(
     with lock(directory / f"{agent}-checkpoint.lock", timeout=timeout):
         if recovery.stale_session(directory, agent, payload):
             return False
-        if not path.exists():
+        state, damaged = _lane_state(path)
+        if damaged:
+            record(
+                directory,
+                agent,
+                payload,
+                Reason.STATE_UNREADABLE,
+                None,
+                "",
+                damaged,
+            )
+        if damaged or not path.exists():
             return True
-        state = json.loads(path.read_text())
         before = {
             "recovery_checkpoints": state.get("recovery_checkpoints", []),
             "recovery_error": state.get("recovery_error"),
@@ -4133,6 +4711,137 @@ def merge_recovery(waiting: dict, owed: dict) -> dict:
     if earlier is None:
         return owed
     return {**owed, "evidence": earlier}
+
+
+def adapter_module(name: object) -> ModuleType | None:
+    """Imports the provider adapter a lane selected, so only that one loads.
+
+    Args:
+        name: Adapter the hook command line named; anything else is native.
+
+    Returns:
+        The adapter module, or None for the native hook schema.
+    """
+    if name == "gemini":
+        from agent_parley import gemini
+
+        return gemini
+    if name == "copilot":
+        from agent_parley import copilot
+
+        return copilot
+    if name == "opencode":
+        from agent_parley import opencode
+
+        return opencode
+    if name == "amp":
+        from agent_parley import amp
+
+        return amp
+    return None
+
+
+def lane_refusal(
+    directory: Path, agent: str, payload: dict, home: Path | None = None
+) -> tuple[dict, Reason] | None:
+    """Refuses a ``PreToolUse`` call that cannot wait for a full decision.
+
+    The lane comes from the roster alone. A cwd outside the lane is refused
+    as `checkpoint` refuses it, then `static_refusal` runs. With ``home``,
+    the reservation and offer hazards `unscanned_hazard` reads from the
+    store run too; the service's deadline path passes none, because its
+    remaining budget cannot cover a store read.
+
+    Args:
+        directory: Common project state directory.
+        agent: Assigned native lane name.
+        payload: Native ``PreToolUse`` payload.
+        home: Private bridge state root, to also check the hazards.
+
+    Returns:
+        The native denial and its reason, or None when nothing refuses.
+
+    Raises:
+        OSError: If the roster or the identity cannot be read.
+        ValueError: If either holds malformed JSON.
+        KeyError: If the lane record lacks its lane or branch.
+    """
+    manifest = roster.read(directory)
+    participant = manifest["participants"].get(agent)
+    if participant is None or roster.retired(participant):
+        return None
+    lane = Path(participant["lane"]).resolve()
+    cwd = Path(payload.get("cwd", str(lane))).resolve()
+    if not cwd.is_relative_to(lane):
+        if returned := lane_return(payload, cwd, lane):
+            payload = {**payload, "cwd": str(returned)}
+        elif outside := outside_lane_output("PreToolUse", cwd, lane):
+            return outside, Reason.OUTSIDE_LANE
+        else:
+            return None
+    if refused := static_refusal(payload, lane, participant["branch"]):
+        return refused
+    if home is None:
+        return None
+    name = json.loads((directory / f"{agent}-identity.json").read_text())[
+        "name"
+    ]
+    fold = roster.case_insensitive(manifest)
+    urgent = unscanned_hazard(
+        home,
+        directory,
+        manifest["root"],
+        name,
+        payload,
+        lane,
+        agent,
+        fold=fold,
+    )
+    if urgent is None:
+        return None
+    denial = hazard_denial(
+        home, manifest["root"], name, payload, lane, *urgent, fold=fold
+    )
+    return denial, urgent[1][0]
+
+
+def deadline_refusal(request: dict) -> dict | None:
+    """Answers a tool call whose decision missed the service's deadline.
+
+    The service answers an unfinished decision with `hook.DECIDING`, which
+    the client reads as an allow. A ``PreToolUse`` call that `lane_refusal`
+    refuses without Git or the store is refused instead, so only the
+    coordination context is lost on a deadline, never a guard. Nothing is
+    recorded here: the abandoned decision still runs the same guards and
+    records the refusal when it finishes.
+
+    Args:
+        request: Hook request as `serve` takes it.
+
+    Returns:
+        ``status``, ``stdout`` and ``stderr`` carrying the denial, or None
+        when no guard refuses or the lane cannot be read.
+    """
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        adapter = adapter_module(request.get("adapter"))
+        if adapter is not None:
+            payload = adapter.payload(payload)
+        if payload.get("hook_event_name") != "PreToolUse":
+            return None
+        refused = lane_refusal(
+            Path(str(request.get("directory", ""))),
+            str(request.get("participant", "")),
+            payload,
+        )
+    except (OSError, ValueError, KeyError, TypeError, BridgeError):
+        return None
+    if refused is None:
+        return None
+    output = adapter.response(refused[0]) if adapter else refused[0]
+    return {"status": 0, "stdout": json.dumps(output) + "\n", "stderr": ""}
 
 
 def serve(
@@ -4209,14 +4918,7 @@ def serve(
     try:
         if not isinstance(payload, dict):
             raise ValueError("Expected a hook object")
-        if request.get("adapter") == "gemini":
-            from agent_parley import gemini as adapter
-        elif request.get("adapter") == "copilot":
-            from agent_parley import copilot as adapter
-        elif request.get("adapter") == "opencode":
-            from agent_parley import opencode as adapter
-        elif request.get("adapter") == "amp":
-            from agent_parley import amp as adapter
+        adapter = adapter_module(request.get("adapter"))
         if adapter is not None:
             payload = adapter.payload(payload)
         if not protocol.compatible(declared):
@@ -4359,17 +5061,110 @@ def _hook_pid() -> int:
     return value if value > 1 else os.getpid()
 
 
+def kept_fields(raw: str) -> dict:
+    """Reads the small fields of a payload too large to parse whole.
+
+    Each field in `KEPT_FIELDS`, `PATH_FIELDS` and `COMMAND_FIELDS` is
+    taken from its first complete JSON string in the kept text. The native
+    payload names them before the large content, and a quote inside a JSON
+    string is always escaped, so a key never matches inside a value. A
+    string the bound cut off is left out.
+
+    Args:
+        raw: Payload text that was kept, at most `hook.MAX_INPUT_BYTES`.
+
+    Returns:
+        A hook payload of the fields found, the tool's under
+        ``tool_input``.
+    """
+    payload: dict = {}
+    tool_input: dict = {}
+    for key in (*KEPT_FIELDS, *PATH_FIELDS, *COMMAND_FIELDS):
+        found = re.search(rf'"{key}"\s*:\s*("[^"\\]*(?:\\.[^"\\]*)*")', raw)
+        if found is None:
+            continue
+        try:
+            value = json.loads(found.group(1))
+        except ValueError:
+            continue
+        target = payload if key in KEPT_FIELDS else tool_input
+        target[key] = value
+    if tool_input:
+        payload["tool_input"] = tool_input
+    return payload
+
+
+def oversize_refusal(
+    home: Path,
+    directory: Path,
+    agent: str,
+    raw: str,
+    adapter: ModuleType | None,
+) -> dict | None:
+    """Runs the tool call guards that need only a payload's small fields.
+
+    A command the bound cut off cannot be parsed for the branch,
+    worktree, attribution and budget guards, so it is refused with the
+    remedy of running it from a script file. A call whose path and
+    command survived goes through `lane_refusal`, so a write into a peer's
+    reservation or a guarded command is refused as a readable call is.
+
+    Args:
+        home: Private bridge state root.
+        directory: Common project state directory.
+        agent: Assigned native lane name.
+        raw: Payload text that was kept, at most `hook.MAX_INPUT_BYTES`.
+        adapter: Provider adapter the lane selected, or None for native.
+
+    Returns:
+        Native hook output denying the call, or None to allow it.
+    """
+    fields = kept_fields(raw)
+    try:
+        payload = adapter.payload(fields) if adapter else fields
+        if payload.get("hook_event_name") != "PreToolUse":
+            return None
+        found = fields.get("tool_input", {})
+        if not any(key in found for key in COMMAND_FIELDS) and re.search(
+            r'"(?:command|cmd)"\s*:\s*"', raw
+        ):
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "Agent Parley cannot check a command larger than "
+                        f"{hook.MAX_INPUT_BYTES} characters. Write it to a "
+                        "script file and run that."
+                    ),
+                }
+            }
+        refused = lane_refusal(directory, agent, payload, home)
+    except (OSError, ValueError, KeyError, TypeError, BridgeError):
+        return None
+    return refused[0] if refused else None
+
+
 def unreadable(
-    directory: Path, agent: str, raw: str, size: int, cause: Exception
+    directory: Path,
+    agent: str,
+    raw: str,
+    size: int,
+    cause: Exception,
+    home: Path | None = None,
+    adapter: ModuleType | None = None,
 ) -> int:
-    """Allows a native event whose payload could not be read, and records it.
+    """Decides a native event whose payload could not be read, and records it.
 
     A payload past `hook.MAX_INPUT_BYTES`, as a ``Write`` of a large file
-    carries, or one that is not a JSON hook object, cannot be decided. It
-    is observed and allowed rather than denied: a denial would refuse the
-    same call on every retry, and no coordination rule needs the content
-    of a file being written. The event name is read from the text that was
-    kept, which precedes the tool input in the native payload.
+    carries, or one that is not a JSON hook object, cannot be decided in
+    full. It is observed and allowed rather than denied: a denial would
+    refuse the same call on every retry, and no coordination rule needs the
+    content of a file being written. A tool call past the bound with
+    ``home`` is the exception: `oversize_refusal` still runs the guards
+    its small fields allow, so its size never skips them. The event name
+    is read from the text that was kept, which precedes the tool input in
+    the native payload.
 
     Args:
         directory: Common project state directory.
@@ -4377,9 +5172,11 @@ def unreadable(
         raw: Payload text that was kept, at most `hook.MAX_INPUT_BYTES`.
         size: Characters the payload held in full.
         cause: Why the payload could not be decided.
+        home: Private bridge state root, to guard an oversize tool call.
+        adapter: Provider adapter the lane selected, or None for native.
 
     Returns:
-        Exit status 0, after writing an empty decision.
+        Exit status 0, after writing the decision.
     """
     found = re.search(r'"hook_event_name"\s*:\s*"([A-Za-z]{1,64})"', raw)
     event = found.group(1) if found else ""
@@ -4389,9 +5186,24 @@ def unreadable(
         else Reason.UNREADABLE_PAYLOAD
     )
     detail = f"{event or 'unnamed'} payload of {size} characters: {cause}"
-    record(directory, agent, {"hook_event_name": event}, reason, {}, "", detail)
-    sys.stdout.write("{}\n")
-    sys.stderr.write(f"Agent Parley checkpoint skipped: {detail}\n")
+    refused = None
+    if reason is Reason.OVERSIZE_PAYLOAD and home is not None:
+        refused = oversize_refusal(home, directory, agent, raw, adapter)
+    record(
+        directory,
+        agent,
+        {"hook_event_name": event},
+        reason,
+        refused or {},
+        "",
+        detail,
+    )
+    if refused is None:
+        sys.stdout.write("{}\n")
+        sys.stderr.write(f"Agent Parley checkpoint skipped: {detail}\n")
+        return 0
+    output = adapter.response(refused) if adapter else refused
+    sys.stdout.write(json.dumps(output) + "\n")
     return 0
 
 
@@ -4432,7 +5244,15 @@ def main(fallback: str = "", size: int = 0) -> int:
         if not isinstance(payload, dict):
             raise ValueError("not a hook object")
     except (ValueError, RecursionError) as exc:
-        return unreadable(args.directory, args.participant, raw, size, exc)
+        return unreadable(
+            args.directory,
+            args.participant,
+            raw,
+            size,
+            exc,
+            args.home,
+            adapter_module(args.adapter),
+        )
     served = serve(
         args.home,
         {
