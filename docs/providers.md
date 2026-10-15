@@ -46,7 +46,7 @@ checkpoint, so `agent-parley top` reports its delivered context in `CONTEXT`.
 | Task handed over | positional, interactive | positional, interactive | `-p` | `--prompt-interactive` | `--prompt` | refused before launch |
 | Resume argument | `--resume ID` | `resume ID` | `--resume ID` | `--resume ID` | `--session ID` | `threads continue ID` |
 | Rotation to a fresh session | yes | yes | yes | yes | yes | n/a |
-| Service-resume opt-ins applied | yes | no | no | no | no | n/a |
+| Service-resume opt-ins applied | yes | yes (0.153.0+) | yes | yes | yes | no |
 | Refused-tool event | `PermissionDenied` | none | none | none | none | none |
 | Blocked-on-approval source | hook | hook | hook | dialog watcher | hook | dialog watcher |
 | Removed by `participant retire` | `-mcp.json` | nothing to remove | the lane's hooks in the profile, and the MCP entry once no lane hook remains | overlay file | overlay directory | overlay file |
@@ -73,7 +73,10 @@ disk, under the config home the lane launched with. No vendor is asked.
   `~/.copilot`). The event carries the session total across resumes, and
   Parley sums its input and output tokens over every model. Copilot CLI
   keeps per-call usage only in its live event stream, so a session that is
-  still running reads 0 until it ends.
+  still running reads 0 until it ends. A token limit therefore cannot stop a
+  running `copilot` lane: setting one warns that the lane reports tokens only
+  at session end, and `budget enforce --tokens` refuses unless
+  `--allow-unmeasured` is given, as it does for `amp`.
 - `gemini` reads `tokens.total` of each `gemini` message in the chat logs
   under `.gemini/tmp/<project>/chats` in `GEMINI_CLI_HOME` (default `~`).
   The project directory comes from `.gemini/projects.json`. A message that
@@ -310,6 +313,12 @@ resolves a provider's executable on `PATH`, so an alias such as
 be passed to `--provider`. A credential profile expresses exactly what that
 alias expresses, because the launch sets the provider's configuration-home
 variable to the profile's directory.
+
+`run` checks for that executable before it registers anything. When the
+provider's CLI is not on `PATH`, the launch is refused with no lane added to
+the roster and no worktree or branch created, and the refusal's `next:` line
+is the same `agent-parley run` command to repeat once the CLI is installed and
+signed in.
 
 Removing a definition leaves participant references intact. Redefine that name
 before relaunching a lane that uses it. A removed provider override immediately

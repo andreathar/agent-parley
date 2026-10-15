@@ -1,5 +1,6 @@
 """Observes lane availability and reminds holders about waiting peers."""
 
+import ast
 import contextlib
 import contextvars
 import copy
@@ -32,6 +33,7 @@ from agent_parley import (
     lifecycle,
     notify,
     process,
+    protocol,
     reclaim,
     records,
     recovery,
@@ -77,9 +79,14 @@ DEFAULTS: dict[str, Any] = {
     "ci_rounds": 2,
     "fold_after": 86400,
     "forge_skip_labels": list(issues.FORGE_SKIP_LABELS),
+    "max_load_ratio": 1.5,
+    "min_available_mib": 1024,
 }
 
 MAX_COMPLETION_REMINDERS = 100
+MAX_LOAD_RATIO = 1000
+MAX_AVAILABLE_MIB = 1048576
+HOST_LOADED = "busy:host load"
 MAX_CI_ROUNDS = 100
 MAX_CLAIMS_PER_LANE = 100
 MAX_CONVERGENCE_REPEATS = 100
@@ -247,6 +254,16 @@ def settings(value: dict) -> dict:
     if type(rounds) is not int or not 1 <= rounds <= MAX_CI_ROUNDS:
         raise BridgeError(
             f"ci_rounds must be between 1 and {MAX_CI_ROUNDS} rounds."
+        )
+    ratio = result["max_load_ratio"]
+    if type(ratio) not in (int, float) or not 0 < ratio <= MAX_LOAD_RATIO:
+        raise BridgeError(
+            f"max_load_ratio must be above 0 and at most {MAX_LOAD_RATIO}."
+        )
+    floor = result["min_available_mib"]
+    if type(floor) is not int or not 0 <= floor <= MAX_AVAILABLE_MIB:
+        raise BridgeError(
+            f"min_available_mib must be between 0 and {MAX_AVAILABLE_MIB} MiB."
         )
     for field in (
         "prompts",
@@ -2620,6 +2637,40 @@ def _first_untaken(available: list[str], taken: set[str]) -> list[str]:
     return available
 
 
+def _shared_claims(
+    directory: Path, manifest: dict, pool: dict, available: list[str]
+) -> dict[str, list[dict]]:
+    """Names the live claims the top free issues share forecast paths with.
+
+    The reading is the one `agent-parley issue next` takes through
+    `recommend.sharing`, made once per poll, so `work` and the wake that
+    derives the offer again read the same answer and the forge is asked
+    at most once for it.
+
+    Args:
+        directory: Private project state directory holding the cache.
+        manifest: Current participant manifest.
+        pool: Issue ledger with the open forge issues added.
+        available: Unclaimed and unblocked issues, best first.
+
+    Returns:
+        Live claims per candidate, as `recommend.sharing` reports them.
+    """
+    from agent_parley import forecast, recommend
+
+    root = str(manifest["root"])
+
+    def measure() -> dict[str, list[dict]]:
+        """Reads candidate and claim paths and compares them."""
+        looked = recommend.candidate_paths(Path(root), available)
+        commits = forecast.history(root, directory) if looked else []
+        return recommend.sharing(
+            pool, looked, commits, Path(root), store.overlapping
+        )
+
+    return _once_per_poll(("shared_claims", *available), measure)
+
+
 def _pull_text(available: list[str], busy: list[str]) -> str:
     """Describes the work an idle lane could take from the ledger."""
     parts = ["Work offer. You hold no claim and no fit check found a blocker."]
@@ -2715,6 +2766,7 @@ def _idle_leads(
     ledger: dict,
     after: float,
     taken: set[str] | None = None,
+    shared: dict[str, list[dict]] | None = None,
 ) -> dict | None:
     """Gathers the next work for a lane whose held claims cannot move.
 
@@ -2749,6 +2801,9 @@ def _idle_leads(
         ledger: Current issue ledger.
         after: Claim idle interval a peer claim must pass without progress.
         taken: Issues already named to another lane in this sweep.
+        shared: Live claims per candidate, as `_shared_claims` reports
+            them, so work on this lane's own claims' files ranks first and
+            work on another lane's is held back.
 
     Returns:
         The mail senders with their message identifiers, the top candidate
@@ -2782,6 +2837,8 @@ def _idle_leads(
                 {},
                 str(participant.get("provider", "")),
                 len(taken) + 1,
+                shared=shared,
+                lane=name,
             )
         ],
         taken,
@@ -3233,7 +3290,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         manifest: Current participant manifest.
         config: Resolved supervision settings.
     """
-    from agent_parley import recovery
+    from agent_parley import recommend, recovery
 
     after = config["stalled_after"]
     ledger = issues.snapshot(directory)
@@ -3290,6 +3347,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         home, directory, manifest, results, stretches, owned, ledger, config
     )
     taken: set[str] = set()
+    shared = _shared_claims(directory, manifest, pool, available)
     for name in sorted(serving):
         result = results[name]
         offer = _work_offer(
@@ -3297,7 +3355,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             results,
             stretches,
             owned,
-            _first_untaken(available, taken),
+            _first_untaken(recommend.for_lane(available, shared, name), taken),
             pool,
             after,
             recipients,
@@ -3309,6 +3367,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                 pool,
                 config["claim_idle_after"],
                 taken,
+                shared,
             ),
         )
         if offer and offer.get("lead"):
@@ -3841,6 +3900,315 @@ def end_merged_claims(
             )
             resolved.append(number)
     return resolved
+
+
+SYMBOL_FILES = 20
+SYMBOL_NAMES = 20
+SYMBOL_PENDING_SECONDS = 86400.0
+SCRIPT_DEFINITION = (
+    r"(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?:function\*?|class|const|let|var|interface|type|enum)\s+"
+    r"([A-Za-z_$][\w$]*)"
+)
+TOP_LEVEL_DEFINITIONS = {
+    suffix: re.compile(pattern)
+    for suffix, pattern in {
+        ".go": r"(?:func(?:\s*\([^)]*\))?|type|var|const)\s+([A-Za-z_]\w*)",
+        ".rs": (
+            r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
+            r"(?:fn|struct|enum|trait|type|const|static|mod)\s+"
+            r"([A-Za-z_]\w*)"
+        ),
+        **dict.fromkeys(
+            (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"), SCRIPT_DEFINITION
+        ),
+    }.items()
+}
+HUNK = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_symbol_merges: dict[tuple[str, str], tuple[float, dict]] = {}
+_symbol_reads: set[tuple[str, str]] = set()
+
+
+def _signatures(source: str) -> dict[str, str]:
+    """Reads the signature of each definition a Python module declares.
+
+    Module-level and class-level `def` and `class` statements are read;
+    one nested in a function body is local and no other file names it. A
+    function's signature is its parameters and return annotation, and a
+    class's is its bases and keywords, so a body edit is not a change a
+    caller sees.
+
+    Args:
+        source: Module text. Text that does not parse declares nothing.
+
+    Returns:
+        Signature text keyed by qualified name, such as ``Session.login``.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    found: dict[str, str] = {}
+    scopes: list[tuple[str, list[ast.stmt]]] = [("", tree.body)]
+    while scopes:
+        prefix, body = scopes.pop()
+        for node in body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                found[prefix + node.name] = ast.dump(node.args) + (
+                    ast.dump(node.returns) if node.returns else ""
+                )
+            elif isinstance(node, ast.ClassDef):
+                found[prefix + node.name] = "".join(
+                    ast.dump(item) for item in [*node.bases, *node.keywords]
+                )
+                scopes.append((f"{prefix}{node.name}.", node.body))
+    return found
+
+
+def _diff_lines(text: str) -> list[tuple[str, str, int, str]]:
+    """Splits a zero-context unified diff into its changed lines.
+
+    Args:
+        text: Output of `git diff --no-prefix -U0`.
+
+    Returns:
+        One ``(sign, path, line, text)`` per changed line: ``-`` lines carry
+        the old path and line number, ``+`` lines the new ones.
+    """
+    lines = []
+    header = False
+    old_path = new_path = ""
+    old = new = 0
+    for line in text.splitlines():
+        hunk = HUNK.match(line)
+        if line.startswith("diff "):
+            header = True
+        elif header and line.startswith("--- "):
+            old_path = line[4:].split("\t")[0]
+        elif header and line.startswith("+++ "):
+            new_path = line[4:].split("\t")[0]
+        elif hunk:
+            header = False
+            old, new = int(hunk[1]), int(hunk[2])
+        elif not header and line.startswith("-"):
+            lines.append(("-", old_path, old, line[1:]))
+            old += 1
+        elif not header and line.startswith("+"):
+            lines.append(("+", new_path, new, line[1:]))
+            new += 1
+    return lines
+
+
+def merged_definitions(root: str, commit: str) -> list[tuple[str, str]]:
+    """Names the definitions a merged commit changed against its parent.
+
+    Python files are read through `ast` before and after the merge: a
+    definition the merge removed, renamed or gave another signature is
+    changed. A file whose extension has a pattern in
+    `TOP_LEVEL_DEFINITIONS` contributes each top-level identifier that
+    pattern matches on a line the merge removed, which is what a rename or
+    a signature edit leaves. Any other file contributes nothing. The first
+    `SYMBOL_FILES` such files are read and the first `SYMBOL_NAMES` names
+    kept, so one large merge costs a bounded reading.
+
+    Args:
+        root: Base checkout holding the merge commit.
+        commit: Merge commit; its first parent is the base before the merge.
+
+    Returns:
+        ``(name, path)`` pairs, empty when Git could not answer.
+    """
+    paths = [
+        path
+        for path in _changed(root, f"{commit}^", commit)
+        if path.endswith(".py") or Path(path).suffix in TOP_LEVEL_DEFINITIONS
+    ][:SYMBOL_FILES]
+    found: dict[str, str] = {}
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        before = _signatures(_read(root, "show", f"{commit}^:{path}") or "")
+        after = _signatures(_read(root, "show", f"{commit}:{path}") or "")
+        for name, signature in before.items():
+            if after.get(name) != signature:
+                found.setdefault(name, path)
+    patterned = {path for path in paths if not path.endswith(".py")}
+    if patterned:
+        diff = _read(
+            root,
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--no-prefix",
+            "-U0",
+            f"{commit}^",
+            commit,
+        )
+        for sign, path, _, text in _diff_lines(diff or ""):
+            pattern = TOP_LEVEL_DEFINITIONS.get(Path(path).suffix)
+            match = (
+                pattern.match(text)
+                if pattern and sign == "-" and path in patterned
+                else None
+            )
+            if match:
+                found.setdefault(match[1], path)
+    return list(found.items())[:SYMBOL_NAMES]
+
+
+def lane_references(
+    lane: str, commit: str, names: list[str]
+) -> dict[str, tuple[str, int]]:
+    """Finds where a lane's own diff names each of some symbols.
+
+    The lane's diff is its worktree, committed or not, against the point
+    its branch forked from the merge commit's history, so the merged
+    change itself is never read as the lane's. Only added lines count,
+    and a name matches as a whole identifier: the bare name, so a method
+    ``Session.login`` matches ``login``.
+
+    Args:
+        lane: Lane worktree.
+        commit: Merge commit the lane is compared with.
+        names: Names `merged_definitions` reported.
+
+    Returns:
+        The first ``(path, line)`` in the lane's diff per name it names.
+    """
+    fork = _read(lane, "merge-base", "HEAD", commit)
+    if not fork:
+        return {}
+    diff = _read(
+        lane,
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "--no-prefix",
+        "-U0",
+        fork,
+    )
+    patterns = {
+        name: re.compile(
+            rf"(?<![\w$]){re.escape(name.rsplit('.', 1)[-1])}(?![\w$])"
+        )
+        for name in names
+    }
+    found: dict[str, tuple[str, int]] = {}
+    for sign, path, line, text in _diff_lines(diff or ""):
+        if sign != "+":
+            continue
+        for name, pattern in patterns.items():
+            if name not in found and pattern.search(text):
+                found[name] = (path, line)
+    return found
+
+
+def symbol_notices(
+    home: Path, directory: Path, manifest: dict, ended: dict[str, dict]
+) -> list[tuple[str, str]]:
+    """Mails a lane when a merged change alters a symbol its diff names.
+
+    Every other overlap signal keys on a shared path, so a lane editing a
+    caller of a function a peer just changed in another file heard
+    nothing. Each pull request `completed_claims` observed merged, with its
+    merge commit, is read once through `merged_definitions`. Every lane
+    that is not retired, did not land it and does not own the claim it
+    closed is then searched through `lane_references`, and each hit sends
+    that lane one message naming the pull request, the symbol and the file
+    and line in its own diff. The idempotency key is the pull request,
+    symbol and lane, so the lane hears of each pair once.
+
+    A merge commit the base checkout has not fetched yet is kept for
+    `SYMBOL_PENDING_SECONDS` and read once it arrives. The notice is
+    advisory and says the change may affect the lane, since a name match
+    can be a false positive; nothing is refused, rebased or changed.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        ended: This poll's forge observations from `completed_claims`.
+
+    Returns:
+        ``(lane, symbol)`` for each message delivered or already delivered.
+    """
+    root = str(manifest["root"])
+    now = time.time()
+    owners = (
+        {
+            number: str(record.get("owner") or "")
+            for number, record in issues.snapshot(directory)["issues"].items()
+        }
+        if ended
+        else {}
+    )
+    for number, seen in ended.items():
+        key = (root, str(seen.get("commit") or ""))
+        if (
+            seen.get("state") != "MERGED"
+            or not seen.get("pull_request")
+            or not lifecycle.COMMIT.fullmatch(key[1])
+            or key in _symbol_reads
+            or key in _symbol_merges
+        ):
+            continue
+        merged_by = [owners.get(number, ""), str(seen.get("landed_by") or "")]
+        _symbol_merges[key] = (now, {**seen, "merged_by": merged_by})
+    sent: list[tuple[str, str]] = []
+    for key, (since, seen) in list(_symbol_merges.items()):
+        if key[0] != root:
+            continue
+        commit = key[1]
+        if _read(root, "cat-file", "-e", f"{commit}^{{commit}}") is None:
+            if now - since > SYMBOL_PENDING_SECONDS:
+                _symbol_merges.pop(key, None)
+            continue
+        _symbol_merges.pop(key, None)
+        _symbol_reads.add(key)
+        definitions = merged_definitions(root, commit)
+        if not definitions:
+            continue
+        number = seen["pull_request"]
+        link = f"#{number} {seen.get('url') or ''}".strip()
+        base = seen.get("base") or "the base branch"
+        for name, participant in manifest["participants"].items():
+            if (
+                name in seen["merged_by"]
+                or participant.get("branch") == seen.get("branch")
+                or roster.retired(participant)
+            ):
+                continue
+            hits = lane_references(
+                str(participant["lane"]),
+                commit,
+                [symbol for symbol, _ in definitions],
+            )
+            display = participant["display"]
+            for symbol, path in definitions:
+                if symbol not in hits:
+                    continue
+                where = f"{hits[symbol][0]}:{hits[symbol][1]}"
+                digest = hashlib.sha256(
+                    f"{root}\x00{number}\x00{symbol}\x00{display}".encode()
+                ).hexdigest()[:32]
+                with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+                    store.speak(
+                        home,
+                        root,
+                        display,
+                        f"Merged #{number} may affect {symbol} in your diff",
+                        f"Pull request {link} merged into {base} and changed "
+                        f"the definition of {symbol} in {path}. Your diff "
+                        f"names it at {where}, so the change may affect your "
+                        "work. This is a name match and can be a false "
+                        "positive: check that use before you merge. Nothing "
+                        "was refused, rebased or changed for you.",
+                        f"symbol:{digest}",
+                    )
+                    sent.append((name, symbol))
+    return sent
 
 
 def deadline_notices(directory: Path, manifest: dict) -> None:
@@ -8324,6 +8692,7 @@ def _poll(home: Path, directory: Path) -> None:
         manifest,
         config,
     )
+    stage("stale plugins", stale_plugins, home, directory, manifest, config)
     stage("dependencies", lifecycle.settle_dependencies, directory)
     stage(
         "forge issues",
@@ -8844,6 +9213,7 @@ def _remind(
         ),
     )
     ended = read[0] if read else {}
+    stage("symbol notices", symbol_notices, home, directory, manifest, ended)
     stage(
         "forge completions",
         end_merged_claims,
@@ -9006,6 +9376,8 @@ def _work_backlog(
     Returns:
         Backlog key and offer, or None when no actionable offer is published.
     """
+    from agent_parley import recommend
+
     offer = record.get("offer") or {}
     dispatch = record.get("dispatch") or {}
     if not config["prompts"] or not offer.get("id") or not dispatch:
@@ -9033,6 +9405,7 @@ def _work_backlog(
         peer: idle_seconds(directory, peer) for peer in manifest["participants"]
     }
     free = lifecycle.actionable(pool)
+    shared = _shared_claims(directory, manifest, pool, free)
     leads = _idle_leads(
         home,
         directory,
@@ -9041,13 +9414,14 @@ def _work_backlog(
         pool,
         config["claim_idle_after"],
         taken,
+        shared,
     )
     current = _work_offer(
         name,
         results,
         stretches,
         owned,
-        _first_untaken(free, taken),
+        _first_untaken(recommend.for_lane(free, shared, name), taken),
         pool,
         config["stalled_after"],
         share_recipients(
@@ -9895,6 +10269,11 @@ def wake(
     never escalates the lane; the backlog waits until the operator records
     the opt-in with `approval resume` or resumes the lane, and only the
     first such refusal is written to the checkpoint history.
+    A resume also takes one `process.host_load` reading first. A host past
+    the project's ``max_load_ratio`` or below its ``min_available_mib`` is
+    not given another lane: the attempt is recorded as `HOST_LOADED` with
+    the numbers, a busy refusal that spends no attempt, and the launch is
+    deferred to a later poll instead of refused.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
     lane; waking only asks the lane to take its own turn.
 
@@ -10136,33 +10515,18 @@ def wake(
             ):
                 if opt_in_missing(home, manifest, name):
                     result = OPT_IN_MISSING
+                elif loaded := process.overloaded(
+                    process.host_load(),
+                    config["max_load_ratio"],
+                    config["min_available_mib"],
+                ):
+                    result = f"{HOST_LOADED}: {loaded}"
                 elif (
                     prompt := terminal.selected_prompt(directory, name, home)
                 ) is None:
                     result = "busy:stale"
                 else:
-                    with (directory / f"{name}-wake.log").open("ab") as output:
-                        child = subprocess.Popen(
-                            [
-                                sys.executable,
-                                "-m",
-                                "agent_parley.cli",
-                                "--home",
-                                str(home),
-                                "run",
-                                name,
-                                "--repo",
-                                manifest["root"],
-                                "--resume",
-                                "--task",
-                                prompt,
-                            ],
-                            stdin=subprocess.DEVNULL,
-                            stdout=output,
-                            stderr=output,
-                            start_new_session=True,
-                        )
-                    track_launcher(child)
+                    child = _resume(home, directory, manifest, name, prompt)
                     result = f"resume requested (launcher {child.pid})"
         probe_exhaustion(directory, name, result)
         gap = result == OPT_IN_MISSING
@@ -10219,6 +10583,194 @@ def wake(
         )
 
 
+def _resume(
+    home: Path, directory: Path, manifest: dict, name: str, task: str = ""
+) -> subprocess.Popen[bytes]:
+    """Starts a detached launcher that resumes one lane's recorded session.
+
+    The launcher is this package's own ``run --resume``, so the lane keeps
+    its native authentication and permissions, and its output goes to the
+    lane's wake log.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant whose lane is resumed.
+        task: Prompt the resumed session starts on, or none.
+
+    Returns:
+        The tracked launcher process.
+    """
+    command = [
+        sys.executable,
+        "-m",
+        "agent_parley.cli",
+        "--home",
+        str(home),
+        "run",
+        name,
+        "--repo",
+        manifest["root"],
+        "--resume",
+    ]
+    if task:
+        command += ["--task", task]
+    with (directory / f"{name}-wake.log").open("ab") as output:
+        child = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=output,
+            start_new_session=True,
+        )
+    track_launcher(child)
+    return child
+
+
+def _idle(home: Path, root: str, name: str, state: dict) -> bool:
+    """Reports whether a lane is idle with no turn in flight.
+
+    The lane condition decides; the activity label stands in only when no
+    condition was recorded.
+
+    Args:
+        home: Private bridge state root.
+        root: Repository root the lane belongs to.
+        name: Lane participant name.
+        state: The lane's activity record.
+
+    Returns:
+        True when the lane is idle.
+    """
+    seen = condition(home, root, name) or {}
+    return (seen.get("state") or state.get("activity")) == lanes.IDLE
+
+
+def stale_plugins(
+    home: Path, directory: Path, manifest: dict, config: dict
+) -> list[str]:
+    """Restarts unattended lanes whose session loaded a replaced plugin.
+
+    A running native session cannot reload its hooks and skills, so a lane
+    launched before an upgrade keeps the old plugin until it restarts. The
+    hook tells every such lane to finish its step and resume; a lane whose
+    launcher has no terminal, which the service resumes and nobody types
+    in, is restarted here instead so a headless estate converges without
+    an operator. A lane is restarted only when its activity record names a
+    ``plugin_version`` other than the launcher's, `plugins.repair` recorded
+    a successful refresh of its config home for this launcher, its session
+    is alive and idle with no turn in flight, and the service would resume
+    it at all: wakes are on, it is neither paused, retired, stopped by the
+    operator nor waiting on a bridge tool opt-in, it has a resumable
+    session no takeover fenced, and its provider is a native adapter that
+    needs no extra environment. These are the checks the wake path makes
+    before a resume, so no lane is ended that ``run --resume`` cannot bring
+    back. A lane with a terminal is never restarted, because its operator's
+    session must not vanish under them. Under the lane's checkpoint lock
+    the activity record is read again, and the lane is skipped unless the
+    same session process is still idle. The stop runs after the lock is
+    released, because the ending session's own hooks take that lock and
+    would hold its exit past the shutdown timeout. The session is ended
+    through the same verified stop `participant stop` uses, whose start
+    identity check refuses a replaced process, and resumed with
+    ``run --resume``. The
+    launcher version is recorded as ``plugin_restart`` before the stop, so
+    a lane is restarted at most once per launcher version even if its new
+    session still loads an old plugin.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+
+    Returns:
+        The lanes this pass restarted, in name order.
+    """
+    from agent_parley import checkpoints, plugins
+
+    recorded = plugins.repairs(home) if config["wake"] else {}
+    if not recorded:
+        return []
+    launcher = protocol.launcher_version()
+    restarted = []
+    for name in sorted(manifest["participants"]):
+        participant = manifest["participants"][name]
+        if (
+            not participant.get("wake", True)
+            or participant.get("paused", False)
+            or roster.retired(participant)
+        ):
+            continue
+        state = checkpoints.activity(directory, name)
+        loaded, aged = protocol.lane_plugin(state)
+        if (
+            not aged
+            or state.get("attached") is not False
+            or state.get("operator_stopped")
+            or state.get("plugin_restart") == launcher
+            or rebooted(state)
+        ):
+            continue
+        repair = plugins.lane_repair(home, participant, recorded)
+        if (
+            repair.get("state") != plugins.REPAIRED
+            or repair.get("launcher") != launcher
+        ):
+            continue
+        if not _idle(home, manifest["root"], name, state):
+            continue
+        session = str(
+            state.get("resumable_session", state.get("session_id")) or ""
+        )
+        entry = roster.provider(home, participant["provider"])
+        if (
+            not session
+            or _fenced(directory, name, state)
+            or entry["adapter"] not in roster.ADAPTERS
+            or entry.get("require_env")
+        ):
+            continue
+        pid = state.get("session_pid")
+        ticks = str(state.get("session_ticks") or "")
+        if (
+            type(pid) is not int
+            or not process.alive(pid, ticks)
+            or opt_in_missing(home, manifest, name)
+        ):
+            continue
+        try:
+            with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+                current = checkpoints.activity(directory, name)
+                if (
+                    current.get("session_pid") != pid
+                    or str(current.get("session_ticks") or "") != ticks
+                    or not _idle(home, manifest["root"], name, current)
+                ):
+                    continue
+                current.update(plugin_restart=launcher)
+                write_json(directory / f"{name}-activity.json", current)
+            process.ServerProcess(pid, ticks).stop()
+        except (BridgeError, OSError) as exc:
+            issues.note_supervision_error(
+                directory, f"plugin restart {name}: {exc}"
+            )
+            continue
+        child = _resume(home, directory, manifest, name)
+        checkpoints.record(
+            directory,
+            name,
+            {"hook_event_name": "RuntimeWake"},
+            checkpoints.Reason.WAKE_REQUESTED,
+            None,
+            f"plugin {loaded} replaced by {launcher}: resume requested "
+            f"(launcher {child.pid})",
+        )
+        restarted.append(name)
+    return restarted
+
+
 def run(home: Path, stopped: threading.Event) -> None:
     """Runs bounded project polls until the local service stops.
 
@@ -10237,11 +10789,19 @@ def run(home: Path, stopped: threading.Event) -> None:
 
     Once at start and then every `PRUNE_INTERVAL` seconds the store drops
     settled rows past its retention window through `store.prune`.
+
+    Once at start and then once per default poll interval, every installed
+    plugin older than this launcher is refreshed through `plugins.repair`.
+    A service starts after every upgrade, because a moved package restarts
+    it, so the first pass repairs the plugin without an operator command.
+    `up` does not repeat the call: the service it starts runs this pass at
+    once, and two installs into one CLI home at the same time would race.
     """
-    from agent_parley import server
+    from agent_parley import plugins, server
 
     deadlines: dict[Path, float] = {}
     pruned: float | None = None
+    repaired: float | None = None
     while not stopped.is_set():
         if pruned is None or time.monotonic() >= pruned:
             try:
@@ -10249,6 +10809,13 @@ def run(home: Path, stopped: threading.Event) -> None:
             except Exception as exc:
                 server.log(home, "supervision", failure("prune store", exc))
             pruned = time.monotonic() + PRUNE_INTERVAL
+        if repaired is None or time.monotonic() >= repaired:
+            try:
+                for line in plugins.repair(home):
+                    server.log(home, "plugins", line)
+            except Exception as exc:
+                server.log(home, "supervision", failure("repair plugins", exc))
+            repaired = time.monotonic() + DEFAULTS["interval"]
         for path in (home / "projects").glob("*/project.json"):
             if stopped.is_set():
                 return

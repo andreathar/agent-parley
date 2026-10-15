@@ -90,6 +90,7 @@ INTEGRATION = "integration unverified"
 UNATTENDED = "unattended integration failed"
 ROOT = "root missing"
 ROOT_RETURNED = "root returned"
+PLUGIN = "plugin stale"
 ESCALATED = "escalated plan revision"
 PROPOSED = "plan revisions pending"
 RUN_BUDGET = "run budget exhausted"
@@ -1782,6 +1783,100 @@ def _returned_rows(
     ]
 
 
+def _plugin_rows(
+    home: Path, directory: Path, data: dict, project: dict, now: float
+) -> list[dict]:
+    """Reports live lanes still running a plugin the service has replaced.
+
+    A native CLI reads its plugin when a session starts, so a refresh that
+    `plugins.repair` records reaches only the sessions started after it. A
+    live lane whose config home was refreshed after its session started, or
+    whose status reports ``plugin_stale`` from the version its launch
+    recorded, is named, and the row carries the command that relaunches the
+    one whose session started first. A config home whose refresh
+    failed is named with the CLI's error instead, because relaunching a lane
+    onto it would load the same old plugin; the service retries the refresh.
+
+    Args:
+        home: Private bridge state root holding the repair record.
+        directory: Private project state directory.
+        data: Normalized project manifest.
+        project: This project's status reading.
+        now: Unix time the row's age is measured against.
+
+    Returns:
+        One row naming the stale lanes or failed refreshes, or none.
+    """
+    from agent_parley import plugins
+
+    recorded = plugins.repairs(home)
+    stale: dict[str, float] = {}
+    failed: dict[str, dict] = {}
+    since: float | None = None
+    for record in project["participants"]:
+        name = record["participant"]
+        entry = data["participants"].get(name) or {}
+        availability = record.get("availability") or {}
+        if (
+            roster.retired(entry)
+            or availability.get("process_alive") is not True
+        ):
+            continue
+        repair = plugins.lane_repair(home, entry, recorded) if recorded else {}
+        if repair.get("state") == plugins.FAILED:
+            key = f"{repair.get('client')}:{repair.get('directory')}"
+            failed[key] = repair
+            continue
+        aged = record.get("plugin_stale") is True
+        if not (aged or repair):
+            continue
+        started = record.get("session_started")
+        at = float(repair.get("at") or 0)
+        before = isinstance(started, (int, float)) and started < at
+        if not (aged or before):
+            continue
+        stale[name] = (
+            float(started) if isinstance(started, (int, float)) else now
+        )
+        mark = at or stale[name]
+        since = mark if since is None else min(since, mark)
+    if not stale and not failed:
+        return []
+    parts = []
+    if stale:
+        parts.append(
+            "these lanes run a plugin older than the launcher or the "
+            f"service's refresh: {', '.join(stale)}"
+        )
+    for repair in failed.values():
+        prefix = repair.get("client", "")
+        if repair.get("label"):
+            prefix += f" ({repair['label']})"
+        parts.append(
+            f"{prefix} plugin refresh to {repair.get('launcher', '')} "
+            f"failed, retrying: {repair.get('error', '')}"
+        )
+        at = float(repair.get("at") or 0)
+        since = at if since is None else min(since, at)
+    repo = f"--repo {shlex.quote(project['root'])}"
+    command = (
+        "end the oldest session, then: agent-parley run "
+        f"{min(stale, key=stale.__getitem__)} {repo} --resume"
+        if stale
+        else "agent-parley plugins install"
+    )
+    return [
+        _row(
+            PLUGIN,
+            "; ".join(parts),
+            command,
+            _age(since, now),
+            project=project["root"],
+            count=max(len(stale) + len(failed), 1),
+        )
+    ]
+
+
 def _forge_rows(directory: Path, root: str, now: float) -> list[dict]:
     """Reports a forge that refuses the supervisor's catalog read.
 
@@ -2322,6 +2417,7 @@ def derive(
         aged.extend(_integration_rows(directory, project["root"], stamp))
         aged.extend(_unattended_rows(directory, data, project["root"], stamp))
         aged.extend(_root_rows(directory, data, project["root"], stamp))
+        aged.extend(_plugin_rows(home, directory, data, project, stamp))
         aged.extend(_forge_rows(directory, project["root"], stamp))
         aged.extend(_plan_rows(directory, project["root"], stamp))
         aged.extend(_run_rows(directory, data, project["root"], stamp))
@@ -2334,6 +2430,26 @@ def derive(
         key=lambda row: (_stale(row), -(row["seconds"] or 0)),
     )
     return rows + aged
+
+
+def ready(rows: list[dict], root: str) -> list[str]:
+    """Names the lanes of one project that `derive` reports ready to retire.
+
+    Args:
+        rows: Rows `derive` produced.
+        root: Canonical project key whose lanes are named.
+
+    Returns:
+        Each participant carrying a `READY` row in that project, once, in
+        the order the rows list them.
+    """
+    return list(
+        dict.fromkeys(
+            row["participant"]
+            for row in rows
+            if row["condition"] == READY and row["project"] == root
+        )
+    )
 
 
 def _stale(row: dict) -> bool:

@@ -32,12 +32,12 @@ when that policy records `auto`, and never on an agent's own authority.
 | `server` | Authenticated MCP transport and bounded tool contracts |
 | `store` | SQLite schema, migration, scoped mail, atomic leases, the queue waiting on a held key, and tool events |
 | `attachments` | Oversized coordination payloads spilled to bounded files under project state, and their paged reads |
-| `process` | Per-platform process identity, session liveness and shutdown |
+| `process` | Per-platform process identity, session liveness and shutdown, and the one-shot host load and available-memory reading `launch` refuses on and `supervision` defers a dispatch on |
 | `issues` | Claim and handoff state transitions, and resolution of the claim a lane holds |
 | `lifecycle` | Execution state an issue's owner still owes, stored in the issue ledger so an ownership transition and its claim generation publish together, and the dependency settlement completion triggers |
 | `recovery` | Capture and restore of an abandoned claim's work as recovery checkpoints, operator-authorized takeover, and the persisted capacity recovery candidates |
 | `lanes` | The one authoritative state record of each lane in the store (`starting`, `working`, `idle`, `blocked` with its cause, `stopped`, `dead`, `reclaimed`), its closed transition table, and the event every accepted or refused transition appends; the per-lane files are evidence it reads, never a second answer. Hooks (`checkpoints.record`) and the dialog watcher submit evidence to a per-project spool (`lane-evidence.jsonl`) instead of waiting on the store; each poll applies it in arrival order before its liveness sample, and keeps it for the next poll when the store is busy. Evidence observed before the lane entered its recorded state, such as a tool hook still spooled when the launcher recorded `stopped`, moves nothing and is recorded as a `superseded` event; queued evidence never moves a `reclaimed` lane, which only a launch leaves. A session change is a transition that records both session ids. Each poll also charges the time since the last one to idle lane-minutes and unaccountable claim-minutes by state and cause, which `status` reports. The `accounting` events those charges append and every other lane event are each kept to the latest `MAX_EVENTS` (2000) per project, so per-poll accounting never evicts the transition history. A host restart moves every recorded session's row to `stopped` with the restart named as its evidence, which `rebooted` reads to refuse a resume until a new session clears it. The wake budget (attempts, backlog, next attempt, exhaustion, escalation) lives in the same store, seeded once from a lane's published `-wake.json` on upgrade |
-| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, returning the claims and reservations of lanes proved dead past `orphan_retire_after`, the reclaim sweep, a project whose root checkout is gone, the open-issue catalog `status` reads, cached in `FORGE_ISSUES` (`forge-issues.json`) and refreshed once it is `FORGE_TTL` (300 s) old, a failed read retried no sooner than `FORGE_RETRY` (60 s) later while the last good reading is kept, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane, as is, once, a head pending past `checks_ceiling`; a claimed issue still open on the forge that a pull request merged into the manifest's `integration_base` closes inside the claim's generation ends the claim like any merged pull request |
+| `supervision` | The service's periodic poll: presence sampling, handoff reminders, bounded wakes and their backoff, capacity and work fitness, orphan marking, expired-lease reclaim, recorded operator deliveries, returning the claims and reservations of lanes proved dead past `orphan_retire_after`, the reclaim sweep, a project whose root checkout is gone, the open-issue catalog `status` reads, cached in `FORGE_ISSUES` (`forge-issues.json`) and refreshed once it is `FORGE_TTL` (300 s) old, a failed read retried no sooner than `FORGE_RETRY` (60 s) later while the last good reading is kept, and pull-request wakes: the forge is read at most once per `PULL_REQUEST_SECONDS` (60 s), each open pull request's last reading is kept in `PULL_REQUEST_RECORD` (`pull-requests.json`), and a change in its checks, reviews or merge state is mailed to the owning lane, as is, once, a head pending past `checks_ceiling`; a claimed issue still open on the forge that a pull request merged into the manifest's `integration_base` closes inside the claim's generation ends the claim like any merged pull request; symbol notices: a merged pull request's changed definitions (Python through `ast`, other extensions through one `TOP_LEVEL_DEFINITIONS` pattern, capped at `SYMBOL_FILES` and `SYMBOL_NAMES`) are matched against each other live lane's diff, and a hit is mailed once per pull request, symbol and lane as advisory |
 | `convergence` | Issue-level convergence accounting per claim generation, kept apart from wake and liveness accounting: verification outcomes and hashed failure signatures from report logs, the last verified milestone, and the bounded change-approach and operator-escalation responses the poll sends. Accounts are published per project in `convergence.json`; the thresholds are the supervision settings `convergence_repeats` (3 repeats of one failure by default) and `convergence_after` (14400 working seconds since the last milestone by default), and both responses are keyed mail, the escalation also notifying through `non_convergence` |
 | `roster` | Providers, credential profiles and project participants |
 | `retirement` | The withdrawal of one lane at its own request: the work it returns, the worktree it leaves only when Git reports it clean, and the durable retirement mark the supervisor and the operator views read |
@@ -1003,6 +1003,7 @@ Files at the state root, grouped by the module that owns them:
 | `roster` | `providers.json`, `credentials.json`, under `registry.lock` |
 | `notify` | `notify.json` (stored notification settings) under `notify.lock` |
 | `inbound` | `inbound-gate.json` (inbound passcode failures and lockouts) |
+| `plugins` | `plugin-repair.json` (the service's plugin repair per client config home: versions, outcome, attempts, next retry) |
 | `supervision`, `terminal` | `supervision.json` (global supervision settings, including the wake opt-out) |
 | `terminal` | `wake-<digest>.sock`, one control socket per project lane |
 
@@ -1135,11 +1136,17 @@ credential.
 
 A fourth surface moves without any number: the modules a running service
 loaded against the sources now on disk. The service fingerprints its sources
-with `protocol.revision` at start and compares at most once every two seconds;
-the first difference stops it accepting connections, answers every request
-until it exits as stale, and is reported by `status` and `doctor`. The next
-hook that finds the recorded process gone relaunches the service on current
-code, which initializes, and so migrates, the store before it serves.
+with `protocol.revision` at start and compares at most once every two seconds,
+from the serving loop as well as from each request, so an idle service notices
+too; the first difference stops it accepting connections, answers every request
+until then as stale, and is reported by `status` and `doctor`. The service then
+finishes the requests in flight and re-executes itself with the same
+interpreter, state root and configuration. Its process ID and creation identity
+survive the hand-over, so the published record stays valid and no hook asks for
+a second service; the new process initializes, and so migrates, the store before
+it serves. One `uv tool upgrade` therefore moves a running service without an
+operator command. A hook that finds the recorded process gone, as after a reboot
+or a re-execution the kernel refused, relaunches the service on current code.
 
 A work-order plan is one TOML file the operator writes, parsed by the standard
 library. Applying it records the same advisory dependency edges `issue block`

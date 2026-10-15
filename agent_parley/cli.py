@@ -1392,9 +1392,18 @@ def unmeasured_lanes(
     if not getattr(args, "tokens", None):
         return []
     _, directory = bridge.project(repository, create=False)
-    lanes = records.unmeasured(bridge.home, roster.read(directory), names)
+    manifest = roster.read(directory)
+    participants = manifest["participants"]
+    lanes = records.unmeasured(bridge.home, manifest, names)
+    ended = [
+        lane
+        for lane in lanes
+        if records.counts_at_end(
+            bridge.home, records.lane_provider(participants, lane)
+        )
+    ]
     if lanes:
-        print(records.unmeasured_warning(lanes), file=sys.stderr)
+        print(records.unmeasured_warning(lanes, ended), file=sys.stderr)
     return lanes
 
 
@@ -1549,13 +1558,17 @@ def shown_paths(paths: Sequence[str]) -> list[str]:
     return shown
 
 
-def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
+def retired_lane(
+    bridge: Bridge, repo: Path, name: str, assume_yes: bool
+) -> str:
     """Retires one lane after confirming the ignored files it deletes.
 
     Args:
         bridge: Launcher holding the private coordination state.
         repo: Repository the command was given.
-        args: Parsed `participant retire` arguments.
+        name: Participant whose lane is retired.
+        assume_yes: Whether `--yes` already confirmed deleting the ignored
+            files.
 
     Returns:
         The account the retirement produced.
@@ -1565,16 +1578,47 @@ def retired_lane(bridge: Bridge, repo: Path, args: argparse.Namespace) -> str:
             unanswered, or if the retirement is refused.
     """
     _, data = lane_roster(bridge, repo)
-    participant = data["participants"].get(args.name)
+    participant = data["participants"].get(name)
     lane = Path(participant["lane"]) if participant else None
     ignored = ignored_paths(lane) if lane and lane.exists() else []
     if ignored and not confirmed(
-        f"Retiring {args.name} deletes these ignored files:\n"
+        f"Retiring {name} deletes these ignored files:\n"
         + "\n".join(f"- {path}" for path in shown_paths(ignored)),
-        args.yes,
+        assume_yes,
     ):
         raise BridgeError("Declined: nothing was retired.")
-    return bridge.retire(repo, args.name, discard=ignored)
+    return bridge.retire(repo, name, discard=ignored)
+
+
+def retired_ready(bridge: Bridge, repo: Path, assume_yes: bool) -> int:
+    """Retires every lane `problems` reports as ready to retire.
+
+    The lanes are the project's `ready to retire` rows, so a lane awaiting
+    integration or running a session is never selected. Each lane takes the
+    single-lane path, including its own ignored-files question, and a lane
+    that refuses or fails is reported while the rest are still attempted.
+
+    Args:
+        bridge: Launcher holding the private coordination state.
+        repo: Repository the command was given.
+        assume_yes: Whether `--yes` already confirmed deleting each lane's
+            ignored files.
+
+    Returns:
+        0 when every ready lane was retired or none was ready, 1 when any
+        lane refused or failed.
+    """
+    _, data = lane_roster(bridge, repo)
+    names = problems.ready(bridge.problems(), data["root"])
+    if not names:
+        print("No lane is ready to retire, so nothing was done.")
+        return 0
+    return bulk_lanes(
+        "retire",
+        names,
+        lambda name: retired_lane(bridge, repo, name, assume_yes),
+        assume_yes=True,
+    )
 
 
 def bulk_lanes(
@@ -5175,7 +5219,20 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         ("restart", "Start a lane again; keep its uncommitted work."),
     ):
         command = roles.add_parser(action, help=summary)
-        if action in BULK_PARTICIPANT or action == "merge":
+        if action == "retire":
+            chosen = command.add_mutually_exclusive_group(required=True)
+            chosen.add_argument(
+                "name", nargs="?", default="", help="Lane to act on."
+            )
+            chosen.add_argument(
+                "--ready",
+                action="store_true",
+                help=(
+                    "Retire every lane `problems` lists as ready to retire, "
+                    "one at a time, continuing past a lane that refuses."
+                ),
+            )
+        elif action in BULK_PARTICIPANT or action == "merge":
             command.add_argument(
                 "name",
                 nargs="?",
@@ -6825,8 +6882,10 @@ def main() -> int:
                     )
             elif args.action == "restore":
                 print(bridge.restore(repository, args.name))
+            elif args.action == "retire" and args.ready:
+                return retired_ready(bridge, repository, args.yes)
             elif args.action == "retire":
-                print(retired_lane(bridge, repository, args))
+                print(retired_lane(bridge, repository, args.name, args.yes))
             elif args.action == "merge":
                 print(merged_lanes(bridge, repository, args, preview))
             elif args.action == "pr":
@@ -6953,9 +7012,9 @@ def main() -> int:
                     and not args.allow_unmeasured
                 ):
                     raise BridgeError(
-                        "An enforced token limit would never stop the lanes "
-                        "named above, so it is not recorded; pass "
-                        "--allow-unmeasured to enforce it anyway."
+                        "An enforced token limit could not stop the lanes "
+                        "named above while they run, so it is not recorded; "
+                        "pass --allow-unmeasured to enforce it anyway."
                     )
                 print(bridge.enforce(repository, budget_changes(args)))
             elif args.action == "resume":
@@ -7240,11 +7299,14 @@ def main() -> int:
                 )
                 from agent_parley import records
 
-                if args.tokens and not records.measures_tokens(
-                    bridge.home, args.name
+                late = records.counts_at_end(bridge.home, args.name)
+                if args.tokens and (
+                    late or not records.measures_tokens(bridge.home, args.name)
                 ):
                     print(
-                        records.unmeasured_warning([args.name]),
+                        records.unmeasured_warning(
+                            [args.name], [args.name] if late else []
+                        ),
                         file=sys.stderr,
                     )
                 return 0

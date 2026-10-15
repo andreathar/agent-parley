@@ -9,6 +9,8 @@ time.
 from __future__ import annotations
 
 import contextlib
+import datetime
+import re
 import shlex
 import time
 from pathlib import Path
@@ -37,6 +39,12 @@ FORGE_TIMEOUT = 3 + 2 * -(-FORGE_LIMIT // FORGE_PAGE)
 FORGE_FULL_SECONDS = 3600.0
 FORGE_OVERLAP = 120.0
 TOKEN_READERS = "read for {read}; not measured for {unread}"
+HOOK_WINDOW_DAYS = 7
+HOOK_EXPIRIES = (
+    "{count} deadline expiries in {days} days of the service log on disk"
+)
+HOOK_SLOWEST = "; slowest stage in the latest: {slowest}"
+STAGE_SPENT = re.compile(r"(\S+) (\d+\.\d+)s(?:\s|$)")
 
 
 def reading(
@@ -465,6 +473,54 @@ def registered_root(home: Path, path: Path) -> str:
     return ""
 
 
+def hook_expiries(home: Path, after: float) -> tuple[int, str]:
+    """Counts the hook deadline expiries the service log still holds.
+
+    The service writes one ``expired`` entry each time a hook decision runs
+    past its deadline, naming the elapsed time and the time each decision
+    step spent. This reads those entries back rather than keeping a second
+    record, so it sees only what the log rotation left on disk: the rotated
+    window and the current log. Both are bounded by the shared log ceiling,
+    so the read is bounded too.
+
+    Args:
+        home: Private bridge state root holding the service log.
+        after: Epoch seconds; entries stamped earlier are not counted.
+
+    Returns:
+        The number of expiries stamped at or after ``after``, and the step
+        that spent the most time in the latest of them with its seconds, or
+        an empty string when none was counted or it named no step.
+    """
+    from agent_parley.server import LOG_NAME, ROTATED_NAME
+
+    count = 0
+    slowest = ""
+    for name in (ROTATED_NAME, LOG_NAME):
+        try:
+            text = (home / name).read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stamp, _, rest = line.partition(" expired ")
+            try:
+                instant = datetime.datetime.strptime(
+                    stamp, "%Y-%m-%dT%H:%M:%S%z"
+                ).timestamp()
+            except ValueError:
+                continue
+            if instant < after:
+                continue
+            count += 1
+            report = rest.partition("; answered as ")[2].partition(": ")[2]
+            steps = STAGE_SPENT.findall(report)
+            slowest = ""
+            if steps:
+                step, seconds = max(steps, key=lambda pair: float(pair[1]))
+                slowest = f"{step} {seconds}s"
+    return count, slowest
+
+
 class StatusMixin(BridgeCore):
     """Health check, problem list and per-lane status reporting."""
 
@@ -518,7 +574,23 @@ class StatusMixin(BridgeCore):
             The `tokens` component names the defined providers whose
             lanes report tokens and those no reader measures, so a token
             limit's blind spots are visible before one is set; it never
-            makes the set inconsistent.
+            makes the set inconsistent. The `hooks` component counts the
+            hook deadline expiries the service log still holds from the last
+            seven days and names the stage that spent the most time in the
+            latest one; it reads only what the log rotation kept, and it
+            never makes the set inconsistent. Each CLI and config home holding
+            the plugin is one row, failing when its version differs from
+            the launcher's or its protocol is refused; its remedy names the
+            reinstall a running service performs on its own and the command
+            for an estate with no service. A service answering on another
+            version than the launcher is stale and names its restart. The
+            ``plugins`` list and ``server`` record carry the same versions
+            for scripts; a CLI with no plugin in any home is listed as not
+            installed and does not fail the set. The `host load` component
+            prints one `process.host_load` reading against the global
+            launch threshold, ``supervision.json`` over the defaults, and
+            whether `run` would refuse and dispatch defer; a load is not
+            drift, so it never makes the set inconsistent either.
         """
         from agent_parley import decisions, plugins
         from agent_parley.cli import (
@@ -532,10 +604,11 @@ class StatusMixin(BridgeCore):
             supervision,
         )
 
+        launcher = protocol.launcher_version()
         components = [
             {
                 "component": "launcher",
-                "version": protocol.launcher_version(),
+                "version": launcher,
                 "protocol": protocol.PROTOCOL,
                 "state": protocol.OK,
                 "remedy": "",
@@ -543,16 +616,27 @@ class StatusMixin(BridgeCore):
             }
         ]
         bundled = protocol.manifests(protocol.plugin_root())
+        installed = []
         for client in protocol.CLIENTS:
             rows = []
             for label, directory in plugins.config_dirs(self.home, client):
                 manifest = plugins.installed_manifest(client, directory)
                 if manifest is not None:
                     suffix = f" ({label})" if label else ""
-                    rows.append(
+                    row = {
+                        "component": f"{client} plugin{suffix}",
+                        **plugins.assessed(manifest),
+                    }
+                    if not row["compatible"]:
+                        row["remedy"] = protocol.REFRESH
+                    rows.append(row)
+                    installed.append(
                         {
-                            "component": f"{client} plugin{suffix}",
-                            **plugins.assessed(manifest),
+                            "cli": client,
+                            "home": label or "default",
+                            "version": row["version"],
+                            "expected": launcher,
+                            "state": row["state"],
                         }
                     )
             if not rows:
@@ -561,6 +645,15 @@ class StatusMixin(BridgeCore):
                         "component": f"{client} plugin",
                         **plugins.assessed(bundled[client]),
                         "version": "bundled",
+                    }
+                )
+                installed.append(
+                    {
+                        "cli": client,
+                        "home": "default",
+                        "version": "",
+                        "expected": launcher,
+                        "state": protocol.ABSENT,
                     }
                 )
             components.extend(rows)
@@ -586,15 +679,24 @@ class StatusMixin(BridgeCore):
         stopped = serving == protocol.STOPPED and any(
             manifest.get("participants") for manifest in manifests
         )
-        remedy = protocol.RELAUNCH if stale else ""
+        version = str(served.get("version", ""))
+        behind = serving == "ready" and version != launcher
+        state = protocol.OK if serving == "ready" else serving
+        remedy = ""
+        if stopped:
+            remedy = protocol.START
+        elif stale:
+            remedy = protocol.RELAUNCH
+        elif behind:
+            state, remedy = protocol.STALE, protocol.RESTART
         components.append(
             {
                 "component": "service",
-                "version": str(served.get("version", "")),
+                "version": version,
                 "protocol": protocol.PROTOCOL,
-                "state": protocol.OK if serving == "ready" else serving,
-                "remedy": protocol.START if stopped else remedy,
-                "compatible": not stale and not stopped,
+                "state": state,
+                "remedy": remedy,
+                "compatible": not stale and not stopped and not behind,
             }
         )
         gone = sorted(
@@ -724,12 +826,44 @@ class StatusMixin(BridgeCore):
                 "compatible": True,
             }
         )
+        limits = supervision.configuration(self.home, {})
+        components.append(
+            {
+                "component": "host load",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": process.load_line(
+                    process.host_load(),
+                    limits["max_load_ratio"],
+                    limits["min_available_mib"],
+                ),
+                "remedy": "",
+                "compatible": True,
+            }
+        )
+        expired, slowest = hook_expiries(
+            self.home, time.time() - HOOK_WINDOW_DAYS * 86400.0
+        )
+        components.append(
+            {
+                "component": "hooks",
+                "version": "",
+                "protocol": protocol.PROTOCOL,
+                "state": ("" if expired else f"{protocol.OK}, ")
+                + HOOK_EXPIRIES.format(count=expired, days=HOOK_WINDOW_DAYS)
+                + (HOOK_SLOWEST.format(slowest=slowest) if slowest else ""),
+                "remedy": "",
+                "compatible": True,
+            }
+        )
         return {
             "protocol": protocol.PROTOCOL,
             "supported": list(protocol.SUPPORTED),
             "schema": store.SCHEMA_VERSION,
             "platform": process.host_report(),
             "components": components,
+            "plugins": installed,
+            "server": {"version": version, "expected": launcher},
             "consistent": all(
                 component["compatible"] for component in components
             ),
@@ -1102,6 +1236,9 @@ class StatusMixin(BridgeCore):
                 state["dialog"] if isinstance(state.get("dialog"), dict) else {}
             ),
             "foreign_session": checkpoints.foreign_reading(state),
+            "plugin_version": protocol.lane_plugin(state)[0],
+            "plugin_stale": protocol.lane_plugin(state)[1],
+            "session_started": state.get("session_started"),
             "wake_log": (
                 str(directory / f"{agent}-wake.log")
                 if state.get("attached") is False
@@ -1445,12 +1582,19 @@ class StatusMixin(BridgeCore):
     def _health(self, report: dict) -> None:
         """Prints the service, code, store, notify and state directory lines.
 
+        A stopped service is followed by `protocol.START`, the remedy
+        `doctor` prints for it, since `status` is the first command a new
+        user runs and its lane states are stale until the service is up.
+
         Args:
             report: Reading produced by `status_snapshot`.
         """
         from agent_parley.cli import notification_line, store
 
-        print(f"Service: {service_state(report['server'])}")
+        serving = service_state(report["server"])
+        print(f"Service: {serving}")
+        if serving == protocol.STOPPED:
+            print(protocol.START)
         if report["server"].get("state") == protocol.STALE:
             print(f"Code: {protocol.STALE}; {protocol.RELAUNCH}")
         schema = store.schema_state(store.schema_version(self.home))
@@ -1546,7 +1690,9 @@ class StatusMixin(BridgeCore):
         never calls the forge: the service's poll keeps `FORGE_ISSUES`
         current through `supervision.refresh_forge_issues`, and this reads
         that file alone. A reading older than `FORGE_STALE` seconds is
-        reported stale, with a recorded failed read named as the cause.
+        reported stale, with a recorded failed read named as the cause. A
+        repository whose origin is missing or not on GitHub is named as
+        such, since the service has nothing to read there.
 
         Args:
             directory: Private state directory of the project.
@@ -1579,6 +1725,10 @@ class StatusMixin(BridgeCore):
             manifest = {}
         if forge.select(Path(root), manifest) != "github":
             return reading(issues, limit, now - read_at, False, "no GitHub")
+        if forge.slug(Path(root)) is None:
+            return reading(
+                issues, limit, now - read_at, False, "no GitHub remote"
+            )
         failed = float(cached.get("failed_at") or 0) > read_at
         failure = cached.get("failure")
         kind = failure.get("kind") if isinstance(failure, dict) else None

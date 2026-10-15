@@ -32,7 +32,40 @@ sh install.sh
 `agent-parley plugins install` is the plugin step on its own: it adds the
 marketplace and plugin to each of `claude` and `codex` found on PATH, skipping
 what their listings already hold, and `agent-parley plugins status` reports
-that state without writing. The manual steps follow.
+that state without writing. `uv tool upgrade agent-parley` on its own
+replaces the launcher and leaves the plugin behind, because the plugin lives in
+each CLI's own cache. The running service repairs that: once at start and then
+once per poll interval, its supervision thread runs the same install for every
+CLI and config home whose installed plugin version differs from the launcher's,
+at most once per launcher version and home. A home the plugin was never
+installed into is left alone. A failed refresh is logged with the CLI's error
+and retried with a delay doubling from one minute to an hour. Native sessions
+read their plugin at start, so `problems` then lists a `plugin stale` row
+naming the live lanes started before the refresh or running an older plugin,
+with the command that relaunches the oldest. Setting `AGENT_PARLEY_PLUGIN_REPAIR=off` in the service's
+environment turns the repair off for an estate that manages its plugins another
+way.
+
+Each launch records the plugin version its session loaded in the lane's
+activity record, and `status --json` and `top --json` carry it per lane as
+`plugin_version`, with `plugin_stale` true when it differs from the launcher.
+A lane launched before the field existed reports `unknown` and is never stale.
+Neither command nor the hook reads a plugin manifest to answer this. A stale
+lane is marked in `top` with `plugin VERSION stale; agent-parley run NAME
+--resume`, and its hook tells it once to finish its current step and end its
+turn, blocking one `Stop` so the notice is read. The agent never runs the
+restart itself; the operator, or the service for an unattended lane, runs
+`agent-parley run NAME --resume`. A lane counts as unattended when its
+activity record says `attached` is false, meaning its launcher has no
+terminal, and its participant has wakes on; the manifest has no separate
+unattended marker. The service restarts an unattended lane once its plugin
+refresh for that lane's config home succeeded and the lane could be resumed at
+all: it has a resumable session no takeover fenced, a native provider that
+needs no extra environment, and no missing bridge tool opt-in. When the same
+session process is still idle with no turn in flight, the session is ended the
+way `participant stop` ends one and resumed with `run --resume`, at most once
+per launcher version. A lane with a terminal is never restarted; the notice
+and the `top` marker are its surface. The manual steps follow.
 
 Installing needs no clone. `uv tool install agent-parley` takes the published
 distribution from PyPI. `uv tool install git+https://github.com/suneel944/agent-parley`
@@ -61,7 +94,12 @@ reads participant names, issue numbers, providers and credential profiles from
 the state directory, both for positional values such as `say NAME` and
 `participant restart NAME` and for options such as `--credentials`.
 
-Upgrading needs no action: the store upgrades in place on first use, keeping
+Upgrading needs no action: a running service notices the new package within
+two seconds, finishes the requests in flight and re-executes itself on it under
+the same process ID, so `agent-parley down` and `agent-parley up` are not
+needed after `uv tool upgrade agent-parley`; the service log records the
+hand-over as `drifted`, `stopped`, `relaunching` and a new `bound` entry. The
+store upgrades in place on first use, keeping
 every message, claim and lease. Issue ledgers upgrade lazily: 0.11 derives
 lifecycle defaults for older records without an `execution` field and persists
 them when a lifecycle transition next writes the record. Stop running sessions
@@ -168,8 +206,9 @@ and reads again once the cache is 300 seconds old. Between full reads, at most
 hourly, it reads only the issues updated since the last reading. When the read fails, the poll keeps the last reading and waits 60 seconds
 before trying again. `status` only reads the cache; a reading over 600 seconds
 old prints one `Forge:` line with its age and the cause, a failed read or a
-service that is not refreshing it. With no reading at all, or no GitHub forge,
-the `Forge:` line says so and claims on closed issues are not hidden.
+service that is not refreshing it. With no reading at all, no GitHub forge, or
+no GitHub `origin` remote, the `Forge:` line says so (`no GitHub`, `no GitHub
+remote`) and claims on closed issues are not hidden.
 Last, `Needs action:` lists each orphaned or overdue claim with the
 command that resolves it, `agent-parley issue claim N --take-orphaned` run from
 a peer lane or `agent-parley issue assign N LANE --reason TEXT`. When the
@@ -416,7 +455,39 @@ The first hook to read the published record of that gone process asks for a
 new service, so the relaunch follows the stop. `status` prints the same drift
 as a
 `Code: stale` line, and `agent-parley up` then starts a service on the code in
-the checkout.
+the checkout. A service that answers ready on a package version other than the
+launcher's is `stale` too: it normally re-executes itself once it sees its
+sources move, and when it has not, `agent-parley down` then `agent-parley up`
+restarts it on this version.
+
+#### Plugin and server version drift
+
+Each supported CLI gets one `<cli> plugin` line per config home that holds the
+plugin: the CLI default, the directory the shell exports (`(shell)`) and each
+credential profile a lane runs on (`(<profile>)`). The line names the
+installed plugin version, and the launcher line above it names the version it
+is expected to match. A plugin on another version is `stale` and a plugin
+declaring a protocol this build refuses is `mismatch`; either fails the
+verdict and exits non-zero. The remedy names both paths: a running service
+reinstalls a stale plugin on its own and names the lanes to restart, and on a
+cold estate with no service `agent-parley plugins install` does the same. A CLI
+with the plugin in no home is reported from the bundled manifest and does not
+fail the verdict.
+
+`doctor --json` carries the same reading for scripts:
+
+| Field | Meaning |
+| --- | --- |
+| `plugins[].cli` | `claude` or `codex`. |
+| `plugins[].home` | `default`, `shell` or the credential profile name; never a path. |
+| `plugins[].version` | Installed plugin version, empty when not installed. |
+| `plugins[].expected` | Launcher version the plugin should match. |
+| `plugins[].state` | `ok`, `stale`, `mismatch` or `not installed`. |
+| `server.version` | Version the running service answers on, empty when none answers. |
+| `server.expected` | Launcher version the service should match. |
+
+`doctor` only reads: it opens no network connection beyond the local health
+request to the configured port and writes nothing.
 
 The `projects` component is `ok` while every registered project's root
 checkout exists. A project whose root is gone, such as a probe run from a
@@ -529,10 +600,11 @@ condition, that count, its age and what clears it:
 | `forge refused` | The poll's last forge read failed after its last good one because the forge refused the signed-in account, or rate-limited it. Poll forge reads back off for 60 seconds after such a refusal. | `gh auth status`, then `gh auth switch --user OWNER`; for a rate limit, none: the row names when the supervisor retries. |
 | `root missing` | The project root checkout is gone. Lanes retire only once it has been gone `root_gone_after` (an hour by default), and never while its parent directory cannot be listed; the row then says the root is unreachable. Past that, the row names the live lanes kept from retirement because their session process is alive or their activity record cannot be read. | Restore the root checkout, or end the named sessions so the next poll retires them. |
 | `root returned` | The project root came back after lanes retired for its absence. The row names those lanes until each is re-admitted. | `agent-parley participant add NAME --repo ROOT` for each lane named |
+| `plugin stale` | These live lanes run an old plugin: the service refreshed it after their sessions started, or their recorded `plugin_version` differs from the launcher. One row per project names them all. A refresh that failed is named with the CLI's error instead; the service retries it. | End the oldest named session, then `agent-parley run NAME --repo ROOT --resume`; for a failed refresh, `agent-parley plugins install` |
 | `escalated plan revision` | A lane's plan revision touched an edge already revised back and forth under the current plan version, so it was escalated instead of applied. One row per escalated proposal, on the proposing lane, among the retained proposals. | `agent-parley plan approve ID` or `agent-parley plan reject ID --reason TEXT` |
 | `plan revisions pending` | Plan revisions outside the operator's envelope wait for a decision. One row per project counts them and ages from the oldest. | `agent-parley plan proposals`, then approve or reject each |
 | `orphaned claims` | The lane's session process is gone and the supervisor marked claims it holds orphaned, and the lane is not yet `ready to retire`. The row is derived from the ledger, so it shows whether or not a notification transport is configured. | `agent-parley issue claim N --take-orphaned` from a live peer lane; with no live lane besides the holder, start one with `agent-parley run NAME` and have it take the claim, or `agent-parley issue release N`. |
-| `ready to retire` | The lane's session process is gone, every claim it holds has been orphaned for longer than `orphan_retire_after` and no peer took it. Never shown while the lane's ready report waits on an open pull request. | `agent-parley participant retire NAME` |
+| `ready to retire` | The lane's session process is gone, every claim it holds has been orphaned for longer than `orphan_retire_after` and no peer took it. Never shown while the lane's ready report waits on an open pull request. | `agent-parley participant retire NAME`, or `participant retire --ready` for every such lane |
 | `ready to integrate` | The lane's latest report is ready, a claim it holds has an open pull request in the cached forge reading, and the report has waited for integration longer than the default wait ceiling of 3600 seconds. It replaces `ready to retire` and `orphaned claims` for that lane, since retiring or releasing would drop the claim the pull request closes. It clears when the pull request merges or closes, or a newer report supersedes the ready one. Nothing merges on its own. | `agent-parley approve NAME` when the project requires approval and the report is not approved; otherwise review and merge the named pull request, or `agent-parley participant merge NAME`. |
 | `ready without a pull request` | A claim the lane holds has been in the ready state longer than the default wait ceiling of 3600 seconds, the project has a cached forge reading, that reading holds no open pull request for the claim, and no approval is pending. Ready work stays claimed through integration, so a claim whose pull requests all merged or closed while the issue stayed open would otherwise wait for good while the lane is told it waits on CI and review. The row names the longest-ready claim and counts the rest. | Open the claim's pull request, close the issue if its work already merged, or `agent-parley issue release N`. |
 | `branch drift` | The lane left its assigned branch. | `agent-parley participant restore NAME` |
@@ -1874,8 +1946,10 @@ command where one applies; `--json` is the stable machine form.
 `group` and whether that group is `group_underway`, the owned issues it
 `unblocks`, the `provider` it declares, the peer `overlaps` and forecast
 `collisions` its likely paths run into, `named_to`, the other lane whose
-published work names it as next work or empty, and the ordered `reasons` for
-its place.
+published work names it as next work or empty, `same_files`, the claims
+this lane holds whose paths its forecast paths run into, `held_back`, the
+other lanes' live claims doing so as `issue` and `owner` records, and the
+ordered `reasons` for its place.
 
 `resources show --json` reports `root`, the declared `resources` array and
 `declared`. `status` reports `server`, `state_directory`, `inbound` as
@@ -2130,7 +2204,37 @@ which a dead lane with no claim and no process is folded out of the default
 `status` and `problems` views. Numeric second values range from 1 to 86400
 seconds. `rotate` false keeps a lane resuming its recorded native session
 after a ready or blocked report instead of starting a fresh one; see
-[Running lanes](lanes.md#running-unattended).
+[Running lanes](lanes.md#running-unattended). `max_load_ratio` (1.5, above 0
+and at most 1000) and `min_available_mib` (1024 MiB, 0 to 1048576) set the
+host load gate below.
+
+### Host load gate
+
+Before every launch, `agent-parley run` takes one reading of the host: the
+one-minute load average divided by the CPU count, and the memory available to
+new work, `MemAvailable` from `/proc/meminfo` on Linux or the free, inactive
+and speculative pages `vm_stat` reports on macOS. A ratio above
+`max_load_ratio` or memory below `min_available_mib` refuses the launch in
+one sentence naming each number, its threshold and the setting that moves
+it, followed by `next: agent-parley doctor`. There is no override flag: set
+the thresholds under `supervision` in the project manifest, or globally in
+`supervision.json`. `min_available_mib` 0 turns the memory check off.
+
+A resume the service would start for unattended dispatch takes the same
+reading. Past the threshold it is not refused: the wake records
+`busy:host load: ...` with the numbers, spends no attempt and the dispatch
+reads `deferred`, so a later poll launches the lane once the host has
+headroom. The reading is taken once per launch or dispatch; nothing samples
+the host continuously.
+
+A reading the host cannot give, such as a missing `/proc/meminfo` or a
+failing `vm_stat`, is not judged, so the launch goes ahead on the readings
+that remain. On native Windows the check is skipped and the launch prints
+one line saying so. `agent-parley doctor` prints the current reading against
+the global thresholds on its `host load` line, and whether `run` would
+refuse; a project's own settings still decide its launches. The sandbox of
+`agent-parley demo` records thresholds that never refuse, because its stub
+lanes only sleep.
 
 Issue convergence is accounted separately from wakes and liveness.
 `convergence.py` keeps one account per owned issue and claim generation in
@@ -2285,6 +2389,22 @@ A `pull request ended` reminder is marked answered as soon as its holder no
 longer owns the issue, whether it released, handed off, was reclaimed or was
 resolved, so the former holder is not woken, sent or listed a reminder for
 work it no longer holds.
+
+A merged pull request that changes a definition another lane's diff calls is
+mailed to that lane, even when the two touch different files. The same
+completion reading names the pull request and its merge commit; once the
+base checkout holds that commit (it waits up to a day for a fetch), the
+service reads the merge against its first parent once. Python files are
+parsed with `ast`, and a module or class `def` or `class` the merge removed,
+renamed or gave another signature is changed. JavaScript, TypeScript, Go and
+Rust files use one top-level identifier pattern per extension on the removed
+lines; other files are not read. At most 20 files and 20 names are read per
+pull request. Each lane that is not retired and did not land the change has
+its diff against its fork point, committed or not, searched for those names
+on added lines, and each hit sends one message naming the pull request, the
+symbol and the file and line in the lane's diff, once per pull request,
+symbol and lane. The notice says the change may affect the lane: a name
+match can be a false positive, and nothing is refused, rebased or changed.
 
 A lane that opens a pull request and ends its turn to wait is woken when that
 pull request changes. At most once a minute the service reads up to 30 open
@@ -2620,7 +2740,7 @@ outbound and inbound are on and, when off, why.
 | `AGENT_PARLEY_TELEGRAM_CHAT` | Chat identifier the bot posts to. |
 | `AGENT_PARLEY_SMTP_HOST` | SMTP server host. |
 | `AGENT_PARLEY_SMTP_PORT` | SMTP port; 587 by default, 465 with implicit TLS. |
-| `AGENT_PARLEY_SMTP_TLS` | `starttls` (default), `implicit` or `none`. |
+| `AGENT_PARLEY_SMTP_TLS` | `starttls` (default), `implicit` or `none`. Both TLS modes verify the server certificate and host name against the system trust store. `none` with `AGENT_PARLEY_SMTP_USER` set is refused unless the host is `127.0.0.1`, `localhost` or `::1`, because the login would travel in the clear. |
 | `AGENT_PARLEY_SMTP_USER` | SMTP user; omit it for a server that needs no login. |
 | `AGENT_PARLEY_SMTP_PASSWORD` | SMTP password. |
 | `AGENT_PARLEY_SMTP_FROM` | Sender address. |
@@ -2693,6 +2813,14 @@ the outbound ones. The service long-polls the Bot API, so no port is opened and
 no webhook is registered. A message must start with the passcode, come from the
 configured chat, and carry `status` with the filters `agent-parley status`
 takes; the reply is that reading.
+
+A failed poll is retried every five seconds. The service log names the
+failure once, as `polling Telegram failed (...)` with the error class and its
+cause, such as `HTTP 409 Conflict` when a second poller uses the same token or
+`HTTP 401 Unauthorized` for a revoked one, and logs again only when the cause
+changes. The bot token is replaced by `<bot token>` in that text. The first
+poll that succeeds afterwards logs `polling recovered`, and until then
+`notify` does not report the reader as polling.
 
 A private chat with the operator is the supported shape. In a group chat every
 member could answer, so the reader refuses to start until
@@ -3701,6 +3829,11 @@ participant's coordination credential, and drops its manifest entry. Removing
 the worktree deletes its ignored files, such as a local `.env` or build
 output, so retire lists them and asks first; `--yes` answers in advance, and a
 declined or unanswered question retires nothing and exits non-zero.
+`participant retire --ready` takes the place of a lane name and retires every
+lane `problems` lists as `ready to retire`, one at a time through the same
+path, so each lane still asks about its ignored files unless `--yes` is given.
+It prints one result line per lane, carries on past a lane that refuses or
+is declined, and exits non-zero if any did.
 `gc --apply` reclaims
 only lanes whose work has already landed, so it removes their ignored files
 without asking. The branch is deleted
@@ -3851,6 +3984,50 @@ service by hand. Adjust `ExecStart` to the path `which
 agent-parley` reports when the installation is not in `~/.local/bin`, and set
 `Environment=AGENT_PARLEY_HOME=...` in the `[Service]` section for a private
 root other than the default.
+
+On macOS a launchd agent does the same. Write
+`~/Library/LaunchAgents/dev.agent-parley.service.plist`, replacing
+`/Users/example` with your home directory. launchd does not expand `~` or
+`$HOME`, and `~/.local/bin` is not on its path, so every path is absolute:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.agent-parley.service</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/example/.local/bin/agent-parley</string>
+    <string>up</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+```
+
+Check it, load it into your login session, and unload it with:
+
+```bash
+plutil -lint ~/Library/LaunchAgents/dev.agent-parley.service.plist
+launchctl bootstrap "gui/$UID" ~/Library/LaunchAgents/dev.agent-parley.service.plist
+launchctl bootout "gui/$UID" ~/Library/LaunchAgents/dev.agent-parley.service.plist
+```
+
+`up` returns once the service answers, so launchd sees the job exit and does
+not stop the service on `bootout`. Stop it with `agent-parley down`, as with the
+systemd unit. The agent loads at login, so the service returns after a reboot
+once you sign in. Use the path `which agent-parley` reports when the
+installation is not in `~/.local/bin`.
+
+On WSL2 the systemd recipe above works once systemd is enabled in the
+distribution, with `systemd=true` under `[boot]` in `/etc/wsl.conf` and a
+restart of the distribution with `wsl --shutdown`. Without it the user unit
+never runs. The distribution also stops when its last terminal closes, which
+stops the service with it. In that case nothing restarts the service at boot;
+it starts again with the next `agent-parley run`, or with `agent-parley up`.
 
 Worktrees start at a captured commit and persist. Ignored environment files,
 dependencies and untracked configuration are not copied. Set up each worktree
