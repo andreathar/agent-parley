@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.1](https://github.com/suneel944/agent-parley/compare/v0.20.0...v0.20.1) (2026-10-15)
+
+
+### Bug fixes
+
+* keep the sandbox service from repairing the operator's plugin (#1292) ([#1290](https://github.com/suneel944/agent-parley/issues/1290))
+
 ## [0.20.0](https://github.com/suneel944/agent-parley/compare/v0.19.1...v0.20.0) (2026-10-15)
 
 ### Upgrades
