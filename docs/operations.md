@@ -381,6 +381,7 @@ the only compatible combination.
 <!-- compatibility:start -->
 | Launcher | Wire protocol | Store schema |
 | --- | --- | --- |
+| 0.20.0 | 1 | 12 |
 | 0.19.1 | 1 | 12 |
 | 0.19.0 | 1 | 12 |
 | 0.18.2 | 1 | 12 |
