@@ -23,6 +23,7 @@ from agent_parley import (
     recovery,
     retirement,
     roster,
+    server,
     store,
     supervision,
     terminal,
@@ -740,6 +741,8 @@ def test_an_unattributed_stray_moves_and_is_reclaimed_once_landed(
 
     planned = bridge.relocate_worktrees(repo)
     moved = bridge.relocate_worktrees(repo, apply=True)
+    assert worktree_of(moved, clean)["moved"] is True, moved
+    assert worktree_of(moved, dirty)["moved"] is True, moved
     for name in ("kyc-walk-baseline", "fix-1871"):
         aged(strayed(idle, name))
     swept = bridge.reclaim_worktrees(repo, apply=True)
@@ -749,7 +752,6 @@ def test_an_unattributed_stray_moves_and_is_reclaimed_once_landed(
     assert plan["reason"] == reclaim.ADRIFT
     assert plan["destination"] == str(strayed(idle, "kyc-walk-baseline"))
     assert worktree_of(planned, dirty)["relocate"] is True
-    assert worktree_of(moved, clean)["moved"] is True
     assert not clean.exists()
     assert not dirty.exists()
     gone = worktree_of(swept, strayed(idle, "kyc-walk-baseline"))
@@ -943,23 +945,106 @@ def elsewhere(bridge):
     pytest.skip("needs a second writable filesystem")
 
 
-def test_a_stray_on_another_filesystem_is_refused_and_assessed_in_place(
+def test_a_stray_on_another_filesystem_is_rebuilt_in_the_strays_directory(
     bridge, repo, idle, elsewhere
 ):
     path = made(repo, elsewhere, "kyc-other-device")
+    (path / "draft.txt").write_text("unsaved\n")
     aged(path)
 
     moved = bridge.relocate_worktrees(repo, apply=True)
-    swept = bridge.reclaim_worktrees(repo, apply=True)
+
+    row = worktree_of(moved, path)
+    assert row["reason"] == reclaim.CROSSDEVICE
+    assert row["moved"] is True
+    assert not path.exists()
+    rebuilt = strayed(idle, "kyc-other-device")
+    assert (rebuilt / "draft.txt").read_text() == "unsaved\n"
+    assert git(rebuilt, "branch", "--show-current") == "kyc-other-device"
+
+
+def other_device(monkeypatch, path):
+    """Reports one worktree as sitting on a filesystem of its own."""
+    real = reclaim._device
+
+    def device(candidate):
+        """Gives the worktree a device number nothing else has."""
+        if candidate == path.resolve():
+            return -1
+        return real(candidate)
+
+    monkeypatch.setattr(reclaim, "_device", device)
+
+
+def test_a_cross_device_stray_keeps_its_staged_unstaged_and_unpushed_work(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    path = made(repo, tmp_path, "scratch-x")
+    (path / "work.txt").write_text("committed\n")
+    commit(path, "Unpushed work")
+    head = git(path, "rev-parse", "HEAD")
+    (path / "staged.txt").write_text("staged\n")
+    git(path, "add", "staged.txt")
+    (path / "work.txt").write_text("edited\n")
+    (path / "loose.txt").write_text("untracked\n")
+    aged(path)
+    other_device(monkeypatch, path)
+
+    moved = bridge.relocate_worktrees(repo, apply=True)
+
+    row = worktree_of(moved, path)
+    assert row["reason"] == reclaim.CROSSDEVICE
+    assert row["moved"] is True
+    assert row["checkpoint"].startswith("worktree-")
+    assert not path.exists()
+    rebuilt = strayed(idle, "scratch-x")
+    assert git(rebuilt, "rev-parse", "HEAD") == head
+    assert git(rebuilt, "branch", "--show-current") == "scratch-x"
+    assert git(rebuilt, "diff", "--cached", "--name-only") == "staged.txt"
+    assert (rebuilt / "work.txt").read_text() == "edited\n"
+    assert (rebuilt / "loose.txt").read_text() == "untracked\n"
+    assert str(path.resolve()) not in git(repo, "worktree", "list")
+
+
+def test_a_failed_checkpoint_never_removes_a_cross_device_stray(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    path = made(repo, tmp_path, "scratch-y")
+    (path / "draft.txt").write_text("unsaved\n")
+    aged(path)
+    other_device(monkeypatch, path)
+
+    def failing(directory, worktree):
+        """Fails the checkpoint the way an unreadable worktree does."""
+        raise BridgeError("capture failed")
+
+    monkeypatch.setattr(recovery, "preserve", failing)
+
+    moved = bridge.relocate_worktrees(repo, apply=True)
 
     row = worktree_of(moved, path)
     assert row["reason"] == reclaim.REFUSED
     assert row["moved"] is False
-    assert not strayed(idle, "kyc-other-device").exists()
-    gone = worktree_of(swept, path)
-    assert gone["reason"] == reclaim.CONTAINED
-    assert gone["removed"] is True
-    assert not path.exists()
+    assert (path / "draft.txt").read_text() == "unsaved\n"
+    assert not strayed(idle, "scratch-y").exists()
+
+
+def test_a_cross_device_stray_holding_ignored_files_is_left_in_place(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    path = made(repo, tmp_path, "scratch-z")
+    excluded(repo, ".env")
+    (path / ".env").write_text("SECRET=1\n")
+    aged(path)
+    other_device(monkeypatch, path)
+
+    moved = bridge.relocate_worktrees(repo, apply=True)
+
+    row = worktree_of(moved, path)
+    assert row["reason"] == reclaim.IGNORED
+    assert row["paths"] == [".env"]
+    assert (path / ".env").exists()
+    assert not list((idle["directory"] / "recovery").glob("worktree-*"))
 
 
 def test_a_worktree_under_the_pre_rename_state_root_is_reclaimed(
@@ -1103,6 +1188,17 @@ def test_a_stray_worktree_a_process_works_in_is_left_in_place(
     assert path.exists()
 
 
+def test_a_stray_worktree_is_left_in_place_when_cwds_cannot_be_listed(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    path = made(repo, tmp_path, "codex-pr-26")
+    monkeypatch.setattr(reclaim.process, "cwd_pids", lambda target: None)
+    moved = bridge.relocate_worktrees(repo, apply=True)
+
+    assert worktree_of(moved, path)["reason"] == reclaim.UNLISTED
+    assert path.exists()
+
+
 def test_a_move_git_refuses_is_reported_and_moves_nothing(
     bridge, repo, idle, tmp_path
 ):
@@ -1110,7 +1206,7 @@ def test_a_move_git_refuses_is_reported_and_moves_nothing(
     planned = worktree_of(bridge.relocate_worktrees(repo), path)
     Path(planned["destination"]).mkdir(parents=True)
 
-    row = reclaim.relocate(str(repo), planned)
+    row = reclaim.relocate(str(repo), idle["directory"], planned)
 
     assert row["reason"] == reclaim.REFUSED
     assert row["moved"] is False
@@ -1441,7 +1537,7 @@ def test_the_sweep_logs_what_it_moved_and_removed_for_later_reading(
     assert not json.loads(publication.read_text())["relocations"]
 
 
-def test_a_missing_project_root_is_retired_within_one_interval(
+def test_a_missing_project_root_is_retired_once_gone_long_enough(
     bridge, repo, paired
 ):
     store.initialize(bridge.home)
@@ -1454,7 +1550,7 @@ def test_a_missing_project_root_is_retired_within_one_interval(
     first = supervision.root_retired(directory)
     marker = directory / supervision.ROOT_PUBLICATION
     recorded = json.loads(marker.read_text())
-    recorded["since"] -= supervision.DEFAULTS["interval"]
+    recorded["since"] -= supervision.DEFAULTS["root_gone_after"]
     marker.write_text(json.dumps(recorded))
     supervision.poll(bridge.home, directory)
 
@@ -1506,6 +1602,98 @@ def test_prune_keeps_a_bundle_its_claim_still_owns(bridge, repo, paired):
     assert (folder / saved["artifact"]["reference"]).exists()
 
 
+def test_prune_drops_only_preserved_worktrees_past_their_retention(
+    bridge, repo, idle, tmp_path
+):
+    old = made(repo, tmp_path, "pr-old")
+    new = made(repo, tmp_path, "pr-new")
+    (old / "a.txt").write_text("a\n")
+    (new / "b.txt").write_text("b\n")
+    expired = recovery.preserve(idle["directory"], old)
+    kept = recovery.preserve(idle["directory"], new)
+    folder = idle["directory"] / "recovery"
+    record = folder / f"{expired['id']}.json"
+    aged_record = json.loads(record.read_text())
+    aged_record["captured_at"] -= recovery.PRESERVED_RETENTION + 1
+    record.write_text(json.dumps(aged_record))
+
+    removed = recovery.prune(
+        idle["directory"], issues.snapshot(idle["directory"])
+    )
+
+    assert removed == [expired["id"]]
+    assert not record.exists()
+    assert not (folder / f"{expired['id']}.bundle").exists()
+    assert [saved["id"] for saved in recovery.preserved(idle["directory"])] == [
+        kept["id"]
+    ]
+
+
+def test_gc_lists_a_forced_removal_and_restores_it_with_the_printed_command(
+    bridge, repo, idle, monkeypatch, capsys
+):
+    path = made(repo, idle["directory"], "pr-31")
+    (path / "work.txt").write_text("committed\n")
+    commit(path, "Unpushed work")
+    head = git(path, "rev-parse", "HEAD")
+    (path / "draft.txt").write_text("unsaved\n")
+    git(path, "add", "draft.txt")
+    (path / "work.txt").write_text("edited\n")
+    aged(path)
+    arguments = ["agent-parley", "--home", str(bridge.home), "gc"]
+    arguments += ["--repo", str(repo)]
+
+    monkeypatch.setattr("sys.argv", [*arguments, "--apply", "--force"])
+    assert cli.main() == 0
+    swept = capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", [*arguments, "--preserved"])
+    assert cli.main() == 0
+    listed = capsys.readouterr().out
+    (identifier,) = [
+        saved["id"] for saved in recovery.preserved(idle["directory"])
+    ]
+    removed = strayed(idle, "pr-31")
+    command = reclaim.restore_command(identifier, str(removed))
+    monkeypatch.setattr(
+        "sys.argv", [*arguments, "--restore", identifier, "--to", str(path)]
+    )
+    assert cli.main() == 0
+
+    assert not removed.exists()
+    assert command in swept
+    assert f"{identifier}: {removed} (pr-31)" in listed
+    assert git(path, "rev-parse", "HEAD") == head
+    assert git(path, "branch", "--show-current") == "pr-31"
+    assert git(path, "diff", "--cached", "--name-only") == "draft.txt"
+    assert (path / "work.txt").read_text() == "edited\n"
+
+
+def test_a_repeated_refusal_is_logged_once(
+    bridge, repo, idle, tmp_path, monkeypatch
+):
+    path = made(repo, tmp_path, "operator-wt")
+    (path / "draft.txt").write_text("unsaved\n")
+    aged(path)
+    (idle["directory"] / reclaim.STRAYS).write_text("not a directory\n")
+    logged = []
+    monkeypatch.setattr(
+        server, "log", lambda home, kind, line: logged.append(line)
+    )
+    manifest = roster.read(idle["directory"])
+    publication = idle["directory"] / supervision.RECLAIM_PUBLICATION
+
+    supervision.reclaim_lanes(bridge.home, idle["directory"], manifest)
+    published = json.loads(publication.read_text())
+    publication.write_text(json.dumps({**published, "swept": 0}))
+    supervision.reclaim_lanes(bridge.home, idle["directory"], manifest)
+
+    assert json.loads(publication.read_text())["swept"] > 0
+    refusals = [line for line in logged if reclaim.REFUSED in line]
+    assert len(refusals) == 1
+    assert str(path.resolve()) in refusals[0]
+    assert path.exists()
+
+
 def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     store.initialize(bridge.home)
     directory = bridge.project(repo, create=False)[1]
@@ -1526,7 +1714,7 @@ def test_a_missing_root_never_retires_a_live_lane(bridge, repo, paired):
     supervision.poll(bridge.home, directory)
     marker = directory / supervision.ROOT_PUBLICATION
     recorded = json.loads(marker.read_text())
-    recorded["since"] -= supervision.DEFAULTS["interval"]
+    recorded["since"] -= supervision.DEFAULTS["root_gone_after"]
     marker.write_text(json.dumps(recorded))
     supervision.poll(bridge.home, directory)
 
@@ -1554,7 +1742,7 @@ def test_a_missing_root_never_retires_an_unreadable_lane(bridge, repo, paired):
     supervision.poll(bridge.home, directory)
     marker = directory / supervision.ROOT_PUBLICATION
     recorded = json.loads(marker.read_text())
-    recorded["since"] -= supervision.DEFAULTS["interval"]
+    recorded["since"] -= supervision.DEFAULTS["root_gone_after"]
     marker.write_text(json.dumps(recorded))
     supervision.poll(bridge.home, directory)
 
@@ -1564,6 +1752,183 @@ def test_a_missing_root_never_retires_an_unreadable_lane(bridge, repo, paired):
     assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
     published = json.loads(marker.read_text())
     assert published["live"] == ["claude"]
+
+
+def backdate(directory, seconds):
+    """Moves the recorded start of a root's absence `seconds` earlier."""
+    marker = directory / supervision.ROOT_PUBLICATION
+    recorded = json.loads(marker.read_text())
+    recorded["since"] -= seconds
+    marker.write_text(json.dumps(recorded))
+
+
+def test_a_root_gone_past_one_interval_and_back_retires_nothing(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    away = repo.with_name("moved away")
+    repo.rename(away)
+
+    supervision.poll(bridge.home, directory)
+    backdate(directory, supervision.DEFAULTS["interval"] + 30)
+    supervision.poll(bridge.home, directory)
+    away.rename(repo)
+    supervision.poll(bridge.home, directory)
+
+    participants = roster.read(directory)["participants"]
+    assert not any(roster.retired(entry) for entry in participants.values())
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+    assert not (directory / supervision.ROOT_PUBLICATION).exists()
+    assert not (directory / supervision.ROOT_RETURNED).exists()
+
+
+def test_a_root_whose_parent_cannot_be_listed_never_retires(
+    bridge, repo, paired, tmp_path
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    manifest = directory / "project.json"
+    data = json.loads(manifest.read_text())
+    data["root"] = str(tmp_path / "unmounted volume" / "project")
+    manifest.write_text(json.dumps(data))
+
+    supervision.poll(bridge.home, directory)
+    backdate(directory, supervision.DEFAULTS["root_gone_after"] + 1)
+    supervision.poll(bridge.home, directory)
+
+    published = json.loads(
+        (directory / supervision.ROOT_PUBLICATION).read_text()
+    )
+    assert published["unreachable"] is True
+    assert not published["retired"]
+    participants = roster.read(directory)["participants"]
+    assert not any(roster.retired(entry) for entry in participants.values())
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+
+
+def test_a_returned_root_keeps_the_record_of_the_lanes_it_retired(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    bridge.issue(Path(paired["lanes"]["claude"]), "claim", "1")
+    away = repo.with_name("moved away")
+    repo.rename(away)
+
+    supervision.poll(bridge.home, directory)
+    backdate(directory, supervision.DEFAULTS["root_gone_after"])
+    supervision.poll(bridge.home, directory)
+    away.rename(repo)
+    supervision.poll(bridge.home, directory)
+
+    assert not (directory / supervision.ROOT_PUBLICATION).exists()
+    kept = json.loads((directory / supervision.ROOT_RETURNED).read_text())
+    assert kept["returned_at"] >= kept["since"]
+    assert {lane["participant"] for lane in kept["lanes"]} == {
+        "claude",
+        "codex",
+    }
+    [row] = [
+        row
+        for row in bridge.problems()
+        if row["condition"] == problems.ROOT_RETURNED
+    ]
+    assert row["count"] == 2
+    assert "agent-parley participant add claude --repo " in row["command"]
+    assert "agent-parley participant add codex --repo " in row["command"]
+
+
+def test_a_returned_root_record_clears_once_its_lanes_are_readmitted(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    kept = directory / supervision.ROOT_RETURNED
+    kept.write_text(
+        json.dumps(
+            {
+                "since": time.time() - 7200,
+                "returned_at": time.time(),
+                "lanes": [{"participant": "claude", "released": []}],
+            }
+        )
+    )
+
+    supervision.poll(bridge.home, directory)
+
+    assert not kept.exists()
+
+
+def test_a_returned_root_row_names_only_lanes_still_retired(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    retirement.mark(directory, "codex", time.time())
+    (directory / supervision.ROOT_RETURNED).write_text(
+        json.dumps(
+            {
+                "since": time.time() - 7200,
+                "returned_at": time.time(),
+                "lanes": [
+                    {"participant": "claude", "released": []},
+                    {"participant": "codex", "released": []},
+                ],
+            }
+        )
+    )
+
+    [row] = [
+        row
+        for row in bridge.problems()
+        if row["condition"] == problems.ROOT_RETURNED
+    ]
+
+    assert row["count"] == 1
+    assert "agent-parley participant add codex --repo " in row["command"]
+    assert "participant add claude" not in row["command"]
+    assert "claude" not in row["detail"]
+
+
+def test_a_second_root_return_keeps_lanes_retired_by_the_first(
+    bridge, repo, paired
+):
+    store.initialize(bridge.home)
+    directory = bridge.project(repo, create=False)[1]
+    retirement.mark(directory, "claude", time.time())
+    retirement.mark(directory, "codex", time.time())
+    kept = directory / supervision.ROOT_RETURNED
+    kept.write_text(
+        json.dumps(
+            {
+                "since": time.time() - 7200,
+                "returned_at": time.time() - 3600,
+                "lanes": [
+                    {"participant": "claude", "released": ["1"]},
+                    {"participant": "codex", "released": ["2"]},
+                ],
+            }
+        )
+    )
+    (directory / supervision.ROOT_PUBLICATION).write_text(
+        json.dumps(
+            {
+                "since": time.time() - 600,
+                "lanes": [{"participant": "codex", "released": []}],
+            }
+        )
+    )
+
+    supervision.root_returned(directory, roster.read(directory))
+
+    recorded = json.loads(kept.read_text())
+    assert recorded["lanes"] == [
+        {"participant": "codex", "released": []},
+        {"participant": "claude", "released": ["1"]},
+    ]
 
 
 def test_service_start_removes_wake_sockets_nobody_listens_on():
@@ -1647,7 +2012,7 @@ def gone_root(bridge, repo, paired, interval=True):
     if interval:
         marker = directory / supervision.ROOT_PUBLICATION
         recorded = json.loads(marker.read_text())
-        recorded["since"] -= supervision.DEFAULTS["interval"]
+        recorded["since"] -= supervision.DEFAULTS["root_gone_after"]
         marker.write_text(json.dumps(recorded))
         supervision.poll(bridge.home, directory)
     return directory, saved
@@ -1725,3 +2090,121 @@ def test_gc_project_waits_for_the_service_to_retire_the_root(
         supervision.forget(bridge.home, str(repo), apply=True)
 
     assert (directory / "project.json").exists()
+
+
+def test_a_refused_retirement_keeps_the_gone_root_unretired_and_named(
+    bridge, repo, paired, monkeypatch
+):
+    withdraw = retirement.withdraw
+    refusal = "claude holds ready or operator-blocked work (#1)"
+
+    def refusing(directory, name):
+        """Refuses the claude lane's retirement as ready work would."""
+        if name == "claude":
+            raise BridgeError(refusal)
+        return withdraw(directory, name)
+
+    monkeypatch.setattr(retirement, "withdraw", refusing)
+    directory, _ = gone_root(bridge, repo, paired)
+
+    published = json.loads(
+        (directory / supervision.ROOT_PUBLICATION).read_text()
+    )
+    assert published["retired"] is None
+    assert not supervision.root_retired(directory)
+    [entry] = published["refused"]
+    assert entry["participant"] == "claude"
+    assert entry["refused"] == refusal
+    assert set(entry["checkpoints"]) == {"1"}
+    assert [lane["participant"] for lane in published["lanes"]] == ["codex"]
+    assert issues.snapshot(directory)["issues"]["1"]["owner"] == "claude"
+    assert supervision.root_refused(directory) == [entry]
+    with pytest.raises(cli.BridgeError, match=r"claude: claude holds ready"):
+        supervision.forget(bridge.home, str(repo), apply=True)
+    assert (directory / "project.json").exists()
+
+    result = supervision.forget(
+        bridge.home, str(repo), apply=True, discard=True
+    )
+
+    assert result["removed"] is True
+    assert not directory.exists()
+
+
+def test_a_root_publication_without_refused_reads_as_refusing_nothing(
+    tmp_path,
+):
+    (tmp_path / supervision.ROOT_PUBLICATION).write_text(
+        json.dumps({"since": 1, "retired": 2, "lanes": [], "live": []})
+    )
+
+    assert supervision.root_refused(tmp_path) == []
+
+
+def test_one_refused_reclaim_step_never_skips_the_others(
+    bridge, repo, idle, monkeypatch
+):
+    ran = []
+    reclaimed = cli.Bridge.reclaim
+    pruned = reclaim.prune
+
+    def refusing(self, root, *, apply=False):
+        """Refuses every worktree move."""
+        raise BridgeError("relocation refused")
+
+    def reclaiming(self, root, *, apply=False):
+        """Records that the lane reclaim ran."""
+        ran.append("reclaim")
+        return reclaimed(self, root, apply=apply)
+
+    def pruning(directory, manifest, now):
+        """Records that the file prune ran."""
+        ran.append("prune")
+        return pruned(directory, manifest, now)
+
+    logged = []
+    monkeypatch.setattr(cli.Bridge, "relocate_worktrees", refusing)
+    monkeypatch.setattr(cli.Bridge, "reclaim", reclaiming)
+    monkeypatch.setattr(reclaim, "prune", pruning)
+    monkeypatch.setattr(
+        server, "log", lambda home, kind, line: logged.append((kind, line))
+    )
+    manifest = roster.read(idle["directory"])
+
+    with pytest.raises(BridgeError, match="relocate: relocation refused"):
+        supervision.reclaim_lanes(bridge.home, idle["directory"], manifest)
+
+    assert ran == ["reclaim", "prune"]
+    published = json.loads(
+        (idle["directory"] / supervision.RECLAIM_PUBLICATION).read_text()
+    )
+    assert published["errors"] == [
+        {"step": "relocate", "error": "relocation refused"}
+    ]
+    assert published["swept"] > 0
+    assert (
+        "reclaim",
+        f"{idle['directory'].name}: relocate refused: relocation refused",
+    ) in logged
+    summary = supervision.reclaim_summary(idle["directory"])
+    assert reclaim.summary_line(summary).endswith(
+        "; sweep steps refused: 1, first relocate: relocation refused"
+    )
+
+
+def test_a_refused_reclaim_step_reaches_the_supervision_error(
+    bridge, repo, idle, monkeypatch
+):
+    store.initialize(bridge.home)
+
+    def refusing(self, root, *, apply=False):
+        """Refuses every worktree move."""
+        raise BridgeError("relocation refused")
+
+    monkeypatch.setattr(cli.Bridge, "relocate_worktrees", refusing)
+
+    supervision.poll(bridge.home, idle["directory"])
+
+    error = issues.supervision_error(idle["directory"])
+    assert error is not None
+    assert "relocate: relocation refused" in error["detail"]

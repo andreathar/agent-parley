@@ -79,7 +79,26 @@ def test_a_plain_directory_is_not_a_checkout_whatever_git_answers(
     path("git")
     outside = tmp_path / "plain"
     outside.mkdir()
-    assert start.checkout(outside) == (False, False)
+    assert start.checkout(outside) == (False, False, False)
+
+
+def test_repository_without_commits_leads_with_the_first_commit(
+    path, tmp_path, capsys
+):
+    path("claude")
+    claude_plugin()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    subprocess.run(["git", "init", "-q", str(fresh)], check=True)
+    (fresh / "notes.txt").write_text("draft\n")
+    printed = screen(capsys, tmp_path / "home", fresh)
+    assert "Git repository, no commits yet" in printed
+    assert "clean" not in printed
+    assert "uncommitted changes" not in printed
+    assert printed.index("git commit") < printed.index(
+        "agent-parley run claude"
+    )
+    assert "Make the first commit" in printed
 
 
 def test_empty_git_marker_parent_does_not_make_a_checkout(path, tmp_path):
@@ -105,11 +124,103 @@ def test_dirty_repository_points_at_its_uncommitted_work(
     assert "git status" not in printed
 
 
+def test_registration_stash_is_listed_with_its_restore_command(
+    path, bridge, repo, capsys
+):
+    path("claude")
+    claude_plugin()
+    (repo / "shared.txt").write_text("changed\n")
+    bridge.setup(repo)
+    assert bridge.preserved
+    entry = subprocess.run(
+        ["git", "rev-parse", "refs/stash"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    printed = screen(capsys, bridge.home, repo)
+    assert f"  Stashed   git stash apply {entry}" in printed
+    subprocess.run(["git", "stash", "drop", "-q"], cwd=repo, check=True)
+    assert "Stashed" not in screen(capsys, bridge.home, repo)
+
+
+def test_a_stash_of_other_work_is_not_listed(path, bridge, repo, capsys):
+    path("claude")
+    claude_plugin()
+    bridge.setup(repo)
+    assert not bridge.preserved
+    (repo / "shared.txt").write_text("changed\n")
+    subprocess.run(["git", "stash", "-q"], cwd=repo, check=True)
+    assert "Stashed" not in screen(capsys, bridge.home, repo)
+
+
+@pytest.mark.parametrize("attached", [True, False])
+def test_run_repeats_the_stash_notice_after_an_attached_client_exits(
+    bridge, repo, monkeypatch, capsys, attached
+):
+    def launch(self, *args, **kwargs):
+        self.preserved = "Preserved your pending changes as stash entry abc"
+        print("client ran", file=sys.stderr)
+        return 0
+
+    monkeypatch.setattr(cli.Bridge, "launch", launch)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: attached)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "agent-parley",
+            "--home",
+            str(bridge.home),
+            "run",
+            "claude",
+            "--repo",
+            str(repo),
+        ],
+    )
+    assert cli.main() == 0
+    error = capsys.readouterr().err
+    repeated = error.split("client ran", 1)[1]
+    assert ("stash entry abc" in repeated) is attached
+
+
 def test_no_native_cli_offers_the_demo(path, repo, tmp_path, capsys):
     printed = screen(capsys, tmp_path / "home", repo)
-    assert "CLIs      none on PATH (claude, codex)" in printed
+    assert (
+        "CLIs      none on PATH (claude, codex, copilot, gemini, opencode, amp)"
+    ) in printed
     assert "agent-parley demo" in printed
     assert "agent-parley run" not in printed
+
+
+@pytest.mark.parametrize("name", ["gemini", "copilot", "opencode", "amp"])
+def test_a_provider_without_a_plugin_is_offered_to_run(
+    name, path, repo, tmp_path, capsys
+):
+    path(name)
+    printed = screen(capsys, tmp_path / "home", repo)
+    assert f"CLIs      {name} (no plugin needed)" in printed
+    assert printed.split("Next:\n")[1].startswith(f"  agent-parley run {name}")
+    assert "agent-parley demo" not in printed
+    assert "plugins install" not in printed
+
+
+def test_every_provider_on_path_wraps_within_the_screen(
+    path, repo, tmp_path, capsys
+):
+    for name in ("amp", "opencode", "gemini", "copilot", "codex", "claude"):
+        path(name)
+    claude_plugin()
+    printed = screen(capsys, tmp_path / "home", repo)
+    listed = printed.split("CLIs      ")[1].split("  Service")[0]
+    assert " ".join(listed.split()) == (
+        "claude (plugin added), codex (plugin missing), copilot (no plugin "
+        "needed), gemini (no plugin needed), opencode (no plugin needed), "
+        "amp (no plugin needed)"
+    )
+    assert "agent-parley run claude" in printed
+    assert "Add the plugin to codex." in printed
 
 
 def test_missing_plugin_offers_the_install(path, repo, tmp_path, capsys):
@@ -140,6 +251,9 @@ def test_running_service_and_registered_project_offer_the_dashboard(
     codex_plugin()
     running(bridge, monkeypatch)
     monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "email")
+    monkeypatch.setenv("AGENT_PARLEY_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("AGENT_PARLEY_SMTP_FROM", "bridge@example.com")
+    monkeypatch.setenv("AGENT_PARLEY_SMTP_TO", "owner@example.com")
     printed = screen(capsys, bridge.home, repo)
     (bridge.home / "server.json").unlink()
     assert "Project   registered" in printed
@@ -187,6 +301,27 @@ def test_notify_off_with_lanes_offers_its_setup(
         printed
     )
     assert "Needs you" not in printed
+
+
+def test_notify_missing_email_settings_keeps_its_setup_hint(
+    path, bridge, repo, paired, monkeypatch, capsys
+):
+    path("codex")
+    codex_plugin()
+    running(bridge, monkeypatch)
+    monkeypatch.setenv("AGENT_PARLEY_NOTIFY", "email")
+    for name in (
+        "AGENT_PARLEY_SMTP_HOST",
+        "AGENT_PARLEY_SMTP_FROM",
+        "AGENT_PARLEY_SMTP_TO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    printed = screen(capsys, bridge.home, repo)
+    (bridge.home / "server.json").unlink()
+    assert "  Notify    off\n" in printed
+    assert "agent-parley notify setup  Get told when a lane needs you." in (
+        printed
+    )
 
 
 def snapshot(root):

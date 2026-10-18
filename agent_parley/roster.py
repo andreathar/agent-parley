@@ -38,6 +38,45 @@ UNAVAILABLE_HOOKS: dict[str, tuple[str, ...]] = {
 }
 REQUIRED_HOOKS = ("SessionStart", "PreToolUse", "Stop")
 DELIVERY_HOOKS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop")
+APPROVAL: dict[str, str | None] = {
+    "claude": "settings",
+    "codex": "flag",
+    "copilot": "flag",
+    "gemini": "overlay",
+    "opencode": "overlay",
+    "amp": None,
+}
+"""How a launch carries the bridge tool opt-in into each adapter.
+
+``settings`` is the session's permission settings, ``flag`` a command-line
+allow and ``overlay`` the lane-private configuration the launch writes;
+each allows this bridge's own MCP server and nothing else. A `codex` lane
+carries it only from `CODEX_APPROVAL_RELEASE` on. ``None`` marks an
+adapter with no such setting the launcher uses, so a recorded opt-in
+cannot reach its session; no opt-in gap is reported for it, and a
+recorded opt-in is reported as unsupported instead of silently ignored.
+"""
+CODEX_APPROVAL_RELEASE = (0, 153, 0)
+"""Oldest Codex CLI release verified to read a per-server tool approval.
+
+From this release a launch passes
+``mcp_servers.agent_parley.default_tools_approval_mode="approve"``, which
+approves the tools of this bridge's own MCP server and no other. An older
+or unreadable release gets no such override, and the launch says so.
+"""
+POLLED_REQUIRED_HOOKS = ("PreToolUse",)
+"""Guards a polled-delivery adapter must still raise to launch at all.
+
+An adapter whose mail is polled starts as a degraded lane when it lacks
+other events in ``REQUIRED_HOOKS``: the launcher's delivery thread carries
+coordination in, ``PreToolUse`` still refuses a branch switch or an
+unclaimed edit, and every launch names the guards that do not run.
+"""
+DEGRADED_WARNING = (
+    "{name}: the {adapter!r} adapter cannot deliver {missing}, so this lane "
+    "runs degraded: mail arrives by polling and the guards those events "
+    "carry do not run."
+)
 WATCHED_HOOKS = ("PermissionRequest", "Stop")
 """Events whose absence leaves a lane's blocked or idle state to the watcher.
 
@@ -79,6 +118,10 @@ MANIFEST_VERSION = 2
 APPROVAL_STEPS = ("merge", "pr")
 PROVIDERS = "providers.json"
 CREDENTIALS = "credentials.json"
+EMPTY_CREDENTIAL = (
+    "A credential profile must select an account: pass --config-home DIR "
+    "(or --env/--require-env)."
+)
 
 PRESETS: dict[str, dict] = {
     "claude": {
@@ -879,29 +922,124 @@ def define_provider(
     Raises:
         BridgeError: If the adapter, command, or variables are invalid.
     """
+    return _define(
+        home,
+        PROVIDERS,
+        name,
+        validated_provider(
+            name,
+            {
+                "adapter": adapter,
+                "command": command,
+                "home_env": home_env,
+                "env": overrides(env),
+                "require_env": require_env,
+            },
+        ),
+    )
+
+
+def validated_provider(name: str, entry: object) -> dict:
+    """Checks one provider definition the way `provider add` checks it.
+
+    Shared by `define_provider` and by state import, so a definition read
+    from an archive passes the same bounds as one an operator typed.
+
+    Args:
+        name: Provider name.
+        entry: Candidate definition with adapter, command, home_env, env,
+            require_env and an optional budget and price.
+
+    Returns:
+        The definition holding only the recognised fields.
+
+    Raises:
+        BridgeError: If any field is malformed, names an unsupported adapter
+            or records a credential value.
+    """
     identifier(name, "Provider name")
+    if not isinstance(entry, dict):
+        raise BridgeError(f"Provider {name!r} is not a definition object.")
+    adapter = entry.get("adapter")
     if adapter not in ADAPTERS:
         raise BridgeError(
             "Agent Parley supplies MCP configuration and lifecycle hooks "
             "through one native configuration contract per CLI; adapter "
             f"must be one of: {', '.join(ADAPTERS)}."
         )
-    if not command.strip() or "\x00" in command or len(command) > 240:
+    command = entry.get("command")
+    if (
+        not isinstance(command, str)
+        or not command.strip()
+        or "\x00" in command
+        or len(command) > 240
+    ):
         raise BridgeError("Provider command must be an executable name.")
+    home_env = entry.get("home_env", "")
+    if not isinstance(home_env, str):
+        raise BridgeError("Provider home_env must be a variable name.")
     if home_env:
         variables([home_env])
-    return _define(
-        home,
-        PROVIDERS,
-        name,
-        {
-            "adapter": adapter,
-            "command": command,
-            "home_env": home_env,
-            "env": overrides(env),
-            "require_env": variables(require_env),
-        },
-    )
+    env = entry.get("env", {})
+    require_env = entry.get("require_env", [])
+    if not isinstance(env, dict) or not all(
+        isinstance(value, str) for value in env.values()
+    ):
+        raise BridgeError("Provider env must map names to string values.")
+    if not isinstance(require_env, list):
+        raise BridgeError("Provider require_env must be a list of names.")
+    result = {
+        "adapter": adapter,
+        "command": command,
+        "home_env": home_env,
+        "env": overrides([f"{key}={env[key]}" for key in variables(list(env))]),
+        "require_env": variables(require_env),
+    }
+    if "budget" in entry:
+        result["budget"] = budget(entry["budget"])
+    if "price" in entry:
+        result["price"] = price(entry["price"])
+    return result
+
+
+def adopt_providers(home: Path, entries: dict) -> dict[str, list]:
+    """Adds provider definitions carried in from elsewhere, entry by entry.
+
+    A name that is a built-in preset or already defined here is skipped, so
+    an import never replaces a launch contract the operator relies on. Every
+    other entry passes `validated_provider` or is refused with its reason.
+
+    Args:
+        home: Private bridge state root.
+        entries: Provider definitions by name, as another registry stored
+            them.
+
+    Returns:
+        ``added`` and ``skipped`` provider names, and ``refused`` records
+        naming each rejected provider and why.
+    """
+    result: dict[str, list] = {"added": [], "skipped": [], "refused": []}
+    with lock(home / "registry.lock"):
+        path = home / PROVIDERS
+        stored: dict = (
+            json.loads(path.read_text())
+            if path.exists()
+            else {"version": 1, "entries": {}}
+        )
+        local = stored.setdefault("entries", {})
+        for name, entry in entries.items():
+            if name in PRESETS or name in local:
+                result["skipped"].append(name)
+                continue
+            try:
+                local[name] = validated_provider(name, entry)
+            except BridgeError as exc:
+                result["refused"].append({"name": name, "reason": str(exc)})
+                continue
+            result["added"].append(name)
+        if result["added"]:
+            write_json(path, stored)
+    return result
 
 
 def provider_budget(home: Path, name: str, changes: dict) -> dict:
@@ -930,6 +1068,57 @@ def provider_budget(home: Path, name: str, changes: dict) -> dict:
     return _define(home, PROVIDERS, name, entry)
 
 
+def price(value: object) -> dict:
+    """Validates the price an operator recorded on one provider.
+
+    A price is never fetched. It is the operator's own figure per million
+    tokens, applied to the one token count a client records for input and
+    output alike, so it yields an estimate and never a bill.
+
+    Args:
+        value: Recorded price, holding ``per_mtok``.
+
+    Returns:
+        The validated price.
+
+    Raises:
+        BridgeError: If a field is unknown or the price is not positive.
+    """
+    if not isinstance(value, dict) or set(value) != {"per_mtok"}:
+        raise BridgeError("A price accepts only: per_mtok.")
+    amount = value["per_mtok"]
+    if type(amount) not in (int, float) or not 0 < amount <= MAX_BUDGET:
+        raise BridgeError(
+            "The price per million tokens must be a positive number no "
+            f"greater than {MAX_BUDGET}."
+        )
+    return {"per_mtok": amount}
+
+
+def provider_price(home: Path, name: str, per_mtok: float) -> dict:
+    """Records or removes the operator's price on one provider definition.
+
+    Like a budget, a price on a built-in preset is kept on a local override,
+    and `provider remove` drops it with the override.
+
+    Args:
+        home: Private bridge state root.
+        name: Provider name.
+        per_mtok: Price per million tokens; 0 removes the price.
+
+    Returns:
+        The stored provider definition.
+
+    Raises:
+        BridgeError: If the provider is not defined or the price is unusable.
+    """
+    entry = dict(provider(home, name))
+    entry.pop("price", None)
+    if per_mtok:
+        entry["price"] = price({"per_mtok": per_mtok})
+    return _define(home, PROVIDERS, name, entry)
+
+
 def credentials(home: Path) -> dict:
     """Returns every locally defined credential profile."""
     return _registry(home, CREDENTIALS, {})
@@ -952,8 +1141,11 @@ def credential(home: Path, name: str) -> dict:
     if entry is None:
         raise BridgeError(
             f"Unknown credential profile {name!r}. Define it with "
-            "`agent-parley credentials add`.",
-            next_command=f"agent-parley credentials add {shlex.quote(name)}",
+            "`agent-parley credentials add NAME --config-home DIR`.",
+            next_command=(
+                f"agent-parley credentials add {shlex.quote(name)} "
+                f"--config-home ~/{shlex.quote(f'.claude-{name}')}"
+            ),
         )
     return entry
 
@@ -965,6 +1157,9 @@ def define_credential(
 
     The profile records a config home and variable names. The native CLI still
     performs its own sign-in inside that home, so bridge state holds no token.
+    A profile with none of the three would launch on the default account
+    under a name implying a separate one, so it is refused before anything
+    is written.
 
     Args:
         home: Private bridge state root.
@@ -977,10 +1172,13 @@ def define_credential(
         The stored credential profile.
 
     Raises:
-        BridgeError: If the name, directory, or variables are invalid.
+        BridgeError: If the name, directory, or variables are invalid, or
+            the profile selects no account.
     """
     require_operator(home, "Changing shared account settings")
     identifier(name, "Credential profile name")
+    if not (config_home or env or require):
+        raise BridgeError(EMPTY_CREDENTIAL)
     resolved = ""
     if config_home:
         directory = Path(config_home).expanduser()
@@ -1075,6 +1273,19 @@ def launch_environment(
             "Export these before launching: " + ", ".join(sorted(set(missing)))
         )
     return result
+
+
+def case_insensitive(manifest: dict) -> bool:
+    """Reports whether a project's checkout ignores case in file names.
+
+    Args:
+        manifest: Normalized project manifest.
+
+    Returns:
+        Whether reservation paths are compared without regard to case. A
+        manifest written before the field existed reports False.
+    """
+    return manifest.get("case_insensitive") is True
 
 
 def normalize(manifest: dict) -> dict:
@@ -1175,6 +1386,7 @@ def normalize(manifest: dict) -> dict:
         "approval": approval_steps(manifest.get("approval") or []),
         "pull_request": pull_request_policy(manifest.get("pull_request", {})),
         "integration": manifest.get("integration", {}),
+        **({"case_insensitive": True} if case_insensitive(manifest) else {}),
         **(
             {"integration_base": integration_base(manifest["integration_base"])}
             if manifest.get("integration_base")
@@ -1193,6 +1405,11 @@ def normalize(manifest: dict) -> dict:
         **(
             {"blueprint_defaults": dict(manifest["blueprint_defaults"])}
             if manifest.get("blueprint_defaults")
+            else {}
+        ),
+        **(
+            {"blueprint_templates": dict(manifest["blueprint_templates"])}
+            if manifest.get("blueprint_templates")
             else {}
         ),
         "supervision": project,
@@ -1394,14 +1611,17 @@ def integration_policy(value: object) -> dict:
     The only setting is ``unattended``: the ``target`` branch the base
     checkout must have checked out, and the bounded list of ``issues`` whose
     ready work may be integrated there without an operator at the keyboard.
-    An empty mapping is the shipped default and authorizes nothing.
+    An optional ``auto`` boolean, false when absent, lets the supervision
+    service attempt that integration on its own. An empty mapping is the
+    shipped default and authorizes nothing.
 
     Args:
         value: The ``integration`` object from the private project manifest.
 
     Returns:
         ``{}`` when no policy is recorded, otherwise the validated policy
-        with issue numbers as decimal strings in ascending order.
+        with issue numbers as decimal strings in ascending order and
+        ``auto`` present only when it is true.
 
     Raises:
         BridgeError: If a setting is unknown, missing or has an invalid value.
@@ -1412,13 +1632,17 @@ def integration_policy(value: object) -> dict:
     if "unattended" not in value:
         return {}
     unattended = value["unattended"]
-    if not isinstance(unattended, dict) or set(unattended) != {
+    if not isinstance(unattended, dict) or set(unattended) - {"auto"} != {
         "target",
         "issues",
     }:
         raise BridgeError(
-            invalid + "`unattended` must name exactly `target` and `issues`."
+            invalid + "`unattended` must name exactly `target` and `issues`, "
+            "and may add `auto`."
         )
+    auto = unattended.get("auto", False)
+    if type(auto) is not bool:
+        raise BridgeError(invalid + "`auto` must be a boolean.")
     target = unattended["target"]
     if not branch_name(target):
         raise BridgeError(invalid + "`target` must be one Git branch name.")
@@ -1441,6 +1665,7 @@ def integration_policy(value: object) -> dict:
         "unattended": {
             "target": target,
             "issues": sorted(numbers, key=int),
+            **({"auto": True} if auto else {}),
         }
     }
 
@@ -1470,7 +1695,7 @@ def read(directory: Path) -> dict:
         Manifest using the participant roster layout.
 
     Raises:
-        BridgeError: If no manifest exists yet.
+        BridgeError: If no manifest exists yet, or it lacks a required key.
     """
     path = directory / "project.json"
     if not path.exists():
@@ -1479,15 +1704,38 @@ def read(directory: Path) -> dict:
             "or agent-parley setup first.",
             next_command="agent-parley setup .",
         )
-    return normalize(json.loads(path.read_text()))
+    try:
+        return normalize(json.loads(path.read_text()))
+    except KeyError as exc:
+        raise BridgeError(
+            f"{path} lacks {exc.args[0]!r}; the project manifest is "
+            "incomplete or corrupt. Restore the key or the file."
+        ) from exc
 
 
-def resolve(manifest: dict, lane: Path) -> str:
+def resolve(
+    manifest: dict,
+    lane: Path,
+    mail_reader: bool = False,
+    next_reader: bool = False,
+) -> str:
     """Returns the participant that owns a worktree.
+
+    The read-only mail verbs accept ``--as NAME``, so their refusal from the
+    main checkout tells the operator to name a lane there, ending on a
+    ``mail list --as`` for the first active lane, instead of pointing at a
+    participant listing that cannot read anything. Every other verb is
+    refused with the first active lane's worktree named, and with ``run
+    claude`` when no lane is active yet. `issue next` takes ``--repo``, so
+    its refusal ends on that command aimed at the worktree.
 
     Args:
         manifest: Manifest using the participant roster layout.
         lane: Resolved worktree path.
+        mail_reader: Whether the caller is a read-only mail verb that reads
+            a named lane's mail with ``--as NAME``.
+        next_reader: Whether the caller is `issue next`, which ranks work
+            for the lane its ``--repo`` names.
 
     Returns:
         The owning participant name.
@@ -1498,9 +1746,36 @@ def resolve(manifest: dict, lane: Path) -> str:
     for name, participant in manifest["participants"].items():
         if Path(participant["lane"]) == lane:
             return name
+    active = sorted(
+        name
+        for name, participant in manifest["participants"].items()
+        if not retired(participant)
+    )
+    if mail_reader:
+        raise BridgeError(
+            "Read a lane's mail from the main checkout with --as NAME, or run "
+            "this inside the lane's worktree.",
+            next_command=(
+                f"agent-parley mail list --as {shlex.quote(active[0])}"
+                if active
+                else "agent-parley run claude"
+            ),
+        )
+    if not active:
+        raise BridgeError(
+            "Run this from an assigned agent worktree, not the main checkout; "
+            "this project has no active lane yet.",
+            next_command="agent-parley run claude",
+        )
+    worktree = manifest["participants"][active[0]]["lane"]
     raise BridgeError(
-        "Run this from an assigned agent worktree, not the main checkout.",
-        next_command="agent-parley participant list",
+        "Run this from an assigned agent worktree, not the main checkout, "
+        f"such as {active[0]}'s at {worktree}.",
+        next_command=(
+            f"agent-parley issue next --repo {shlex.quote(worktree)}"
+            if next_reader
+            else "agent-parley participant list"
+        ),
     )
 
 
@@ -1580,6 +1855,48 @@ def require_operator(home: Path, action: str) -> None:
                     "Cannot verify operator scope: unreadable project "
                     f"manifest at {path}."
                 ) from error
+
+
+def token_lane(home: Path, manifest: dict) -> str | None:
+    """Returns the participant whose coordination credential the caller holds.
+
+    The working directory names a lane only while the lane stays inside its
+    worktree. A launched lane carries `LANE_TOKEN` wherever it runs, so a
+    lane-attributed command resolves the credential too and refuses to act
+    for a peer whose worktree it names as ``--repo``. Like `from_lane`, this
+    is the command-line boundary, not an operating-system one.
+
+    Args:
+        home: Private bridge state root holding the coordination store.
+        manifest: Manifest using the participant roster layout.
+
+    Returns:
+        The participant the credential was issued to, or None when the
+        environment holds no credential.
+
+    Raises:
+        BridgeError: If the environment holds a credential that names no
+            participant of this project.
+    """
+    import sqlite3
+
+    from agent_parley import store
+
+    token = os.environ.get(LANE_TOKEN)
+    if not token:
+        return None
+    try:
+        actor = store.authenticate(home, token)
+    except (sqlite3.Error, BridgeError):
+        actor = None
+    if actor and actor["project"] == manifest["root"]:
+        for name, participant in manifest["participants"].items():
+            if participant.get("display") == actor["name"]:
+                return name
+    raise BridgeError(
+        f"The {LANE_TOKEN} in this environment names no participant of "
+        f"{manifest['root']}; a lane acts only as itself."
+    )
 
 
 def describe(manifest: dict) -> str:

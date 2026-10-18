@@ -3,7 +3,7 @@
   "name": "io.github.andreathar/agent-parley",
   "title": "Agent Parley",
   "description": "Coordination server for parallel coding agents. Runs only inside a lane started by agent-parley run.",
-  "version": "0.18.2",
+  "version": "0.20.1",
   "websiteUrl": "https://andreathar.github.io/agent-parley/",
   "repository": {
     "url": "https://github.com/andreathar/agent-parley",

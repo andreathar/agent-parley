@@ -15,6 +15,7 @@ status queries and decision answers back from the configured chat.
 """
 
 import hashlib
+import hmac
 import json
 import os
 import threading
@@ -40,9 +41,15 @@ STORED_KEYS = (
     "AGENT_PARLEY_NOTIFY",
     "AGENT_PARLEY_TELEGRAM_CHAT",
     "AGENT_PARLEY_TELEGRAM_TOKEN",
+    "AGENT_PARLEY_TELEGRAM_USERS",
     "AGENT_PARLEY_INBOUND",
     "AGENT_PARLEY_INBOUND_PASSCODE",
+    "AGENT_PARLEY_WEBHOOK_URL",
+    "AGENT_PARLEY_WEBHOOK_SECRET",
 )
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+SIGNATURE_HEADER = "X-Agent-Parley-Signature"
+REDACTED_URL = "<webhook URL>"
 UNCONFIGURED = (
     "No notification transport is configured; run `agent-parley notify "
     "setup`, or set AGENT_PARLEY_NOTIFY."
@@ -156,10 +163,12 @@ PROBLEM_CONDITIONS = frozenset(
         "second session",
         "recovery refused",
         "integration unverified",
+        "unattended integration failed",
         "wake attention",
         "waiting on approval",
         "held by a native dialog",
         "crossing ready",
+        "plugin stale",
     }
 )
 
@@ -252,18 +261,37 @@ def reported(values: Mapping[str, str]) -> dict:
     except BridgeError as exc:
         return {"enabled": True, "transports": [], "fault": str(exc)}
     telegram = config["telegram"]
-    fault = ""
+    faults = []
     if "telegram" in config["transports"] and not (
         telegram["token"] and telegram["chat"]
     ):
-        fault = (
+        faults.append(
             "Telegram needs AGENT_PARLEY_TELEGRAM_TOKEN and "
             "AGENT_PARLEY_TELEGRAM_CHAT; run `agent-parley notify setup`."
         )
+    if "email" in config["transports"]:
+        mail = config["email"]
+        missing = [
+            name
+            for name, value in (
+                ("AGENT_PARLEY_SMTP_HOST", mail["host"]),
+                ("AGENT_PARLEY_SMTP_FROM", mail["sender"]),
+                ("AGENT_PARLEY_SMTP_TO", mail["recipients"]),
+            )
+            if not value
+        ]
+        if missing:
+            names = missing[-1]
+            if len(missing) > 1:
+                names = ", ".join(missing[:-1]) + " and " + names
+            faults.append(f"Email needs {names}.")
+        faults.append(email_fault(mail))
+    if "webhook" in config["transports"]:
+        faults.append(webhook_fault(config["webhook"]["url"]))
     return {
         "enabled": True,
         "transports": config["transports"],
-        "fault": fault,
+        "fault": "; ".join(fault for fault in faults if fault),
     }
 
 
@@ -352,6 +380,13 @@ def settings(environ: Mapping[str, str] | None = None) -> dict:
         "telegram": {
             "token": values.get("AGENT_PARLEY_TELEGRAM_TOKEN", "").strip(),
             "chat": values.get("AGENT_PARLEY_TELEGRAM_CHAT", "").strip(),
+            "users": [
+                user.strip()
+                for user in values.get("AGENT_PARLEY_TELEGRAM_USERS", "").split(
+                    ","
+                )
+                if user.strip()
+            ],
             "api": values.get("AGENT_PARLEY_TELEGRAM_API", TELEGRAM_API),
         },
         "email": {
@@ -362,6 +397,10 @@ def settings(environ: Mapping[str, str] | None = None) -> dict:
             "sender": values.get("AGENT_PARLEY_SMTP_FROM", "").strip(),
             "recipients": recipients,
             "tls": mode,
+        },
+        "webhook": {
+            "url": values.get("AGENT_PARLEY_WEBHOOK_URL", "").strip(),
+            "secret": values.get("AGENT_PARLEY_WEBHOOK_SECRET", ""),
         },
     }
 
@@ -526,8 +565,11 @@ def telegram(config: dict, subject: str, body: str) -> None:
 def email(config: dict, subject: str, body: str) -> None:
     """Sends one message over SMTP with STARTTLS or implicit TLS.
 
-    The SMTP client is imported here rather than at module scope, so a
-    command line that never notifies does not pay for it at startup.
+    Both TLS modes verify the server certificate chain and host name with
+    the system trust store. A login without TLS is refused unless the host
+    is loopback; see `email_fault`. The SMTP client is imported here rather
+    than at module scope, so a command line that never notifies does not
+    pay for it at startup.
 
     Args:
         config: Resolved notification configuration.
@@ -535,11 +577,13 @@ def email(config: dict, subject: str, body: str) -> None:
         body: Plain-text body.
 
     Raises:
-        BridgeError: If the host, sender or recipient list is missing.
+        BridgeError: If the host, sender or recipient list is missing, or
+            the login would travel in the clear to a remote host.
         OSError: If the session cannot be established.
         smtplib.SMTPException: If the server refuses the session or message.
     """
     import smtplib
+    import ssl
 
     values = config["email"]
     if not values["host"]:
@@ -548,27 +592,146 @@ def email(config: dict, subject: str, body: str) -> None:
         raise BridgeError(
             "Email needs AGENT_PARLEY_SMTP_FROM and AGENT_PARLEY_SMTP_TO."
         )
+    fault = email_fault(values)
+    if fault:
+        raise BridgeError(fault)
+    context = ssl.create_default_context()
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = values["sender"]
     message["To"] = ", ".join(values["recipients"])
     message.set_content(body)
     session = (
-        smtplib.SMTP_SSL(values["host"], values["port"], timeout=TIMEOUT)
+        smtplib.SMTP_SSL(
+            values["host"], values["port"], timeout=TIMEOUT, context=context
+        )
         if values["tls"] == "implicit"
         else smtplib.SMTP(values["host"], values["port"], timeout=TIMEOUT)
     )
     with session:
         if values["tls"] == "starttls":
-            session.starttls()
+            session.starttls(context=context)
         if values["user"]:
             session.login(values["user"], values["password"])
         session.send_message(message)
 
 
+def email_fault(values: Mapping[str, object]) -> str:
+    """Names why the SMTP settings would expose the login.
+
+    With ``AGENT_PARLEY_SMTP_TLS=none`` the ``AUTH`` exchange travels
+    unencrypted, so a login is accepted only to a loopback relay, as
+    `webhook_fault` accepts plain HTTP only to one.
+
+    Args:
+        values: The ``email`` section of the resolved configuration.
+
+    Returns:
+        The refusal sentence, or an empty string when the settings are usable.
+    """
+    if (
+        values["tls"] != "none"
+        or not values["user"]
+        or values["host"] in LOOPBACK_HOSTS
+    ):
+        return ""
+    return (
+        "AGENT_PARLEY_SMTP_TLS=none would send the SMTP login in the clear "
+        "to a host other than 127.0.0.1, localhost or ::1; set "
+        "AGENT_PARLEY_SMTP_TLS to starttls or implicit."
+    )
+
+
+def webhook_fault(url: str) -> str:
+    """Names why a webhook URL cannot receive notifications.
+
+    A webhook URL is a bearer secret, so the sentence never repeats it. Plain
+    HTTP is accepted only to a loopback relay, because anywhere else it would
+    carry the URL and the message in the clear.
+
+    Args:
+        url: Configured ``AGENT_PARLEY_WEBHOOK_URL``.
+
+    Returns:
+        The refusal sentence, or an empty string when the URL is usable.
+    """
+    import urllib.parse
+
+    if not url:
+        return (
+            "Webhook needs AGENT_PARLEY_WEBHOOK_URL; run `agent-parley notify "
+            "setup --webhook`."
+        )
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        parts = None
+    if parts is not None and parts.hostname:
+        if parts.scheme == "https":
+            return ""
+        if parts.scheme == "http" and parts.hostname in LOOPBACK_HOSTS:
+            return ""
+    return (
+        "AGENT_PARLEY_WEBHOOK_URL must be an https:// URL, or http:// to "
+        "127.0.0.1 or localhost."
+    )
+
+
+def webhook(config: dict, subject: str, body: str) -> None:
+    """Posts one message as JSON to the configured webhook.
+
+    The ``text`` key satisfies Slack and Teams incoming webhooks and
+    ``content`` satisfies Discord; ``subject`` and ``body`` serve a generic
+    receiver. With a secret configured, the `SIGNATURE_HEADER` carries the
+    HMAC-SHA256 of the exact request body, so a receiver can verify the
+    sender. The URL is a bearer secret and is replaced by `REDACTED_URL` in
+    any failure text.
+
+    Args:
+        config: Resolved notification configuration.
+        subject: Subject line, sent as the message's first line.
+        body: Message body.
+
+    Raises:
+        BridgeError: If the URL is missing or not allowed, or the receiver
+            answers with a status outside 2xx.
+        OSError: If the request cannot be completed.
+    """
+    import urllib.request
+
+    values = config["webhook"]
+    fault = webhook_fault(values["url"])
+    if fault:
+        raise BridgeError(fault)
+    text = f"{subject}\n\n{body}"
+    data = json.dumps(
+        {"text": text, "content": text, "subject": subject, "body": body}
+    ).encode()
+    headers = {"Content-Type": "application/json"}
+    if values["secret"]:
+        digest = hmac.new(
+            values["secret"].encode(), data, hashlib.sha256
+        ).hexdigest()
+        headers[SIGNATURE_HEADER] = f"sha256={digest}"
+    request = urllib.request.Request(
+        values["url"], data=data, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            status = response.status
+    except OSError as exc:
+        raise OSError(str(exc).replace(values["url"], REDACTED_URL)) from None
+    if not 200 <= status < 300:
+        raise BridgeError(f"Webhook answered {status}.")
+
+
 Transport = Callable[[dict, str, str], None]
 
-TRANSPORTS: dict[str, Transport] = {"telegram": telegram, "email": email}
+TRANSPORTS: dict[str, Transport] = {
+    "telegram": telegram,
+    "email": email,
+    "webhook": webhook,
+}
 
 
 def send(config: dict, subject: str, body: str) -> list[dict]:
@@ -576,7 +739,8 @@ def send(config: dict, subject: str, body: str) -> list[dict]:
 
     Delivery is best effort: a transport that fails is reported and the next
     one is still attempted. Nothing is queued for a later retry. Every SMTP
-    failure is an ``OSError``, so one reading covers both transports.
+    and HTTP failure is an ``OSError``, so one reading covers every
+    transport.
 
     Args:
         config: Resolved notification configuration.

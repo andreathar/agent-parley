@@ -1,11 +1,12 @@
 """Observes lane availability and reminds holders about waiting peers."""
 
-import collections
+import ast
 import contextlib
 import contextvars
 import copy
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -18,7 +19,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TypeGuard, cast
+from typing import Any, TypeGuard, cast
 
 from agent_parley import (
     budgets,
@@ -32,6 +33,7 @@ from agent_parley import (
     lifecycle,
     notify,
     process,
+    protocol,
     reclaim,
     records,
     recovery,
@@ -39,11 +41,15 @@ from agent_parley import (
     store,
     terminal,
     timeouts,
+    unattended,
 )
 from agent_parley.state import BridgeError, LockBusy, lock, write_json
 from agent_parley.status import (
+    FORGE_FULL_SECONDS,
     FORGE_ISSUES,
     FORGE_LIMIT,
+    FORGE_OVERLAP,
+    FORGE_PAGE,
     FORGE_RETRY,
     FORGE_TIMEOUT,
     FORGE_TTL,
@@ -51,13 +57,14 @@ from agent_parley.status import (
 
 DEFAULT_WAIT_CEILING = 3600
 
-DEFAULTS = {
+DEFAULTS: dict[str, Any] = {
     "interval": 30,
     "inactive_after": 300,
     "stalled_after": 600,
     "start_deadline": 30,
     "completion_reminders": 3,
     "orphan_retire_after": 3600,
+    "root_gone_after": 3600,
     "claim_idle_after": 3600,
     "takeover_grace": 300,
     "max_claims_per_lane": 2,
@@ -71,16 +78,24 @@ DEFAULTS = {
     "rotate": True,
     "ci_rounds": 2,
     "fold_after": 86400,
+    "forge_skip_labels": list(issues.FORGE_SKIP_LABELS),
+    "max_load_ratio": 1.5,
+    "min_available_mib": 1024,
 }
 
 MAX_COMPLETION_REMINDERS = 100
+MAX_LOAD_RATIO = 1000
+MAX_AVAILABLE_MIB = 1048576
+HOST_LOADED = "busy:host load"
 MAX_CI_ROUNDS = 100
 MAX_CLAIMS_PER_LANE = 100
 MAX_CONVERGENCE_REPEATS = 100
 ENDED = issues.ENDED
 RECLAIM_INTERVAL = 900.0
+PRUNE_INTERVAL = 3600.0
 RECLAIM_PUBLICATION = "reclaim.json"
 ROOT_PUBLICATION = "root-missing.json"
+ROOT_RETURNED = "root-returned.json"
 RECOVERED_FOLDER = "recovered"
 BOOT_RECORD = "boot.json"
 READINGS_PUBLICATION = "git-readings.json"
@@ -105,6 +120,8 @@ WAKE_DIGEST_THREADS = 8
 UNKNOWN = "unknown"
 UNREADABLE = "unknown; activity record unreadable"
 UNREADABLE_STOPPED = "stopped; activity record unreadable"
+IDENTITY_UNREADABLE = "unknown; session process identity unreadable"
+STILL_RUNNING = (UNREADABLE, IDENTITY_UNREADABLE)
 DIALOG_WAKES = frozenset({"busy:input", "manual attention required"})
 WAKE_BACKOFF_CEILING = 3600.0
 TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse"})
@@ -128,10 +145,16 @@ OPT_IN_REMEDY = (
     "for one lane), or resume the lane in your own terminal"
 )
 OPT_IN_WARNING = (
-    "{name} is a claude lane the coordination service resumes unattended, "
+    "{name} is a {adapter} lane the coordination service resumes unattended, "
     "and no bridge tool approval is recorded for it, so a service resume "
     "would stop at a permission prompt nobody sees; the service reports "
     "that lane instead of resuming it. To opt in, " + OPT_IN_REMEDY + "."
+)
+OPT_IN_UNSUPPORTED = (
+    "{name} is a {adapter} lane with a bridge tool approval recorded, but "
+    "{limit}, so the approval cannot reach its session and a resume may "
+    "stop at a native permission prompt; answer it in your own terminal "
+    "with `agent-parley run {name} --resume`."
 )
 WORKING = "working"
 WAITING = "waiting"
@@ -195,6 +218,7 @@ def settings(value: dict) -> dict:
         "stalled_after",
         "start_deadline",
         "orphan_retire_after",
+        "root_gone_after",
         "claim_idle_after",
         "takeover_grace",
         "convergence_after",
@@ -231,6 +255,16 @@ def settings(value: dict) -> dict:
         raise BridgeError(
             f"ci_rounds must be between 1 and {MAX_CI_ROUNDS} rounds."
         )
+    ratio = result["max_load_ratio"]
+    if type(ratio) not in (int, float) or not 0 < ratio <= MAX_LOAD_RATIO:
+        raise BridgeError(
+            f"max_load_ratio must be above 0 and at most {MAX_LOAD_RATIO}."
+        )
+    floor = result["min_available_mib"]
+    if type(floor) is not int or not 0 <= floor <= MAX_AVAILABLE_MIB:
+        raise BridgeError(
+            f"min_available_mib must be between 0 and {MAX_AVAILABLE_MIB} MiB."
+        )
     for field in (
         "prompts",
         "wake",
@@ -241,6 +275,12 @@ def settings(value: dict) -> dict:
     ):
         if type(result[field]) is not bool:
             raise BridgeError(f"{field} must be a boolean.")
+    labels = result["forge_skip_labels"]
+    if not isinstance(labels, list | tuple) or not all(
+        isinstance(label, str) for label in labels
+    ):
+        raise BridgeError("forge_skip_labels must be a list of label names.")
+    result["forge_skip_labels"] = list(labels)
     return result
 
 
@@ -301,7 +341,7 @@ def lane_state(
     identified = (
         type(pid) is int and pid > 1 and isinstance(ticks, str) and bool(ticks)
     )
-    alive = process.alive(pid, ticks) if identified else None
+    alive = process.alive_or_unknown(pid, ticks) if identified else None
     if identified and rebooted(published):
         alive = False
     recorded = published.get("updated")
@@ -323,6 +363,8 @@ def lane_state(
             "stale": stale and state != STOPPED,
         }
 
+    if identified and alive is None:
+        return reading(UNKNOWN, IDENTITY_UNREADABLE)
     if alive is not True:
         if alive is False or activity == "stopped" or not published:
             return reading(STOPPED, "stopped")
@@ -485,7 +527,8 @@ def rebind_sessions(home: Path, directory: Path, manifest: dict) -> list[str]:
                 if (
                     not state
                     or rebooted(state)
-                    or lane_state(state)["process_alive"] is True
+                    or (reading := lane_state(state))["process_alive"] is True
+                    or reading["evidence"] == IDENTITY_UNREADABLE
                 ):
                     continue
                 foreign = state.get("foreign_session") or {}
@@ -645,7 +688,7 @@ def _known_process_gone(path: Path) -> bool:
     Returns:
         Whether the record names a process identity that no longer runs.
         A missing, unreadable or incomplete record proves nothing and reads
-        as False.
+        as False, as does a running process whose identity cannot be read.
     """
     try:
         kept = json.loads(path.read_text())
@@ -657,7 +700,7 @@ def _known_process_gone(path: Path) -> bool:
     ticks = kept.get("session_ticks")
     if type(pid) is not int or pid <= 1 or not isinstance(ticks, str):
         return False
-    return bool(ticks) and not process.alive(pid, ticks)
+    return bool(ticks) and process.alive_or_unknown(pid, ticks) is False
 
 
 def recorded_presence(record: dict | None, observed: dict) -> dict:
@@ -1051,7 +1094,11 @@ def operator_edits(home: Path, manifest: dict) -> dict[str, list[str]]:
     collisions: dict[str, list[str]] = {}
     for name, participant in manifest["participants"].items():
         patterns = held.get(participant["display"], [])
-        matched = sorted(store.overlapping_paths(dirty, patterns))
+        matched = sorted(
+            store.overlapping_paths(
+                dirty, patterns, fold=roster.case_insensitive(manifest)
+            )
+        )
         if matched:
             collisions[name] = matched
     return collisions
@@ -1155,7 +1202,9 @@ def base_advances(home: Path, manifest: dict) -> dict[str, list[str]]:
         patterns = held.get(participants[name]["display"], [])
         matched = sorted(
             {path for path in changed if path in held_paths[name]}
-            | store.overlapping_paths(changed, patterns)
+            | store.overlapping_paths(
+                changed, patterns, fold=roster.case_insensitive(manifest)
+            )
         )
         if matched:
             advances[name] = matched
@@ -1589,6 +1638,189 @@ def record_wait(
     }
     write_json(directory / f"{name}-wait.json", record)
     return record
+
+
+def _reporting_chain() -> set[int]:
+    """Names the reporting process and every process above it.
+
+    A report runs inside the lane's own session, or inside the service that
+    serves it, so neither that process nor any ancestor of it is work the
+    lane started and can end its turn on.
+
+    Returns:
+        Process IDs of the current process and its ancestors, as far as the
+        platform could read them.
+    """
+    pid = os.getpid()
+    chain = {pid}
+    with contextlib.suppress(OSError, IndexError, ValueError, TypeError):
+        for _ in range(process.ANCESTRY_LIMIT):
+            pid = process.PLATFORM.parent_pid(pid)
+            if pid <= 1:
+                break
+            chain.add(pid)
+    return chain
+
+
+def work_evidence(
+    lane: Path,
+    pid: int | None,
+    output: str,
+    issue: str = "",
+    claim_id: str = "",
+    ceiling: float = DEFAULT_WAIT_CEILING,
+    session: object = None,
+) -> dict:
+    """Builds the process evidence a report names for work still running.
+
+    A lane that ends its turn while a process it started keeps working names
+    that process and the file it writes, so supervision can read the work
+    itself rather than only the report timer. The process is recorded with
+    its creation identity, so a recycled process ID never reads as the same
+    work, and the output file with its modification time at the report, so
+    only a later write reads as the work advancing.
+
+    Evidence is bound to the claim the report names, by issue and claim
+    identity, and holds that claim for at most `ceiling` seconds after the
+    report, the same `deadlines.wait` cap a declared wait has. The process
+    must be one the reporting user owns and must not be PID 1, the lane's
+    own session process, or the reporting process and its ancestors, since
+    none of those is work the lane started. The output file must lie in the
+    lane worktree or its `lanes.extras` scratch directory, so a bridge state
+    file the service rewrites on every tool call never reads as work.
+
+    Args:
+        lane: Lane worktree; a relative output path is resolved against it.
+        pid: Process ID of the running work, or None to name none.
+        output: Path of the file the work writes, or empty to name none.
+        issue: Issue number of the claim the report is bound to.
+        claim_id: Claim identity of that claim, so a release or reclaim
+            voids the evidence.
+        ceiling: Seconds after the report the evidence may hold at most.
+        session: Process ID the lane's activity record names for its
+            session, if any.
+
+    Returns:
+        The evidence record with any `pid`, `ticks`, `output` and `mtime`,
+        its `issue`, `claim_id`, `recorded_at` and `until` times, or an
+        empty record when nothing is named.
+
+    Raises:
+        BridgeError: If evidence is named without a claim, the process is
+            not running or is not the lane's own work, or the output file
+            lies outside the lane.
+    """
+    record: dict = {}
+    if pid is not None:
+        if pid <= 1 or not process.running(pid):
+            raise BridgeError(f"Process {pid} is not running.")
+        if pid == session or pid in _reporting_chain():
+            raise BridgeError(
+                f"Process {pid} is the lane's own session, not its work."
+            )
+        try:
+            owner = process.read_ps_field("uid=", pid)
+            ticks = process.start_ticks(pid)
+        except process.IdentityUnknown as error:
+            raise BridgeError(
+                f"Process {pid} could not be identified: {error}"
+            ) from error
+        if owner != str(os.getuid()):
+            raise BridgeError(f"Process {pid} belongs to another user.")
+        record.update(pid=pid, ticks=ticks)
+    if output.strip():
+        root = lane.resolve()
+        path = (root / Path(output.strip()).expanduser()).resolve()
+        if not any(
+            path.is_relative_to(place) for place in (root, lanes.extras(root))
+        ):
+            raise BridgeError(
+                f"--output-file {path} must lie inside the lane worktree "
+                "or its scratch directory."
+            )
+        mtime = 0.0
+        with contextlib.suppress(OSError):
+            mtime = path.stat().st_mtime
+        record.update(output=str(path), mtime=mtime)
+    if record:
+        if not issue or not claim_id:
+            raise BridgeError(
+                "--pid and --output-file need the report bound to a claim."
+            )
+        now = time.time()
+        record.update(
+            issue=issue,
+            claim_id=claim_id,
+            recorded_at=now,
+            until=now + float(ceiling),
+        )
+    return record
+
+
+def live_work(directory: Path, name: str, issue: str = "") -> str:
+    """States the running work a lane's latest report named, if it still runs.
+
+    The evidence comes from `work_evidence` on the lane's activity record. A
+    named process counts while it is still that same live process. A named
+    output file counts once it was written after the report, and only while
+    that write is younger than `TOOL_TIMEOUT`, the span a tool call is
+    trusted as work in flight, so a job that stopped writing stops holding
+    its lane. Either holds only until the evidence's `until` cap, and only
+    while the lane still holds the claim the evidence names under the same
+    claim identity, so a release or reclaim voids it. Evidence that names
+    no claim holds nothing.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant whose reported work is read.
+        issue: Issue number of the claim being judged, or empty to read the
+            evidence for the lane whatever claim it names.
+
+    Returns:
+        The clause naming the live work, or an empty string when the lane
+        named none, named it for another or a released claim, its cap
+        passed, or none of it shows work now.
+    """
+    try:
+        state = json.loads((directory / f"{name}-activity.json").read_text())
+    except (OSError, ValueError):
+        return ""
+    work = state.get("work") if isinstance(state, dict) else None
+    if not isinstance(work, dict):
+        return ""
+    bound = str(work.get("issue") or "")
+    until = work.get("until")
+    if (
+        not bound
+        or not work.get("claim_id")
+        or (issue and bound != issue)
+        or not isinstance(until, int | float)
+        or isinstance(until, bool)
+        or time.time() > until
+    ):
+        return ""
+    held = issues.snapshot(directory)["issues"].get(bound) or {}
+    if held.get("owner") != name or held.get("claim_id") != work["claim_id"]:
+        return ""
+    pid = work.get("pid")
+    ticks = work.get("ticks")
+    if (
+        type(pid) is int
+        and isinstance(ticks, str)
+        and process.alive(pid, ticks)
+    ):
+        return f"working: process {pid} is alive"
+    output = work.get("output")
+    if not isinstance(output, str) or not output:
+        return ""
+    try:
+        written = Path(output).stat().st_mtime
+        recorded = float(work.get("mtime", 0) or 0)
+    except (OSError, TypeError, ValueError):
+        return ""
+    if written > recorded and time.time() - written <= TOOL_TIMEOUT:
+        return f"working: {output} advanced"
+    return ""
 
 
 def record_capacity(directory: Path, name: str, observation: dict) -> dict:
@@ -2368,6 +2600,26 @@ def named_leads(directory: Path, manifest: dict, name: str) -> dict[str, str]:
     return named
 
 
+def own_lead(directory: Path, name: str) -> str:
+    """Names the issue a lane's own published work points it at.
+
+    `named_leads` leaves the reading lane's lead out, and `issue next` and
+    the `next_issues` tool rank it first, so a lane claims the work it was
+    pointed at rather than a lower-numbered free issue its peers already
+    steer around.
+
+    Args:
+        directory: Private project state directory.
+        name: Participant that owns the lane.
+
+    Returns:
+        The lead of the lane's published offer, or an empty string.
+    """
+    offer = published_work(directory, name).get("offer")
+    lead = offer.get("lead") if isinstance(offer, dict) else None
+    return lead if isinstance(lead, str) else ""
+
+
 def _first_untaken(available: list[str], taken: set[str]) -> list[str]:
     """Moves the first issue no earlier lane was pointed at to the front.
 
@@ -2383,6 +2635,40 @@ def _first_untaken(available: list[str], taken: set[str]) -> list[str]:
         if number not in taken:
             return [number, *(other for other in available if other != number)]
     return available
+
+
+def _shared_claims(
+    directory: Path, manifest: dict, pool: dict, available: list[str]
+) -> dict[str, list[dict]]:
+    """Names the live claims the top free issues share forecast paths with.
+
+    The reading is the one `agent-parley issue next` takes through
+    `recommend.sharing`, made once per poll, so `work` and the wake that
+    derives the offer again read the same answer and the forge is asked
+    at most once for it.
+
+    Args:
+        directory: Private project state directory holding the cache.
+        manifest: Current participant manifest.
+        pool: Issue ledger with the open forge issues added.
+        available: Unclaimed and unblocked issues, best first.
+
+    Returns:
+        Live claims per candidate, as `recommend.sharing` reports them.
+    """
+    from agent_parley import forecast, recommend
+
+    root = str(manifest["root"])
+
+    def measure() -> dict[str, list[dict]]:
+        """Reads candidate and claim paths and compares them."""
+        looked = recommend.candidate_paths(Path(root), available)
+        commits = forecast.history(root, directory) if looked else []
+        return recommend.sharing(
+            pool, looked, commits, Path(root), store.overlapping
+        )
+
+    return _once_per_poll(("shared_claims", *available), measure)
 
 
 def _pull_text(available: list[str], busy: list[str]) -> str:
@@ -2480,6 +2766,7 @@ def _idle_leads(
     ledger: dict,
     after: float,
     taken: set[str] | None = None,
+    shared: dict[str, list[dict]] | None = None,
 ) -> dict | None:
     """Gathers the next work for a lane whose held claims cannot move.
 
@@ -2503,6 +2790,8 @@ def _idle_leads(
     backtest or a long CI loop, and naming such a claim offered running work
     to other lanes. A claim its holder reported blocked, including one held
     on purpose until an operator decides, is not active and is never named.
+    Nor is a claim whose holder `holder_held` reports held by an operator
+    decision, a blocked lane state or a declared wait.
 
     Args:
         home: Private bridge state root.
@@ -2512,6 +2801,9 @@ def _idle_leads(
         ledger: Current issue ledger.
         after: Claim idle interval a peer claim must pass without progress.
         taken: Issues already named to another lane in this sweep.
+        shared: Live claims per candidate, as `_shared_claims` reports
+            them, so work on this lane's own claims' files ranks first and
+            work on another lane's is held back.
 
     Returns:
         The mail senders with their message identifiers, the top candidate
@@ -2545,6 +2837,8 @@ def _idle_leads(
                 {},
                 str(participant.get("provider", "")),
                 len(taken) + 1,
+                shared=shared,
+                lane=name,
             )
         ],
         taken,
@@ -2558,6 +2852,9 @@ def _idle_leads(
         and not record.get("request")
         and lifecycle.state(record)["state"] in lifecycle.ACTIVE
         and now - issues.last_progress(record) >= after
+        and not holder_held(
+            home, directory, manifest["root"], str(record["owner"]), number
+        )
     )
     return {
         "mail": [f"#{item['id']} from {item['sender']}" for item in mail[:5]],
@@ -2568,6 +2865,34 @@ def _idle_leads(
             else None
         ),
     }
+
+
+def _only_waits(ledger: dict, held: list[str], leads: dict | None) -> bool:
+    """Reports whether a lane can only wait on operator-gated claims.
+
+    A lane whose every held claim is blocked on an operator action, and for
+    which no next work was found, has nothing to act on: the claims stay
+    with the lane that recorded them, retire would be refused, and the wake
+    text can only say to end the turn. Such a continue record is never
+    delivered as a wake, since each delivery bills a turn that changes
+    nothing. Ready work is not counted, because its text still asks the
+    lane to open the pull request it may not have opened yet.
+
+    Args:
+        ledger: Current issue ledger.
+        held: Every issue the lane holds.
+        leads: Next work from `_idle_leads`, or None.
+
+    Returns:
+        Whether the lane can only wait for an operator to change its work.
+    """
+    leads = leads or {}
+    if leads.get("mail") or leads.get("next") or leads.get("stalled"):
+        return False
+    return bool(held) and all(
+        lifecycle.operator_blocked(ledger["issues"].get(number) or {})
+        for number in held
+    )
 
 
 def _continue_text(
@@ -2833,7 +3158,11 @@ def _work_offer(
     Returns:
         The actionable offer, or None when no work is currently eligible.
         A pull offer with unclaimed work, and a continue offer naming next
-        work, also carry that issue as ``lead``, which `named_leads` reads.
+        work to a lane that reads as fit, also carry that issue as
+        ``lead``, which `named_leads` reads and `work` marks as taken. A
+        lane that cannot take a turn may still be told about the candidate,
+        but never reserves it, so a fit lane later in the sweep is pointed
+        at the best work rather than the second best.
     """
     held = owned.get(name, [])
     continuation = lifecycle.actionable(ledger, name)
@@ -2895,7 +3224,12 @@ def _work_offer(
             "text": _continue_text(ledger, continuation, held, leads),
             "progress": _work_progress(ledger, selected),
         }
-        if not continuation and leads and leads.get("next"):
+        if (
+            not continuation
+            and results[name]["fit"]
+            and leads
+            and leads.get("next")
+        ):
             offer["lead"] = leads["next"]
     elif results[name]["fit"] and not held and (available or busy):
         selected = available[:5]
@@ -2956,7 +3290,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         manifest: Current participant manifest.
         config: Resolved supervision settings.
     """
-    from agent_parley import recovery
+    from agent_parley import recommend, recovery
 
     after = config["stalled_after"]
     ledger = issues.snapshot(directory)
@@ -3013,6 +3347,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
         home, directory, manifest, results, stretches, owned, ledger, config
     )
     taken: set[str] = set()
+    shared = _shared_claims(directory, manifest, pool, available)
     for name in sorted(serving):
         result = results[name]
         offer = _work_offer(
@@ -3020,7 +3355,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
             results,
             stretches,
             owned,
-            _first_untaken(available, taken),
+            _first_untaken(recommend.for_lane(available, shared, name), taken),
             pool,
             after,
             recipients,
@@ -3032,6 +3367,7 @@ def work(home: Path, directory: Path, manifest: dict, config: dict) -> None:
                 pool,
                 config["claim_idle_after"],
                 taken,
+                shared,
             ),
         )
         if offer and offer.get("lead"):
@@ -3140,13 +3476,14 @@ def configuration(home: Path, manifest: dict) -> dict:
 def opt_in_missing(home: Path, manifest: dict, name: str) -> bool:
     """Reports whether a service resume of this lane would stop unseen.
 
-    A resumed `claude` session asks again for permission to use this
-    bridge's own MCP tools, and a resume the service starts has nobody at
-    the keyboard. Only `dialogs.pre_approved` or `dialogs.auto_mode` carries
-    an answer into that session, and both stay the operator's choice. A lane
-    the service would never resume, because its wake loop is off, it
-    retired, its provider needs environment the service cannot supply or
-    its provider is not defined, has no such gap.
+    A resumed session asks again for permission to use this bridge's own
+    MCP tools, and a resume the service starts has nobody at the keyboard.
+    Only `dialogs.pre_approved`, or `dialogs.auto_mode` for a `claude` lane,
+    carries an answer into that session, and both stay the operator's
+    choice. A lane the service would never resume, because its wake loop is
+    off, it retired, its provider needs environment the service cannot
+    supply or its provider is not defined, has no such gap, and neither has
+    an adapter `roster.APPROVAL` gives no way to carry the opt-in.
 
     Args:
         home: Private bridge state root.
@@ -3154,23 +3491,91 @@ def opt_in_missing(home: Path, manifest: dict, name: str) -> bool:
         name: Participant that owns the lane.
 
     Returns:
-        True when the service may resume this `claude` lane and the operator
-        recorded neither opt-in for it.
+        True when the service may resume this lane, its adapter can carry
+        the opt-in and the operator recorded none for it.
+    """
+    return bool(opt_in_adapter(home, manifest, name))
+
+
+def opt_in_adapter(home: Path, manifest: dict, name: str) -> str:
+    """Names the adapter of a lane `opt_in_missing` reports.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Project manifest as the roster reports it.
+        name: Participant that owns the lane.
+
+    Returns:
+        The lane's adapter when its opt-in is missing, else an empty string.
     """
     participant = (manifest.get("participants") or {}).get(name) or {}
     if (
         not participant.get("wake", True)
         or roster.retired(participant)
         or dialogs.pre_approved(manifest, name)
-        or dialogs.auto_mode(manifest, name)
         or not configuration(home, manifest)["wake"]
     ):
-        return False
+        return ""
     try:
         entry = roster.provider(home, participant.get("provider", name))
     except BridgeError:
-        return False
-    return entry["adapter"] == "claude" and not entry.get("require_env")
+        return ""
+    adapter = entry["adapter"]
+    if (
+        roster.APPROVAL.get(adapter) is None
+        or entry.get("require_env")
+        or (adapter == "claude" and dialogs.auto_mode(manifest, name))
+    ):
+        return ""
+    return adapter
+
+
+def opt_in_unsupported(
+    home: Path, manifest: dict, name: str, version: str | None = None
+) -> str:
+    """Explains why a recorded bridge tool approval cannot reach a lane.
+
+    An adapter `roster.APPROVAL` gives no way to carry the opt-in, and a
+    `codex` client older than `roster.CODEX_APPROVAL_RELEASE`, would start
+    without it, so the operator's recorded choice would change nothing.
+    This names that limitation instead of leaving it silent.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Project manifest as the roster reports it.
+        name: Participant that owns the lane.
+        version: First line the lane's client printed for `--version`, or
+            None when it was not asked, which leaves a `codex` lane's
+            release unjudged.
+
+    Returns:
+        `OPT_IN_UNSUPPORTED` filled in for the lane, or an empty
+        string when no approval is recorded or its adapter carries it.
+    """
+    participant = (manifest.get("participants") or {}).get(name) or {}
+    if not dialogs.pre_approved(manifest, name):
+        return ""
+    try:
+        adapter = roster.provider(home, participant.get("provider", name))[
+            "adapter"
+        ]
+    except BridgeError:
+        return ""
+    if roster.APPROVAL.get(adapter) is None:
+        limit = f"{adapter} offers no per-server tool approval to pass"
+    elif (
+        adapter == "codex"
+        and version is not None
+        and dialogs.release_of(version) < roster.CODEX_APPROVAL_RELEASE
+    ):
+        release = ".".join(map(str, roster.CODEX_APPROVAL_RELEASE))
+        limit = (
+            f"codex {version or 'of unknown release'} predates the "
+            f"per-server tool approval codex {release} reads"
+        )
+    else:
+        return ""
+    return OPT_IN_UNSUPPORTED.format(name=name, adapter=adapter, limit=limit)
 
 
 def reminders(
@@ -3401,7 +3806,12 @@ def completion_escalations(
             write_json(directory / "issues.json", ledger)
 
 
-def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
+def end_merged_claims(
+    directory: Path,
+    ended: dict[str, dict],
+    home: Path | None = None,
+    manifest: dict | None = None,
+) -> list[str]:
     """Ends each claim a merged pull request closed on the forge.
 
     A holder that stops before filing its completion would otherwise keep
@@ -3425,11 +3835,23 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
     Args:
         directory: Private project state directory.
         ended: This poll's forge observations from `completed_claims`.
+        home: Private bridge state root. With ``manifest`` it lets each
+            resolution record the holder's usage; without them none is
+            recorded.
+        manifest: Current participant manifest.
 
     Returns:
         Issue numbers whose claims were ended.
     """
     resolved = []
+    owners = (
+        {
+            number: str(record.get("owner") or "")
+            for number, record in issues.snapshot(directory)["issues"].items()
+        }
+        if ended and home is not None and manifest is not None
+        else {}
+    )
     for number, seen in ended.items():
         commit = str(seen.get("commit") or "")
         closed = seen.get("closed")
@@ -3466,9 +3888,327 @@ def end_merged_claims(directory: Path, ended: dict[str, dict]) -> list[str]:
                     else "merged pull request closed the issue on the forge"
                 ),
                 claim_id=str(seen["claim_id"]),
+                usage=(
+                    budgets.claim_reading(
+                        home, directory, manifest, owners[number]
+                    )
+                    if home is not None
+                    and manifest is not None
+                    and owners.get(number)
+                    else None
+                ),
             )
             resolved.append(number)
     return resolved
+
+
+SYMBOL_FILES = 20
+SYMBOL_NAMES = 20
+SYMBOL_PENDING_SECONDS = 86400.0
+SCRIPT_DEFINITION = (
+    r"(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?:function\*?|class|const|let|var|interface|type|enum)\s+"
+    r"([A-Za-z_$][\w$]*)"
+)
+TOP_LEVEL_DEFINITIONS = {
+    suffix: re.compile(pattern)
+    for suffix, pattern in {
+        ".go": r"(?:func(?:\s*\([^)]*\))?|type|var|const)\s+([A-Za-z_]\w*)",
+        ".rs": (
+            r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?"
+            r"(?:fn|struct|enum|trait|type|const|static|mod)\s+"
+            r"([A-Za-z_]\w*)"
+        ),
+        **dict.fromkeys(
+            (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"), SCRIPT_DEFINITION
+        ),
+    }.items()
+}
+HUNK = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_symbol_merges: dict[tuple[str, str], tuple[float, dict]] = {}
+_symbol_reads: set[tuple[str, str]] = set()
+
+
+def _signatures(source: str) -> dict[str, str]:
+    """Reads the signature of each definition a Python module declares.
+
+    Module-level and class-level `def` and `class` statements are read;
+    one nested in a function body is local and no other file names it. A
+    function's signature is its parameters and return annotation, and a
+    class's is its bases and keywords, so a body edit is not a change a
+    caller sees.
+
+    Args:
+        source: Module text. Text that does not parse declares nothing.
+
+    Returns:
+        Signature text keyed by qualified name, such as ``Session.login``.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    found: dict[str, str] = {}
+    scopes: list[tuple[str, list[ast.stmt]]] = [("", tree.body)]
+    while scopes:
+        prefix, body = scopes.pop()
+        for node in body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                found[prefix + node.name] = ast.dump(node.args) + (
+                    ast.dump(node.returns) if node.returns else ""
+                )
+            elif isinstance(node, ast.ClassDef):
+                found[prefix + node.name] = "".join(
+                    ast.dump(item) for item in [*node.bases, *node.keywords]
+                )
+                scopes.append((f"{prefix}{node.name}.", node.body))
+    return found
+
+
+def _diff_lines(text: str) -> list[tuple[str, str, int, str]]:
+    """Splits a zero-context unified diff into its changed lines.
+
+    Args:
+        text: Output of `git diff --no-prefix -U0`.
+
+    Returns:
+        One ``(sign, path, line, text)`` per changed line: ``-`` lines carry
+        the old path and line number, ``+`` lines the new ones.
+    """
+    lines = []
+    header = False
+    old_path = new_path = ""
+    old = new = 0
+    for line in text.splitlines():
+        hunk = HUNK.match(line)
+        if line.startswith("diff "):
+            header = True
+        elif header and line.startswith("--- "):
+            old_path = line[4:].split("\t")[0]
+        elif header and line.startswith("+++ "):
+            new_path = line[4:].split("\t")[0]
+        elif hunk:
+            header = False
+            old, new = int(hunk[1]), int(hunk[2])
+        elif not header and line.startswith("-"):
+            lines.append(("-", old_path, old, line[1:]))
+            old += 1
+        elif not header and line.startswith("+"):
+            lines.append(("+", new_path, new, line[1:]))
+            new += 1
+    return lines
+
+
+def merged_definitions(root: str, commit: str) -> list[tuple[str, str]]:
+    """Names the definitions a merged commit changed against its parent.
+
+    Python files are read through `ast` before and after the merge: a
+    definition the merge removed, renamed or gave another signature is
+    changed. A file whose extension has a pattern in
+    `TOP_LEVEL_DEFINITIONS` contributes each top-level identifier that
+    pattern matches on a line the merge removed, which is what a rename or
+    a signature edit leaves. Any other file contributes nothing. The first
+    `SYMBOL_FILES` such files are read and the first `SYMBOL_NAMES` names
+    kept, so one large merge costs a bounded reading.
+
+    Args:
+        root: Base checkout holding the merge commit.
+        commit: Merge commit; its first parent is the base before the merge.
+
+    Returns:
+        ``(name, path)`` pairs, empty when Git could not answer.
+    """
+    paths = [
+        path
+        for path in _changed(root, f"{commit}^", commit)
+        if path.endswith(".py") or Path(path).suffix in TOP_LEVEL_DEFINITIONS
+    ][:SYMBOL_FILES]
+    found: dict[str, str] = {}
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        before = _signatures(_read(root, "show", f"{commit}^:{path}") or "")
+        after = _signatures(_read(root, "show", f"{commit}:{path}") or "")
+        for name, signature in before.items():
+            if after.get(name) != signature:
+                found.setdefault(name, path)
+    patterned = {path for path in paths if not path.endswith(".py")}
+    if patterned:
+        diff = _read(
+            root,
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--no-prefix",
+            "-U0",
+            f"{commit}^",
+            commit,
+        )
+        for sign, path, _, text in _diff_lines(diff or ""):
+            pattern = TOP_LEVEL_DEFINITIONS.get(Path(path).suffix)
+            match = (
+                pattern.match(text)
+                if pattern and sign == "-" and path in patterned
+                else None
+            )
+            if match:
+                found.setdefault(match[1], path)
+    return list(found.items())[:SYMBOL_NAMES]
+
+
+def lane_references(
+    lane: str, commit: str, names: list[str]
+) -> dict[str, tuple[str, int]]:
+    """Finds where a lane's own diff names each of some symbols.
+
+    The lane's diff is its worktree, committed or not, against the point
+    its branch forked from the merge commit's history, so the merged
+    change itself is never read as the lane's. Only added lines count,
+    and a name matches as a whole identifier: the bare name, so a method
+    ``Session.login`` matches ``login``.
+
+    Args:
+        lane: Lane worktree.
+        commit: Merge commit the lane is compared with.
+        names: Names `merged_definitions` reported.
+
+    Returns:
+        The first ``(path, line)`` in the lane's diff per name it names.
+    """
+    fork = _read(lane, "merge-base", "HEAD", commit)
+    if not fork:
+        return {}
+    diff = _read(
+        lane,
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-renames",
+        "--no-prefix",
+        "-U0",
+        fork,
+    )
+    patterns = {
+        name: re.compile(
+            rf"(?<![\w$]){re.escape(name.rsplit('.', 1)[-1])}(?![\w$])"
+        )
+        for name in names
+    }
+    found: dict[str, tuple[str, int]] = {}
+    for sign, path, line, text in _diff_lines(diff or ""):
+        if sign != "+":
+            continue
+        for name, pattern in patterns.items():
+            if name not in found and pattern.search(text):
+                found[name] = (path, line)
+    return found
+
+
+def symbol_notices(
+    home: Path, directory: Path, manifest: dict, ended: dict[str, dict]
+) -> list[tuple[str, str]]:
+    """Mails a lane when a merged change alters a symbol its diff names.
+
+    Every other overlap signal keys on a shared path, so a lane editing a
+    caller of a function a peer just changed in another file heard
+    nothing. Each pull request `completed_claims` observed merged, with its
+    merge commit, is read once through `merged_definitions`. Every lane
+    that is not retired, did not land it and does not own the claim it
+    closed is then searched through `lane_references`, and each hit sends
+    that lane one message naming the pull request, the symbol and the file
+    and line in its own diff. The idempotency key is the pull request,
+    symbol and lane, so the lane hears of each pair once.
+
+    A merge commit the base checkout has not fetched yet is kept for
+    `SYMBOL_PENDING_SECONDS` and read once it arrives. The notice is
+    advisory and says the change may affect the lane, since a name match
+    can be a false positive; nothing is refused, rebased or changed.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        ended: This poll's forge observations from `completed_claims`.
+
+    Returns:
+        ``(lane, symbol)`` for each message delivered or already delivered.
+    """
+    root = str(manifest["root"])
+    now = time.time()
+    owners = (
+        {
+            number: str(record.get("owner") or "")
+            for number, record in issues.snapshot(directory)["issues"].items()
+        }
+        if ended
+        else {}
+    )
+    for number, seen in ended.items():
+        key = (root, str(seen.get("commit") or ""))
+        if (
+            seen.get("state") != "MERGED"
+            or not seen.get("pull_request")
+            or not lifecycle.COMMIT.fullmatch(key[1])
+            or key in _symbol_reads
+            or key in _symbol_merges
+        ):
+            continue
+        merged_by = [owners.get(number, ""), str(seen.get("landed_by") or "")]
+        _symbol_merges[key] = (now, {**seen, "merged_by": merged_by})
+    sent: list[tuple[str, str]] = []
+    for key, (since, seen) in list(_symbol_merges.items()):
+        if key[0] != root:
+            continue
+        commit = key[1]
+        if _read(root, "cat-file", "-e", f"{commit}^{{commit}}") is None:
+            if now - since > SYMBOL_PENDING_SECONDS:
+                _symbol_merges.pop(key, None)
+            continue
+        _symbol_merges.pop(key, None)
+        _symbol_reads.add(key)
+        definitions = merged_definitions(root, commit)
+        if not definitions:
+            continue
+        number = seen["pull_request"]
+        link = f"#{number} {seen.get('url') or ''}".strip()
+        base = seen.get("base") or "the base branch"
+        for name, participant in manifest["participants"].items():
+            if (
+                name in seen["merged_by"]
+                or participant.get("branch") == seen.get("branch")
+                or roster.retired(participant)
+            ):
+                continue
+            hits = lane_references(
+                str(participant["lane"]),
+                commit,
+                [symbol for symbol, _ in definitions],
+            )
+            display = participant["display"]
+            for symbol, path in definitions:
+                if symbol not in hits:
+                    continue
+                where = f"{hits[symbol][0]}:{hits[symbol][1]}"
+                digest = hashlib.sha256(
+                    f"{root}\x00{number}\x00{symbol}\x00{display}".encode()
+                ).hexdigest()[:32]
+                with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
+                    store.speak(
+                        home,
+                        root,
+                        display,
+                        f"Merged #{number} may affect {symbol} in your diff",
+                        f"Pull request {link} merged into {base} and changed "
+                        f"the definition of {symbol} in {path}. Your diff "
+                        f"names it at {where}, so the change may affect your "
+                        "work. This is a name match and can be a false "
+                        "positive: check that use before you merge. Nothing "
+                        "was refused, rebased or changed for you.",
+                        f"symbol:{digest}",
+                    )
+                    sent.append((name, symbol))
+    return sent
 
 
 def deadline_notices(directory: Path, manifest: dict) -> None:
@@ -3520,17 +4260,26 @@ def deadline_notices(directory: Path, manifest: dict) -> None:
                 if timing["budget_exceeded"]
                 else f"is overdue by {timing['overdue_seconds']}s"
             )
+            execution = lifecycle.state(record)
+            blocker = execution.get("blocker") or {}
+            reason = (
+                blocker.get("reason") if isinstance(blocker, dict) else blocker
+            ) or "a recorded condition"
+            outcome = (
+                f"It is blocked on {reason}; the supervisor does not move it, "
+                f"and {holder} keeps it until it resolves, hands it on or "
+                "releases it."
+                if execution["state"] == lifecycle.BLOCKED
+                else f"{holder} still owns it while it works. Hand it off or "
+                "release it explicitly; a holder that stays silent is woken, "
+                "then offered away, then released by the supervisor."
+            )
             record["deadline_notice"] = {
                 "id": identifier,
                 "holder": holder,
                 "waiting": waiting,
                 "created": time.time(),
-                "text": (
-                    f"Issue #{number} {cause}. {holder} still owns it while "
-                    "it works. Hand it off or release it explicitly; a holder "
-                    "that stays silent is woken, then offered away, then "
-                    "released by the supervisor."
-                ),
+                "text": f"Issue #{number} {cause}. {outcome}",
             }
             changed = True
         if changed:
@@ -3691,6 +4440,88 @@ def holder_silent(
     if silence is None:
         return bool(observed.get("stale"))
     return silence >= window
+
+
+def holder_held(
+    home: Path, directory: Path, root: str, name: str, issue: str = ""
+) -> str:
+    """States why a holder's quiet is not its own to end, if it is not.
+
+    The wake gate holds every wake of a lane with an open permission-denial
+    decision, a lane recorded blocked and a lane inside a wait it declared.
+    Such a lane cannot answer an overdue wake, and the operator or the
+    declared deadline owns its next step, so the supervisor neither moves
+    its claims nor names them to idle peers while that holds. Running work
+    the holder's latest report named, read by `live_work`, holds the claim
+    that report was bound to the same way, also after its declared wait
+    ends, because the report timer alone says nothing about a process still
+    writing its output. It holds only that claim, so a live process never
+    protects another claim its lane does not work on.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        root: Canonical project key.
+        name: Participant holding the claim.
+        issue: Issue number of the claim being judged, or empty when the
+            judgment is about the lane rather than one claim.
+
+    Returns:
+        The cause holding the lane, or an empty string when nothing does.
+    """
+    if held := denials.waiting(directory, name):
+        return f"blocked: {denials.CAUSE} ({held['id']})"
+    lane = condition(home, root, name) or {}
+    if lane.get("state") == lanes.BLOCKED:
+        return f"blocked: {lane.get('cause', '')}"
+    wait = published_wait(directory, name)
+    if wait and float(wait["until"]) > time.time():
+        return f"waiting on {wait['reason']}"
+    return live_work(directory, name, issue)
+
+
+def wake_attempt(
+    home: Path, directory: Path, root: str, name: str, key: str, since: float
+) -> tuple[float, bool]:
+    """Reports the wake attempt that carried one backlog key to a lane.
+
+    The overdue transition used to advance from its wake step on time alone,
+    so a holder the wake gate never woke was offered away as if it had
+    ignored a wake. An attempt counts here only when the dispatcher recorded
+    one whose backlog carries the key, at or after the step. A busy result
+    is not an attempt: the launcher declined it for now and the dispatcher
+    tries again. An unanswered socket, a setup gap or a lane that needs
+    manual attention is an attempt that did not reach the session, which
+    no retry changes, so the transition may go on without claiming the
+    holder was woken.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        root: Canonical project key.
+        name: Participant the wake is for.
+        key: Backlog key the wake must carry.
+        since: Unix time the wake was asked for.
+
+    Returns:
+        Unix time of the attempt, zero when none was made, and whether it
+        reached the lane's session.
+    """
+    record = wake_record(home, root, name, directory)
+    result = str(record.get("result") or "")
+    at = float(record.get("at", 0) or 0)
+    if (
+        key not in (record.get("backlog") or [])
+        or at < since
+        or not result
+        or result.startswith("busy")
+    ):
+        return 0.0, False
+    return at, result not in (
+        WAKE_UNAVAILABLE,
+        WAKE_ATTENTION,
+        OPT_IN_MISSING,
+    )
 
 
 def idle_claim(
@@ -3984,7 +4815,22 @@ def overdue_claims(
     no progress of its own for `claim_idle_after` takes the same transition
     while its holder stays busy elsewhere, and its wake step tells the holder
     and the lanes waiting on the issue why. Progress recorded on the claim
-    drops the recovery as a tool call does for a silent holder.
+    drops the recovery as a tool call does for a silent holder. A lane's
+    tool calls count as progress on a claim when that claim is the only
+    work the lane can continue, whatever ready, blocked or closed claims it
+    also holds.
+
+    Some quiet is not the holder's to end, and such a claim is not moved:
+    work its holder reported blocked stays with that holder, a handoff the
+    holder offered stands until it is answered or expires, and a holder
+    held by an open denial decision, a blocked lane state, a wait it
+    declared or running work its latest report named waits for that to
+    clear. A silent holder's wake step waits for
+    the dispatcher to record a wake attempt, and its window runs from that
+    attempt rather than from the step. A holder no attempt reached within
+    one window of the step, because the wake was refused or found nothing
+    to send, advances then as one that could not be woken, so the claim
+    never stays parked on a wake that will not come.
 
     Args:
         home: Private bridge state root.
@@ -3996,35 +4842,43 @@ def overdue_claims(
     from agent_parley import recovery
 
     window = config["inactive_after"]
+    root = manifest["root"]
     now = time.time()
-    ledger = issues.snapshot(directory)["issues"]
-    held = collections.Counter(
-        record.get("owner") for record in ledger.values()
-    )
+    snapshot = issues.snapshot(directory)
+    ledger = snapshot["issues"]
+    workable: dict[str, list[str]] = {}
     for number, record in ledger.items():
         holder = record.get("owner")
         current = record.get("overdue_recovery") or {}
         identifier = f"{number}:{record.get('claim_id')}"
         timing = issues.deadline_state(record, now)
+        ours = current.get("id") == identifier
         idle = 0
         if (
             holder in manifest["participants"]
             and record.get("claim_id")
-            and (current.get("id") == identifier or not record.get("offer"))
+            and (ours or not record.get("offer"))
         ):
+            if holder not in workable:
+                workable[holder] = lifecycle.actionable(snapshot, holder)
             idle = idle_claim(
                 directory,
                 record,
-                held[holder] == 1,
+                workable[holder] == [number],
                 config["claim_idle_after"],
                 now,
             )
         if record.get("claim_id"):
-            _idle_blocker(directory, manifest["root"], ledger, number, idle)
+            _idle_blocker(directory, root, ledger, number, idle)
         if (
             holder not in manifest["participants"]
             or not record.get("claim_id")
             or observed_complete(record)
+            or lifecycle.state(record)["state"] == lifecycle.BLOCKED
+            or (
+                record.get("offer")
+                and not (ours and current.get("step") == "offer")
+            )
             or not (
                 (
                     timing["overdue"]
@@ -4037,17 +4891,40 @@ def overdue_claims(
                 )
                 or idle
             )
+            or holder_held(home, directory, root, holder, number)
         ):
             if current:
                 _overdue_step(directory, number, identifier, None)
             continue
-        cause = (
-            f"is overdue by {timing['overdue_seconds']}s and {holder} stayed "
-            "silent after a wake"
-            if timing["overdue"] and not idle
-            else f"has recorded no progress for {idle}s while {holder} holds it"
-        )
+        silent = bool(timing["overdue"] and not idle)
         elapsed = now - float(current.get("at", 0) or 0)
+        cause = f"has recorded no progress for {idle}s while {holder} holds it"
+        if silent and ours and current.get("step") == "wake":
+            asked = float(current.get("at", 0) or 0)
+            attempted, delivered = wake_attempt(
+                home,
+                directory,
+                root,
+                holder,
+                f"overdue:{identifier}",
+                asked,
+            )
+            if not attempted or attempted > asked + window:
+                attempted, delivered = asked + window, False
+                elapsed = now - asked
+            else:
+                elapsed = now - attempted
+            moment = time.strftime(
+                "%Y-%m-%d %H:%M:%S UTC", time.gmtime(attempted)
+            )
+            cause = (
+                f"is overdue by {timing['overdue_seconds']}s and {holder} "
+                + (
+                    f"stayed silent after a wake delivered at {moment}"
+                    if delivered
+                    else f"could not be woken at {moment}"
+                )
+            )
         if current.get("id") != identifier:
             _overdue_step(
                 directory,
@@ -4089,14 +4966,6 @@ def overdue_claims(
                         if item.get("claim_id") == record.get("claim_id")
                     ),
                     {},
-                )
-            if record.get("offer"):
-                issues.change(
-                    directory,
-                    holder,
-                    "cancel",
-                    number,
-                    participants=set(manifest["participants"]),
                 )
             issues.change(
                 directory,
@@ -5292,8 +6161,9 @@ def _return_work(
 
     `retirement.abandon` returns its claims and offers, and
     `store.release_dead_holder` releases its reservations to the peers
-    queued for them. A lane whose work cannot be returned is recorded as a
-    supervision error and keeps it.
+    queued for them. The lane's open orphan decision is retired as stale,
+    since the work it asked about has now been returned. A lane whose work
+    cannot be returned is recorded as a supervision error and keeps it.
 
     Args:
         home: Private bridge state root.
@@ -5314,6 +6184,13 @@ def _return_work(
     except (BridgeError, OSError, ValueError) as exc:
         issues.note_supervision_error(directory, f"dead lane {name}: {exc}")
         return
+    with contextlib.suppress(BridgeError, OSError, ValueError):
+        for entry in decisions.list_open(directory):
+            if (
+                entry.get("lane") == name
+                and entry.get("kind") == notify.Event.ORPHAN_DECISION
+            ):
+                decisions.stale(directory, str(entry["id"]))
     try:
         keys = store.release_dead_holder(
             home,
@@ -5559,7 +6436,28 @@ claimed_since = issues.claimed_since
 
 
 ISSUE_READING_SECONDS = 300.0
-_issue_readings: dict[tuple[str, str], tuple[float, dict]] = {}
+FORGE_BACKOFF_KINDS = frozenset({"auth", "rate", "timeout"})
+_issue_readings: dict[tuple[str, str], tuple[float, dict | None]] = {}
+
+
+def _forge_backoff() -> bool:
+    """Reports whether the forge refused or throttled a call too recently.
+
+    A revoked token, a client signed in to the wrong account, a rate limit
+    or a network timeout answers every call the same way, so the poll's
+    own forge reads wait `FORGE_RETRY` seconds after such a failure rather
+    than repeating each call on every poll.
+
+    Returns:
+        True while `forge.last_failure` names a failure of a kind in
+        `FORGE_BACKOFF_KINDS` younger than `FORGE_RETRY` seconds.
+    """
+    failure = forge.last_failure()
+    return bool(
+        failure
+        and failure.get("kind") in FORGE_BACKOFF_KINDS
+        and time.time() - float(failure.get("at") or 0) < FORGE_RETRY
+    )
 
 
 def _issue_reading(root: Path, number: str) -> dict | None:
@@ -5567,18 +6465,18 @@ def _issue_reading(root: Path, number: str) -> dict | None:
 
     The supervisor polls every few seconds and a forge round trip costs about
     a second, so one reading per issue is reused for
-    `ISSUE_READING_SECONDS`. A failed reading is never kept, so a forge that
-    comes back is read again on the next poll.
+    `ISSUE_READING_SECONDS`. A failed reading is kept as absent for
+    `FORGE_RETRY` seconds, so a forge that is down costs one call per issue
+    per retry window and one that comes back is read again after it.
     """
     key = (str(root), number)
     kept = _issue_readings.get(key)
-    if kept and time.time() - kept[0] < ISSUE_READING_SECONDS:
+    now = time.time()
+    if kept and now < kept[0]:
         return kept[1]
     reading = forge.issue_completion(root, number)
-    if reading is None:
-        _issue_readings.pop(key, None)
-    else:
-        _issue_readings[key] = (time.time(), reading)
+    life = FORGE_RETRY if reading is None else ISSUE_READING_SECONDS
+    _issue_readings[key] = (now + life, reading)
     return reading
 
 
@@ -5599,6 +6497,8 @@ def _landing_reading(root: Path, base: str) -> dict:
     kept = _landings.get(key)
     if kept and now < kept[0]:
         return kept[1]
+    if _forge_backoff():
+        return {}
     reading = forge.integration_landings(root, base)
     if reading is None:
         _landings[key] = (now + FORGE_RETRY, {})
@@ -5623,6 +6523,8 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
     issue open until the branch crosses to the default branch, yet the
     claim's work has landed, so it is observed as a merge like any other.
 
+    Nothing is read, and nothing observed, while `_forge_backoff` holds.
+
     Args:
         manifest: Current participant manifest.
         ledger: Published issue ledger.
@@ -5640,6 +6542,8 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
         observed when its issue closed before the generation or closed with
         no closing pull request, with `closed` set to `before` or `by hand`.
     """
+    if _forge_backoff():
+        return {}
     root = Path(manifest["root"])
     base = str(manifest.get("integration_base") or "")
     landings: dict | None = None
@@ -5766,22 +6670,115 @@ def branch_lane(manifest: dict, branch: str) -> str:
     return owners[0] if len(owners) == 1 else ""
 
 
-def refresh_forge_issues(directory: Path, manifest: dict) -> None:
+FORGE_UNCLAIMS = 3
+
+
+def forge_upkeep(
+    directory: Path,
+    manifest: dict,
+    skip_labels: list[str] | tuple[str, ...] = issues.FORGE_SKIP_LABELS,
+) -> None:
+    """Runs the poll's forge catalog refresh and unassign retry off the poll.
+
+    A catalog read pages through every open issue and can take tens of
+    seconds, so `refresh_forge_issues` and then `release_forge_marks` run on
+    one daemon thread per project, and a poll that finds the previous run
+    still going starts none. A failure inside the thread is dropped, and the
+    next poll tries again.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        skip_labels: Labels that keep an open forge issue out of the work
+            offered to lanes; the `forge_skip_labels` supervision setting.
+    """
+    key = (str(directory), FORGE_ISSUES)
+    with _REFRESHING_LOCK:
+        if key in _REFRESHING:
+            return
+        _REFRESHING.add(key)
+
+    def upkeep() -> None:
+        """Refreshes the catalog, then releases stale forge marks."""
+        try:
+            with contextlib.suppress(Exception):
+                refresh_forge_issues(directory, manifest, skip_labels)
+            with contextlib.suppress(Exception):
+                release_forge_marks(directory, manifest)
+        finally:
+            with _REFRESHING_LOCK:
+                _REFRESHING.discard(key)
+
+    threading.Thread(target=upkeep, name="forge upkeep", daemon=True).start()
+
+
+def release_forge_marks(directory: Path, manifest: dict) -> None:
+    """Removes forge assignments claims added to issues nobody holds now.
+
+    Only a lane's own `issue release` removed the assignment its claim
+    added. A supervisor release, `issue resolve --release`, a retirement or
+    a timed-out claim returned the issue to the queue and left it assigned,
+    and an unassign that failed was never tried again. Every issue still
+    marked in `claims.FORGE_MARKS` that the ledger shows unowned is
+    unassigned through `claims.forge_unclaim`, at most `FORGE_UNCLAIMS` per
+    call, and none while `_forge_backoff` holds.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    from agent_parley import claims
+
+    try:
+        marks = json.loads((directory / claims.FORGE_MARKS).read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(marks, dict):
+        return
+    ledger = issues.snapshot(directory)["issues"]
+    pending = [
+        number
+        for number, marked in sorted(marks.items())
+        if marked is True and not (ledger.get(number) or {}).get("owner")
+    ]
+    for number in pending[:FORGE_UNCLAIMS]:
+        if _forge_backoff():
+            return
+        claims.forge_unclaim(Path(manifest["root"]), directory, number)
+
+
+def refresh_forge_issues(
+    directory: Path,
+    manifest: dict,
+    skip_labels: list[str] | tuple[str, ...] = issues.FORGE_SKIP_LABELS,
+) -> None:
     """Keeps the cached reading of the forge's open issues current.
 
     `status` hides claims on closed issues and shows titles from
     `FORGE_ISSUES`, but stays read-only, so the poll owns the forge read.
     One bounded call reads every open issue once the cached reading is
-    `FORGE_TTL` seconds old. A failed call is recorded and retried no sooner
-    than `FORGE_RETRY` seconds later, so a forge that is down costs one
-    timeout per retry window, and the last good reading is kept meanwhile.
-    A project without a GitHub forge is never read. A reading that holds
-    every open issue also retires the unowned issues it leaves out, through
-    `end_closed_issues`.
+    `FORGE_TTL` seconds old, given `FORGE_TIMEOUT` seconds, two per page. A
+    failed call is recorded with the class `forge.last_failure` names and
+    retried no sooner than `FORGE_RETRY` seconds later, so a forge that is
+    down costs one timeout per retry window, and the last good reading is
+    kept meanwhile. A project without a GitHub forge is never read. A
+    reading that holds every open issue also retires the unowned issues it
+    leaves out, through `end_closed_issues`.
+
+    Between full readings, which run every `FORGE_FULL_SECONDS`, the cache
+    is brought current from the issues updated since the last reading, less
+    `FORGE_OVERLAP` seconds: open ones are added or replaced and closed ones
+    dropped. A delta that fills a page is taken as truncated and a full
+    read runs instead. ``complete_at`` records the last full reading; a file
+    without it was written by a full reading. Each refresh also records the
+    signed-in ``login``, `skip_labels` and the issues `integration_closed`
+    reads from the integration base for `issues.with_forge`.
 
     Args:
         directory: Private project state directory.
         manifest: Current participant manifest.
+        skip_labels: Labels that keep an open forge issue out of the work
+            offered to lanes.
     """
     path = directory / FORGE_ISSUES
     try:
@@ -5801,23 +6798,149 @@ def refresh_forge_issues(directory: Path, manifest: dict) -> None:
         return
     if now - float(cached.get("failed_at") or 0) < FORGE_RETRY:
         return
-    catalog = forge.open_issue_catalog(root, FORGE_LIMIT, FORGE_TIMEOUT)
+    kept = cached.get("issues")
+    complete_at = float(cached.get("complete_at") or cached.get("read_at") or 0)
+    full = not isinstance(kept, dict) or now - complete_at >= FORGE_FULL_SECONDS
+    catalog: dict | None = None
+    if isinstance(kept, dict) and not full:
+        delta = forge.open_issue_catalog(
+            root,
+            FORGE_PAGE,
+            FORGE_TIMEOUT,
+            since=float(cached.get("read_at") or 0) - FORGE_OVERLAP,
+        )
+        full = delta is not None and len(delta) >= FORGE_PAGE
+        if delta is not None and not full:
+            catalog = {
+                **{
+                    number: item
+                    for number, item in kept.items()
+                    if number not in delta
+                },
+                **{
+                    number: item
+                    for number, item in delta.items()
+                    if item.get("state") == "OPEN"
+                },
+            }
+    if full:
+        catalog = forge.open_issue_catalog(root, FORGE_LIMIT, FORGE_TIMEOUT)
+        complete_at = now
     if catalog is None:
-        write_json(path, {**cached, "failed_at": now})
+        failure = forge.last_failure() or {}
+        if float(failure.get("at") or 0) < now:
+            failure = {}
+        write_json(
+            path,
+            {
+                **cached,
+                "failed_at": now,
+                "failure": {
+                    "kind": failure.get("kind", "error"),
+                    "detail": failure.get("detail", ""),
+                },
+            },
+        )
         return
-    if len(catalog) < FORGE_LIMIT:
+    if full and len(catalog) < FORGE_LIMIT:
         end_closed_issues(directory, catalog, now)
+    landed = integration_closed(
+        root,
+        str(manifest.get("integration_base") or ""),
+        {
+            number: float(item.get("updated_at") or 0)
+            for number, item in catalog.items()
+            if isinstance(item, dict)
+        },
+    )
+    assigned = any(
+        isinstance(item, dict) and item.get("assignees")
+        for item in catalog.values()
+    )
     write_json(
         path,
         {
             "read_at": now,
+            "complete_at": complete_at,
             "limit": FORGE_LIMIT,
+            "login": forge.login(root) if assigned else cached.get("login"),
+            "skip_labels": list(skip_labels),
+            "integration_closed": landed,
             "issues": {
-                number: {"title": str(item.get("title") or "")}
+                number: {
+                    "title": str(item.get("title") or ""),
+                    "labels": list(item.get("labels") or []),
+                    "assignees": list(item.get("assignees") or []),
+                    **(
+                        {"updated_at": float(item["updated_at"])}
+                        if item.get("updated_at")
+                        else {}
+                    ),
+                }
                 for number, item in catalog.items()
+                if isinstance(item, dict)
             },
         },
     )
+
+
+def integration_closed(
+    root: Path, base: str, updated: dict[str, float] | None = None
+) -> list[str]:
+    """Lists the issues commits on the integration base close by keyword.
+
+    A pull request merged into the integration base with ``Closes #N``
+    leaves its issue open on the forge, because a closing keyword acts only
+    on the default branch, so the forge's open issues still name finished
+    work. The messages of the commits the base carries beyond the remote
+    default branch, ``origin/HEAD``, are read as `forge.closing_numbers`
+    reads a body. The base is read from its remote-tracking branch, else
+    its local branch. Each Git call is bounded by `_read`'s timeout. No
+    base, no remote default branch, or a refused or slow call reads as
+    nothing closed, so selection falls back to the forge's own reading.
+
+    A squash crossing leaves the old integration commits outside the
+    default branch's history, so a recorded base that is never moved would
+    keep naming their issues. An issue the forge last updated after the
+    committer date of every commit that closes it, as a reopened one is,
+    is therefore not listed.
+
+    Args:
+        root: Base checkout.
+        base: Recorded integration base, empty when none is recorded.
+        updated: Forge update time in Unix seconds by bare issue number;
+            an issue it does not name is taken as never updated.
+
+    Returns:
+        Bare issue numbers in ascending order, without repeats.
+    """
+    if not base:
+        return []
+    default = _read(str(root), "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if not default:
+        return []
+    for head in (f"refs/remotes/origin/{base}", f"refs/heads/{base}"):
+        log = _read(
+            str(root), "log", "--format=%x00%ct%n%B", f"{default}..{head}", "--"
+        )
+        if log is None:
+            continue
+        closed: dict[str, int] = {}
+        for entry in log.split("\0"):
+            stamp, _, body = entry.partition("\n")
+            if not stamp.strip().isdigit():
+                continue
+            for number in forge.closing_numbers(body):
+                closed[number] = max(closed.get(number, 0), int(stamp))
+        return sorted(
+            (
+                number
+                for number, committed in closed.items()
+                if (updated or {}).get(number, 0) <= committed
+            ),
+            key=int,
+        )
+    return []
 
 
 def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
@@ -5866,6 +6989,7 @@ def end_closed_issues(directory: Path, opened: dict, since: float) -> None:
 
 PULL_REQUEST_SECONDS = 60.0
 PULL_REQUEST_RECORD = "pull-requests.json"
+MERGE_SETTLED = frozenset({"MERGEABLE", "CONFLICTING"})
 PULL_REQUEST_HISTORY_SECONDS = 30 * 86400.0
 CHECKS_STALLED_SECONDS = 3600.0
 CHECKS_STALLED_FACTOR = 2
@@ -5913,9 +7037,11 @@ def pull_request_wakes(
     `PULL_REQUEST_SECONDS`, and each open pull request's last reading is
     kept in `PULL_REQUEST_RECORD`. A pull request whose checks finished green
     or red on a head commit not yet reported, which gained a review, or
-    whose merge state moved between mergeable and conflicting, is announced
-    to its lane as supervisor mail naming the number, head commit and new
-    state, with the failing check names on a red run. Unread mail is a wake
+    whose merge state moved between mergeable and conflicting, across any
+    `UNKNOWN` reading the forge gives while it recomputes, or which first
+    settled as conflicting, is announced to its lane as supervisor mail
+    naming the number, head commit and new state, with the failing check
+    names on a red run. Unread mail is a wake
     reason, so the ordinary wake path gives the lane its turn. A pull request
     seen for the first time with finished checks or reviews is announced
     once as well. A message reporting a new review or failed checks also
@@ -5991,7 +7117,10 @@ def pull_request_wakes(
     if not isinstance(seen, dict):
         seen = {}
     now = time.time()
-    if now - float(seen.get("read_at") or 0) < PULL_REQUEST_SECONDS:
+    if (
+        now - float(seen.get("read_at") or 0) < PULL_REQUEST_SECONDS
+        or _forge_backoff()
+    ):
         return
     readings = forge.open_pull_requests(Path(manifest["root"]))
     if readings is None:
@@ -6011,6 +7140,7 @@ def pull_request_wakes(
             record["opened_at"] = float(previous.get("opened_at") or now)
         if previous.get("sha") == record["sha"] and previous.get("rerun"):
             record["rerun"] = previous["rerun"]
+        record["mergeable_settled"] = _merge_settled(previous, reading)
         kept[str(reading["number"])] = record
         changes = _pull_request_changes(previous, reading)
         limited = _ci_round_limit(
@@ -6026,7 +7156,11 @@ def pull_request_wakes(
         )
         if requested:
             changes.append(requested)
-        watched = changes or record["checks"] in {"pending", "red"}
+        watched = (
+            changes
+            or record["checks"] in {"pending", "red"}
+            or reading["mergeable"] == "CONFLICTING"
+        )
         name = _pull_request_lane(manifest, ledger, reading) if watched else ""
         if name:
             record["lane"] = name
@@ -6488,6 +7622,11 @@ def _not_started_decisions(
 def _pull_request_changes(before: dict, after: dict) -> list[str]:
     """Describes what changed between two readings of one pull request.
 
+    The merge state is compared against the last settled one
+    `_merge_settled` stored, so an `UNKNOWN` reading between two settled
+    ones neither wakes nor hides the change. A pull request first settled
+    as `CONFLICTING`, with no settled state before it, is a change.
+
     Args:
         before: The previous reading, or an empty mapping for a first one.
         after: This poll's reading from `forge.open_pull_requests`.
@@ -6515,14 +7654,37 @@ def _pull_request_changes(before: dict, after: dict) -> list[str]:
             for review in added
         )
         changes.append(f"review submitted: {listed}")
-    settled = {"MERGEABLE", "CONFLICTING"}
+    prior = before.get("mergeable_settled", before.get("mergeable"))
+    current = after["mergeable"]
     if (
-        before.get("mergeable") in settled
-        and after["mergeable"] in settled
-        and before["mergeable"] != after["mergeable"]
+        current in MERGE_SETTLED
+        and current != prior
+        and (prior in MERGE_SETTLED or current == "CONFLICTING")
     ):
-        changes.append(f"merge state is now {after['mergeable']}")
+        changes.append(f"merge state is now {current}")
     return changes
+
+
+def _merge_settled(previous: dict, reading: dict) -> str:
+    """Returns the last merge state the forge settled on for a pull request.
+
+    The forge computes mergeability lazily and reads `UNKNOWN` while it
+    recomputes after the base moves, so an `UNKNOWN` reading carries the
+    previous settled state forward. A record written before this field
+    existed falls back to its raw `mergeable` value.
+
+    Args:
+        previous: The pull request's stored record from the last poll.
+        reading: This poll's reading from `forge.open_pull_requests`.
+
+    Returns:
+        `MERGEABLE` or `CONFLICTING`, or an empty string when the forge
+        has never settled on either.
+    """
+    if reading["mergeable"] in MERGE_SETTLED:
+        return reading["mergeable"]
+    prior = previous.get("mergeable_settled", previous.get("mergeable"))
+    return prior if prior in MERGE_SETTLED else ""
 
 
 def _pull_request_feedback(
@@ -6859,9 +8021,11 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     what was kept. Before either sweep, every worktree a lane made outside
     its `<lane>-wt` directory is moved there, never deleted, and the moves
     and refusals are published under `relocations`. The publication only
-    describes the latest pass, so every move, every move Git refused and
-    every removal is also written to the service log as a `reclaim` entry,
-    whose rotation keeps the record after later sweeps find nothing left.
+    describes the latest pass, so every move, every removal and every
+    refused move the previous publication did not already hold for the
+    same worktree and reason is also written to the service log as a
+    `reclaim` entry, whose rotation keeps the record after later sweeps
+    find nothing left, without one line per sweep for the same refusal.
     The worktrees lanes
     made for themselves are swept in the
     same pass and published beside the lanes, without their sizes, because
@@ -6878,31 +8042,71 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
     stops growing by one bundle per capture of an issue nothing owns
     anymore.
 
+    Each step runs on its own, so a refusal from one, such as a worktree
+    move Git declines, never skips the steps after it. Every refusal is
+    published under `errors` with its step and message, written to the
+    service log as a `reclaim` entry, and raised once the sweep finishes,
+    so the poll stage records it as the supervision error `status` and
+    `problems` show. The sweep is still stamped, so a step that refuses
+    every time is retried once an interval rather than on every poll.
+
     Args:
         home: Private bridge state root.
         directory: Private project state directory holding the lanes.
         manifest: Project manifest naming the root and the participants.
+
+    Raises:
+        BridgeError: If any step refused, naming each step and its refusal,
+            after every other step ran and the publication was written.
     """
     from agent_parley import cli, server
 
     now = time.time()
     if not reclaim_due(directory, now, RECLAIM_INTERVAL):
         return
+    try:
+        published = json.loads((directory / RECLAIM_PUBLICATION).read_text())
+        refused = {
+            (row["worktree"], row["reason"])
+            for row in published["relocations"]
+            if row.get("moved") is False
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        refused = set()
     rows: list[dict] = []
     made: list[dict] = []
     moved: list[dict] = []
     pruned: list[str] = []
     bundles: list[str] = []
+    errors: list[dict] = []
     bridge = cli.Bridge(home)
+    root = Path(manifest["root"])
+
+    def step(label: str, call: Callable[[], list]) -> list:
+        """Runs one sweep step, recording rather than raising its refusal."""
+        try:
+            return call()
+        except BridgeError as exc:
+            errors.append({"step": label, "error": str(exc)})
+            return []
+
     try:
-        moved = bridge.relocate_worktrees(Path(manifest["root"]), apply=True)
-        rows = bridge.reclaim(Path(manifest["root"]), apply=True)
-        made = bridge.reclaim_worktrees(Path(manifest["root"]), apply=True)
-        pruned = reclaim.prune(directory, roster.read(directory), now)
+        moved = step(
+            "relocate", lambda: bridge.relocate_worktrees(root, apply=True)
+        )
+        rows = step("reclaim", lambda: bridge.reclaim(root, apply=True))
+        made = step(
+            "worktrees", lambda: bridge.reclaim_worktrees(root, apply=True)
+        )
+        pruned = step(
+            "prune",
+            lambda: reclaim.prune(directory, roster.read(directory), now),
+        )
         with contextlib.suppress(OSError, ValueError):
-            bundles = recovery.prune(directory, issues.snapshot(directory))
-    except BridgeError:
-        pass
+            bundles = step(
+                "bundles",
+                lambda: recovery.prune(directory, issues.snapshot(directory)),
+            )
     finally:
         left = [row for row in made if not row.get("removed")]
         with contextlib.suppress(OSError):
@@ -6918,12 +8122,17 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     "reclaimable": sum(row["reclaim"] for row in left),
                     "forceable": sum(reclaim.forceable(row) for row in left),
                     "bundles_pruned": len(bundles),
+                    "errors": errors,
                 },
             )
     acted = [
         row
         for row in moved
-        if row.get("moved") or row["reason"] == reclaim.REFUSED
+        if row.get("moved")
+        or (
+            row.get("moved") is False
+            and (row["worktree"], row["reason"]) not in refused
+        )
     ] + [row for row in rows + made if row.get("removed")]
     for line in reclaim.lines(acted):
         server.log(home, "reclaim", f"{directory.name}: {line}")
@@ -6938,6 +8147,17 @@ def reclaim_lanes(home: Path, directory: Path, manifest: dict) -> None:
                     lanes.RECLAIMED,
                     evidence="reclaim removed the lane after its work landed",
                 )
+    for error in errors:
+        server.log(
+            home,
+            "reclaim",
+            f"{directory.name}: {error['step']} refused: {error['error']}",
+        )
+    if errors:
+        raise BridgeError(
+            "reclaim: "
+            + "; ".join(f"{row['step']}: {row['error']}" for row in errors)
+        )
 
 
 def reclaim_summary(directory: Path) -> dict:
@@ -6948,8 +8168,10 @@ def reclaim_summary(directory: Path) -> dict:
 
     Returns:
         The state directory's size in bytes, the worktrees a reclaim would
-        remove and the further ones only a forced reclaim would, and when
-        they were measured; every value is None before the first sweep.
+        remove and the further ones only a forced reclaim would, when they
+        were measured, and the steps the sweep refused; every value is None
+        before the first sweep, and `errors` is None for a sweep published
+        before refusals were recorded.
     """
     try:
         published = json.loads((directory / RECLAIM_PUBLICATION).read_text())
@@ -6959,7 +8181,13 @@ def reclaim_summary(directory: Path) -> dict:
         published = {}
     return {
         key: published.get(key)
-        for key in ("state_bytes", "reclaimable", "forceable", "swept")
+        for key in (
+            "state_bytes",
+            "reclaimable",
+            "forceable",
+            "swept",
+            "errors",
+        )
     }
 
 
@@ -6979,16 +8207,44 @@ def root_retired(directory: Path) -> bool:
     return isinstance(published, dict) and bool(published.get("retired"))
 
 
+def root_refused(directory: Path) -> list[dict]:
+    """Reads the lanes `missing_root` could not retire for a gone root.
+
+    Args:
+        directory: Private project state directory.
+
+    Returns:
+        One entry per refused lane, naming it, the refusal and the
+        checkpoints captured for its claims; empty when the publication is
+        missing, unreadable or predates the `refused` key.
+    """
+    try:
+        published = json.loads((directory / ROOT_PUBLICATION).read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(published, dict):
+        return []
+    refused = published.get("refused")
+    if not isinstance(refused, list):
+        return []
+    return [entry for entry in refused if isinstance(entry, dict)]
+
+
 def missing_root(
     home: Path, directory: Path, manifest: dict, config: dict
 ) -> None:
-    """Retires a project whose root checkout has been gone an interval.
+    """Retires a project whose root checkout has been gone `root_gone_after`.
 
     A root removed under a live project, such as a temporary directory a
     reboot wiped, leaves every lane reported as an unavailable worktree and
     every status poll walking it. The first poll that finds the root gone
-    only records when; a root still gone one supervision interval later is
-    a root that is not coming back. Each lane that has not retired is then
+    only records when. A rename and rename back, a re-clone, a remount or a
+    resume from sleep all hide a root for seconds to minutes, so only a root
+    still gone `root_gone_after` later (an hour by default) is a root that
+    is not coming back. A root whose parent directory cannot be listed sits
+    on an unmounted volume or a removed mount point; it is recorded as
+    `unreachable` and never retires anything. Each lane that has not
+    retired is then
     captured into a recovery checkpoint where Git can still read it,
     retired through `retirement.withdraw`, which releases its claims and
     declines offers made to it, and its credential is invalidated. The
@@ -6997,7 +8253,8 @@ def missing_root(
     issue next can restore the work. It names the state directory for the
     operator to remove with `agent-parley gc --project ROOT --apply`
     (`forget`); nothing here deletes it. A root that reappears clears the
-    record on the next poll.
+    record on the next poll, keeping it as `ROOT_RETURNED` when it retired
+    lanes (`root_returned`).
 
     A lane whose session process is still alive is never retired here: a
     moved repository or a dropped mount leaves its client running, and
@@ -7007,6 +8264,15 @@ def missing_root(
     only the lanes whose process has since gone. A lane whose activity
     record cannot be read has no process evidence either way, so it is
     counted as live rather than retired on an unreadable file.
+
+    A lane `retirement.withdraw` refuses, because it holds ready work still
+    awaiting integration or work an operator blocked, keeps its claims and
+    its credential. The publication names it under `refused` with the
+    refusal and the checkpoints captured for its claims, and the project is
+    not recorded retired, so `forget` cannot delete the only record of that
+    work unless the operator explicitly discards it. Each later poll tries
+    such a lane again. A publication written before `refused` existed
+    reads as refusing nothing.
 
     Args:
         home: Private bridge state root.
@@ -7023,23 +8289,34 @@ def missing_root(
     except (OSError, ValueError):
         recorded = {}
     since = recorded.get("since") if isinstance(recorded, dict) else None
+    reachable = _parent_readable(Path(manifest["root"]))
     if not isinstance(since, int | float) or isinstance(since, bool):
         write_json(
             path,
-            {"since": now, "retired": None, "state_directory": str(directory)},
+            {
+                "since": now,
+                "retired": None,
+                "state_directory": str(directory),
+                "unreachable": not reachable,
+            },
         )
         return
-    if recorded.get("retired") or now - since < config["interval"]:
+    if recorded.get("retired"):
+        return
+    if bool(recorded.get("unreachable")) == reachable:
+        write_json(path, {**recorded, "unreachable": not reachable})
+    if not reachable or now - since < config["root_gone_after"]:
         return
     lanes = list(recorded.get("lanes") or [])
     live = []
+    refused: list[dict] = []
     for name, participant in manifest["participants"].items():
         if roster.retired(participant):
             continue
         reading = presence(directory, name, config["inactive_after"])
         if (
             reading["process_alive"] is True
-            or reading["evidence"] == UNREADABLE
+            or reading["evidence"] in STILL_RUNNING
         ):
             live.append(name)
             continue
@@ -7055,7 +8332,14 @@ def missing_root(
                 )["id"]
         try:
             report = retirement.withdraw(directory, name)
-        except BridgeError:
+        except BridgeError as exc:
+            refused.append(
+                {
+                    "participant": name,
+                    "refused": str(exc),
+                    "checkpoints": checkpoints,
+                }
+            )
             continue
         with contextlib.suppress(BridgeError, OSError, sqlite3.Error):
             store.revoke(home, manifest["root"], participant["display"])
@@ -7070,12 +8354,93 @@ def missing_root(
         path,
         {
             "since": since,
-            "retired": None if live else now,
+            "retired": None if live or refused else now,
             "state_directory": str(directory),
+            "unreachable": False,
             "lanes": lanes,
             "live": live,
+            "refused": refused,
         },
     )
+
+
+def _parent_readable(root: Path) -> bool:
+    """Reports whether the directory that held a missing root can be listed.
+
+    A root under an unmounted volume or a removed mount point is unreachable
+    rather than gone, so its lanes must not retire. A listable parent is the
+    evidence that the root itself was removed or moved.
+
+    Args:
+        root: Project root checkout that no longer exists.
+
+    Returns:
+        Whether the root's parent directory exists and can be listed.
+    """
+    try:
+        next(root.parent.iterdir(), None)
+    except OSError:
+        return False
+    return True
+
+
+def root_returned(directory: Path, manifest: dict) -> None:
+    """Keeps the record of lanes retired while the root was gone.
+
+    A root that reappears after `missing_root` retired lanes leaves those
+    lanes retired and their claims released. Deleting the publication then
+    would hide why, so it moves to `ROOT_RETURNED` with the time the root
+    returned, and `problems` names each lane with its re-admit command. A
+    second return merges its lanes into a record already kept, deduplicated
+    by participant, so lanes still retired from an earlier loss stay named.
+    The record is removed once every lane it names has been re-admitted, or
+    when the operator deletes the file. A publication that retired nothing
+    is simply removed.
+
+    Args:
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+    """
+    path = directory / ROOT_PUBLICATION
+    kept = directory / ROOT_RETURNED
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        recorded = None
+    if isinstance(recorded, dict) and recorded.get("lanes"):
+        try:
+            earlier = json.loads(kept.read_text())
+        except (OSError, ValueError):
+            earlier = None
+        lanes = list(recorded["lanes"])
+        named = {
+            str(lane.get("participant"))
+            for lane in lanes
+            if isinstance(lane, dict)
+        }
+        if isinstance(earlier, dict):
+            lanes.extend(
+                lane
+                for lane in earlier.get("lanes") or []
+                if isinstance(lane, dict)
+                and str(lane.get("participant")) not in named
+            )
+        write_json(
+            kept, {**recorded, "lanes": lanes, "returned_at": time.time()}
+        )
+    path.unlink(missing_ok=True)
+    try:
+        returned = json.loads(kept.read_text())
+    except (OSError, ValueError):
+        return
+    participants = manifest["participants"]
+    if not isinstance(returned, dict) or not any(
+        roster.retired(participants[str(lane.get("participant"))])
+        for lane in returned.get("lanes") or []
+        if isinstance(lane, dict)
+        and str(lane.get("participant")) in participants
+    ):
+        kept.unlink(missing_ok=True)
 
 
 def forget(
@@ -7091,7 +8456,10 @@ def forget(
     the projects folder in one step, so no reader ever sees half of it.
     The recovery checkpoints `missing_root` captured are moved to
     `RECOVERED_FOLDER` under the state root, beside the project's key,
-    unless ``discard`` asks for them to be deleted with the rest.
+    unless ``discard`` asks for them to be deleted with the rest. A project
+    whose publication names lanes `missing_root` could not retire is kept,
+    naming each lane and its refusal, unless ``discard`` explicitly deletes
+    that work along with the checkpoints.
 
     Args:
         home: Private bridge state root.
@@ -7106,8 +8474,9 @@ def forget(
 
     Raises:
         BridgeError: If no registered project names the root, the root
-            exists, a lane's session process is alive or unreadable, or the
-            supervisor has not retired the project yet.
+            exists, a lane's session process is alive or unreadable, a lane
+            whose retirement was refused is recorded and ``discard`` is
+            false, or the supervisor has not retired the project yet.
     """
     wanted = {root, str(Path(root).expanduser().absolute())}
     found = None
@@ -7133,7 +8502,7 @@ def forget(
         reading = presence(directory, name)
         if (
             reading["process_alive"] is True
-            or reading["evidence"] == UNREADABLE
+            or reading["evidence"] in STILL_RUNNING
         ):
             live.append(name)
     if live:
@@ -7141,7 +8510,19 @@ def forget(
             f"Lanes of {named} may still be running: {', '.join(live)}; "
             "stop their sessions, then run this again."
         )
-    if not root_retired(directory):
+    refused = root_refused(directory)
+    if refused and not discard:
+        listed = "; ".join(
+            f"{entry.get('participant')}: {entry.get('refused')}"
+            for entry in refused
+        )
+        raise BridgeError(
+            f"Lanes of {named} hold work their retirement refused to "
+            f"release, and removing the state deletes its only record: "
+            f"{listed}. Recover that work from its checkpoints, or rerun "
+            "with --yes to delete it with the recovery checkpoints."
+        )
+    if not refused and not root_retired(directory):
         raise BridgeError(
             f"The service has not retired {named} yet; it does so one "
             "supervision interval after it finds the root gone. Run "
@@ -7241,6 +8622,10 @@ def poll(home: Path, directory: Path) -> None:
     its record names the stage, the lane a wake belongs to and the line that
     raised, so one lane's failure never starves the lanes after it.
 
+    A project whose unattended integration policy records ``auto`` has its
+    ready, listed claims attempted by `unattended.supervise` on threads of
+    their own, before any lane is woken.
+
     Each poll records when it finished, how long it took and when the last
     clean poll finished, which status reports as the supervisor's liveness.
     The record also holds the wall seconds of each stage, so a slow poll
@@ -7261,7 +8646,7 @@ def _poll(home: Path, directory: Path) -> None:
     if not Path(manifest["root"]).exists():
         missing_root(home, directory, manifest, config)
         return
-    (directory / ROOT_PUBLICATION).unlink(missing_ok=True)
+    root_returned(directory, manifest)
     failures: list[str] = []
     stages: dict[str, float] = {}
     started = time.time()
@@ -7311,8 +8696,15 @@ def _poll(home: Path, directory: Path) -> None:
         manifest,
         config,
     )
+    stage("stale plugins", stale_plugins, home, directory, manifest, config)
     stage("dependencies", lifecycle.settle_dependencies, directory)
-    stage("forge issues", refresh_forge_issues, directory, manifest)
+    stage(
+        "forge issues",
+        forge_upkeep,
+        directory,
+        manifest,
+        config["forge_skip_labels"],
+    )
     if config["prompts"]:
         stage(
             "completions",
@@ -7349,6 +8741,11 @@ def _poll(home: Path, directory: Path) -> None:
             directory,
             config["takeover_grace"],
             manifest.get("deadlines") or {},
+            {
+                name
+                for name, participant in manifest["participants"].items()
+                if not roster.retired(participant)
+            },
         )
     stage("blueprints", blueprint_runs, home, directory, manifest)
     stage(
@@ -7358,6 +8755,13 @@ def _poll(home: Path, directory: Path) -> None:
         directory,
         manifest,
         config,
+    )
+    stage(
+        "unattended integration",
+        unattended.supervise,
+        home,
+        directory,
+        manifest,
     )
     if config["wake"]:
         for name, participant in manifest["participants"].items():
@@ -7417,13 +8821,25 @@ def failure(label: str, exc: BaseException) -> str:
         The stage, the exception type and text, and the innermost frame that
         raised it, so a recorded failure can be traced without the log.
     """
-    frames = traceback.extract_tb(exc.__traceback__)
-    where = (
-        f" at {Path(frames[-1].filename).name}:{frames[-1].lineno}"
-        if frames
-        else ""
-    )
+    place = raised_at(exc)
+    where = f" at {place}" if place else ""
     return f"{label}: {type(exc).__name__}: {exc}{where}"
+
+
+def raised_at(exc: BaseException) -> str:
+    """Names the innermost frame that raised one exception.
+
+    Args:
+        exc: Exception to locate.
+
+    Returns:
+        The file name and line number as ``name:line``, or an empty string
+        when the exception carries no traceback.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return ""
+    return f"{Path(frames[-1].filename).name}:{frames[-1].lineno}"
 
 
 def last_poll(directory: Path) -> dict:
@@ -7801,7 +9217,15 @@ def _remind(
         ),
     )
     ended = read[0] if read else {}
-    stage("forge completions", end_merged_claims, directory, ended)
+    stage("symbol notices", symbol_notices, home, directory, manifest, ended)
+    stage(
+        "forge completions",
+        end_merged_claims,
+        directory,
+        ended,
+        home,
+        manifest,
+    )
     closed = set(ended)
     stage(
         "reminders",
@@ -7935,6 +9359,12 @@ def _work_backlog(
     backoff, so one delivered wake the lane did not act on never silences
     the next claim it could make.
 
+    A continue record whose lane holds only work blocked on an operator
+    action, and has no next work, is never delivered, not even once: the
+    lane can only end the turn, so each wake would bill a turn that
+    changes nothing, and `_only_waits` explains why ready work differs. A
+    change to that work publishes a new record, which is judged again.
+
     The offer is derived again the way `work` derived it: the leads the
     lanes before this one in name order publish are the issues taken
     earlier in that sweep, so an unchanged sweep reproduces the same offer.
@@ -7950,6 +9380,8 @@ def _work_backlog(
     Returns:
         Backlog key and offer, or None when no actionable offer is published.
     """
+    from agent_parley import recommend
+
     offer = record.get("offer") or {}
     dispatch = record.get("dispatch") or {}
     if not config["prompts"] or not offer.get("id") or not dispatch:
@@ -7977,12 +9409,23 @@ def _work_backlog(
         peer: idle_seconds(directory, peer) for peer in manifest["participants"]
     }
     free = lifecycle.actionable(pool)
+    shared = _shared_claims(directory, manifest, pool, free)
+    leads = _idle_leads(
+        home,
+        directory,
+        manifest,
+        name,
+        pool,
+        config["claim_idle_after"],
+        taken,
+        shared,
+    )
     current = _work_offer(
         name,
         results,
         stretches,
         owned,
-        _first_untaken(free, taken),
+        _first_untaken(recommend.for_lane(free, shared, name), taken),
         pool,
         config["stalled_after"],
         share_recipients(
@@ -7995,20 +9438,18 @@ def _work_backlog(
             ledger,
             config,
         ),
-        _idle_leads(
-            home,
-            directory,
-            manifest,
-            name,
-            pool,
-            config["claim_idle_after"],
-            taken,
-        ),
+        leads,
     )
     if not current or (
         current.get("id"),
         current.get("progress"),
     ) != (offer.get("id"), offer.get("progress")):
+        return None
+    if (
+        current["kind"] == "continue"
+        and leads is not None
+        and _only_waits(pool, owned.get(name, []), leads)
+    ):
         return None
     if (
         current["kind"] == "continue"
@@ -8333,6 +9774,7 @@ def _wake_block(
     observed: dict,
     record: dict,
     window: float,
+    through_wait: Callable[[], object] | None = None,
 ) -> tuple[str, float]:
     """Names what stops a wake attempt now and when it could clear.
 
@@ -8361,7 +9803,13 @@ def _wake_block(
     its turn to wait on background work it started is not woken before it
     said it would check again. Once that time passes with no fresher wait,
     the gate clears on its own and the lane is asked for a turn like any
-    other idle lane.
+    other idle lane. Unread direct peer mail that names an issue the lane
+    holds, found by `held_issue_mail`, is the exception: the wait is the
+    lane's own guess about when it next has work, and a peer asking about
+    that work proves the guess wrong, so the caller lets such mail through
+    the wait and the lane is woken on the normal delivery interval. The
+    caller passes that search as a callable, run only while a wait is in
+    force, so a poll of a lane with no wait never reads its mail for it.
 
     A lane whose tool call a native permission layer refused waits on the
     operator's decision about it, so while `denials.waiting` finds that
@@ -8375,6 +9823,9 @@ def _wake_block(
         observed: The lane's `recorded_presence`.
         record: The lane's last durable wake record.
         window: Inactivity window the attempts are spaced by.
+        through_wait: Called only while a declared wait is in force; a
+            true result, mail the lane must answer, ends that wait early.
+            None lets no mail through.
 
     Returns:
         The blocking cause, empty when an attempt can be made, and the earliest
@@ -8398,7 +9849,11 @@ def _wake_block(
     if lane.get("state") == lanes.BLOCKED:
         return f"blocked: {lane['cause']}", 0.0
     wait = published_wait(directory, name)
-    if wait and float(wait["until"]) > time.time():
+    if (
+        wait
+        and float(wait["until"]) > time.time()
+        and not (through_wait and through_wait())
+    ):
         return f"waiting on {wait['reason']}", float(wait["until"])
     if (
         observed["process_alive"] is False
@@ -8600,6 +10055,60 @@ def _mail_digest(rows: list) -> list[str]:
     return [str(identifier) for identifier in newest]
 
 
+def held_issue_mail(
+    home: Path, directory: Path, manifest: dict, name: str
+) -> list[str]:
+    """Finds unread direct peer mail that names an issue a lane holds.
+
+    A message counts when another identity sent it to the lane directly,
+    rather than on the project feed, the lane has not read it, and its
+    subject or body cites a held issue as ``#N``, the form status uses to
+    tie mail to a report.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant whose mail is read.
+
+    Returns:
+        Message identifiers as text in ascending order, empty when the lane
+        holds no claim, has no such mail, or the store cannot be read.
+    """
+    held = [
+        number
+        for number, record in issues.snapshot(directory)["issues"].items()
+        if record.get("owner") == name and record.get("claim_id")
+    ]
+    if not held:
+        return []
+    cited = re.compile(
+        "#(?:" + "|".join(re.escape(number) for number in held) + r")\b"
+    )
+    try:
+        with store.connect(home) as db:
+            rows = db.execute(
+                "SELECT m.id,m.subject,m.body_md FROM messages m "
+                "JOIN message_recipients r ON r.message_id=m.id "
+                "JOIN agents a ON a.id=r.agent_id "
+                "JOIN projects p ON p.id=a.project_id WHERE p.human_key=? "
+                "AND a.name=? AND m.feed=0 AND m.sender_id<>r.agent_id "
+                "AND r.superseded_ts IS NULL AND r.read_ts IS NULL "
+                "ORDER BY m.id",
+                (
+                    manifest["root"],
+                    manifest["participants"][name]["display"],
+                ),
+            ).fetchall()
+    except (BridgeError, OSError, sqlite3.Error):
+        return []
+    return [
+        str(row["id"])
+        for row in rows
+        if cited.search(f"{row['subject']}\n{row['body_md']}")
+    ]
+
+
 def session_held(directory: Path, name: str) -> bool:
     """Reports whether a live launcher or operation holds the session lock.
 
@@ -8764,6 +10273,11 @@ def wake(
     never escalates the lane; the backlog waits until the operator records
     the opt-in with `approval resume` or resumes the lane, and only the
     first such refusal is written to the checkpoint history.
+    A resume also takes one `process.host_load` reading first. A host past
+    the project's ``max_load_ratio`` or below its ``min_available_mib`` is
+    not given another lane: the attempt is recorded as `HOST_LOADED` with
+    the numbers, a busy refusal that spends no attempt, and the launch is
+    deferred to a later poll instead of refused.
     Nothing reads, acknowledges, releases, accepts or transfers work for the
     lane; waking only asks the lane to take its own turn.
 
@@ -8831,7 +10345,14 @@ def wake(
     if not lanes.wakes(recorded):
         return
     observed = recorded_presence(recorded, observed)
-    blocked, ready_at = _wake_block(directory, name, observed, parked, window)
+    blocked, ready_at = _wake_block(
+        directory,
+        name,
+        observed,
+        parked,
+        window,
+        lambda: held_issue_mail(home, directory, manifest, name),
+    )
     if blocked:
         _defer_wake(home, directory, root, name, blocked, ready_at, window)
         _escalate_blocked(home, directory, manifest, name, recorded, blocked)
@@ -8998,33 +10519,18 @@ def wake(
             ):
                 if opt_in_missing(home, manifest, name):
                     result = OPT_IN_MISSING
+                elif loaded := process.overloaded(
+                    process.host_load(),
+                    config["max_load_ratio"],
+                    config["min_available_mib"],
+                ):
+                    result = f"{HOST_LOADED}: {loaded}"
                 elif (
                     prompt := terminal.selected_prompt(directory, name, home)
                 ) is None:
                     result = "busy:stale"
                 else:
-                    with (directory / f"{name}-wake.log").open("ab") as output:
-                        child = subprocess.Popen(
-                            [
-                                sys.executable,
-                                "-m",
-                                "agent_parley.cli",
-                                "--home",
-                                str(home),
-                                "run",
-                                name,
-                                "--repo",
-                                manifest["root"],
-                                "--resume",
-                                "--task",
-                                prompt,
-                            ],
-                            stdin=subprocess.DEVNULL,
-                            stdout=output,
-                            stderr=output,
-                            start_new_session=True,
-                        )
-                    track_launcher(child)
+                    child = _resume(home, directory, manifest, name, prompt)
                     result = f"resume requested (launcher {child.pid})"
         probe_exhaustion(directory, name, result)
         gap = result == OPT_IN_MISSING
@@ -9081,6 +10587,194 @@ def wake(
         )
 
 
+def _resume(
+    home: Path, directory: Path, manifest: dict, name: str, task: str = ""
+) -> subprocess.Popen[bytes]:
+    """Starts a detached launcher that resumes one lane's recorded session.
+
+    The launcher is this package's own ``run --resume``, so the lane keeps
+    its native authentication and permissions, and its output goes to the
+    lane's wake log.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        name: Participant whose lane is resumed.
+        task: Prompt the resumed session starts on, or none.
+
+    Returns:
+        The tracked launcher process.
+    """
+    command = [
+        sys.executable,
+        "-m",
+        "agent_parley.cli",
+        "--home",
+        str(home),
+        "run",
+        name,
+        "--repo",
+        manifest["root"],
+        "--resume",
+    ]
+    if task:
+        command += ["--task", task]
+    with (directory / f"{name}-wake.log").open("ab") as output:
+        child = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=output,
+            start_new_session=True,
+        )
+    track_launcher(child)
+    return child
+
+
+def _idle(home: Path, root: str, name: str, state: dict) -> bool:
+    """Reports whether a lane is idle with no turn in flight.
+
+    The lane condition decides; the activity label stands in only when no
+    condition was recorded.
+
+    Args:
+        home: Private bridge state root.
+        root: Repository root the lane belongs to.
+        name: Lane participant name.
+        state: The lane's activity record.
+
+    Returns:
+        True when the lane is idle.
+    """
+    seen = condition(home, root, name) or {}
+    return (seen.get("state") or state.get("activity")) == lanes.IDLE
+
+
+def stale_plugins(
+    home: Path, directory: Path, manifest: dict, config: dict
+) -> list[str]:
+    """Restarts unattended lanes whose session loaded a replaced plugin.
+
+    A running native session cannot reload its hooks and skills, so a lane
+    launched before an upgrade keeps the old plugin until it restarts. The
+    hook tells every such lane to finish its step and resume; a lane whose
+    launcher has no terminal, which the service resumes and nobody types
+    in, is restarted here instead so a headless estate converges without
+    an operator. A lane is restarted only when its activity record names a
+    ``plugin_version`` other than the launcher's, `plugins.repair` recorded
+    a successful refresh of its config home for this launcher, its session
+    is alive and idle with no turn in flight, and the service would resume
+    it at all: wakes are on, it is neither paused, retired, stopped by the
+    operator nor waiting on a bridge tool opt-in, it has a resumable
+    session no takeover fenced, and its provider is a native adapter that
+    needs no extra environment. These are the checks the wake path makes
+    before a resume, so no lane is ended that ``run --resume`` cannot bring
+    back. A lane with a terminal is never restarted, because its operator's
+    session must not vanish under them. Under the lane's checkpoint lock
+    the activity record is read again, and the lane is skipped unless the
+    same session process is still idle. The stop runs after the lock is
+    released, because the ending session's own hooks take that lock and
+    would hold its exit past the shutdown timeout. The session is ended
+    through the same verified stop `participant stop` uses, whose start
+    identity check refuses a replaced process, and resumed with
+    ``run --resume``. The
+    launcher version is recorded as ``plugin_restart`` before the stop, so
+    a lane is restarted at most once per launcher version even if its new
+    session still loads an old plugin.
+
+    Args:
+        home: Private bridge state root.
+        directory: Private project state directory.
+        manifest: Current participant manifest.
+        config: Resolved supervision settings.
+
+    Returns:
+        The lanes this pass restarted, in name order.
+    """
+    from agent_parley import checkpoints, plugins
+
+    recorded = plugins.repairs(home) if config["wake"] else {}
+    if not recorded:
+        return []
+    launcher = protocol.launcher_version()
+    restarted = []
+    for name in sorted(manifest["participants"]):
+        participant = manifest["participants"][name]
+        if (
+            not participant.get("wake", True)
+            or participant.get("paused", False)
+            or roster.retired(participant)
+        ):
+            continue
+        state = checkpoints.activity(directory, name)
+        loaded, aged = protocol.lane_plugin(state)
+        if (
+            not aged
+            or state.get("attached") is not False
+            or state.get("operator_stopped")
+            or state.get("plugin_restart") == launcher
+            or rebooted(state)
+        ):
+            continue
+        repair = plugins.lane_repair(home, participant, recorded)
+        if (
+            repair.get("state") != plugins.REPAIRED
+            or repair.get("launcher") != launcher
+        ):
+            continue
+        if not _idle(home, manifest["root"], name, state):
+            continue
+        session = str(
+            state.get("resumable_session", state.get("session_id")) or ""
+        )
+        entry = roster.provider(home, participant["provider"])
+        if (
+            not session
+            or _fenced(directory, name, state)
+            or entry["adapter"] not in roster.ADAPTERS
+            or entry.get("require_env")
+        ):
+            continue
+        pid = state.get("session_pid")
+        ticks = str(state.get("session_ticks") or "")
+        if (
+            type(pid) is not int
+            or not process.alive(pid, ticks)
+            or opt_in_missing(home, manifest, name)
+        ):
+            continue
+        try:
+            with lock(directory / f"{name}-checkpoint.lock", timeout=1):
+                current = checkpoints.activity(directory, name)
+                if (
+                    current.get("session_pid") != pid
+                    or str(current.get("session_ticks") or "") != ticks
+                    or not _idle(home, manifest["root"], name, current)
+                ):
+                    continue
+                current.update(plugin_restart=launcher)
+                write_json(directory / f"{name}-activity.json", current)
+            process.ServerProcess(pid, ticks).stop()
+        except (BridgeError, OSError) as exc:
+            issues.note_supervision_error(
+                directory, f"plugin restart {name}: {exc}"
+            )
+            continue
+        child = _resume(home, directory, manifest, name)
+        checkpoints.record(
+            directory,
+            name,
+            {"hook_event_name": "RuntimeWake"},
+            checkpoints.Reason.WAKE_REQUESTED,
+            None,
+            f"plugin {loaded} replaced by {launcher}: resume requested "
+            f"(launcher {child.pid})",
+        )
+        restarted.append(name)
+    return restarted
+
+
 def run(home: Path, stopped: threading.Event) -> None:
     """Runs bounded project polls until the local service stops.
 
@@ -9096,11 +10790,36 @@ def run(home: Path, stopped: threading.Event) -> None:
     This thread is started once and serves every project, so an unexpected
     `KeyError` from one malformed record used to end supervision for the
     whole service with no trace until it was restarted.
+
+    Once at start and then every `PRUNE_INTERVAL` seconds the store drops
+    settled rows past its retention window through `store.prune`.
+
+    Once at start and then once per default poll interval, every installed
+    plugin older than this launcher is refreshed through `plugins.repair`.
+    A service starts after every upgrade, because a moved package restarts
+    it, so the first pass repairs the plugin without an operator command.
+    `up` does not repeat the call: the service it starts runs this pass at
+    once, and two installs into one CLI home at the same time would race.
     """
-    from agent_parley import server
+    from agent_parley import plugins, server
 
     deadlines: dict[Path, float] = {}
+    pruned: float | None = None
+    repaired: float | None = None
     while not stopped.is_set():
+        if pruned is None or time.monotonic() >= pruned:
+            try:
+                store.prune(home, time.time())
+            except Exception as exc:
+                server.log(home, "supervision", failure("prune store", exc))
+            pruned = time.monotonic() + PRUNE_INTERVAL
+        if repaired is None or time.monotonic() >= repaired:
+            try:
+                for line in plugins.repair(home):
+                    server.log(home, "plugins", line)
+            except Exception as exc:
+                server.log(home, "supervision", failure("repair plugins", exc))
+            repaired = time.monotonic() + DEFAULTS["interval"]
         for path in (home / "projects").glob("*/project.json"):
             if stopped.is_set():
                 return

@@ -473,9 +473,26 @@ def test_only_the_operator_resumes_or_raises_the_run(
         "--repo",
         str(repo),
     )
-    assert "operator authority" in capsys.readouterr().err
+    assert "from an operator shell" in capsys.readouterr().err
     assert budgets.halted(directory, roster.read(directory))
     monkeypatch.delenv("AGENT_PARLEY_TOKEN")
+    before = roster.read(directory)
+    monkeypatch.chdir(paired["lanes"]["claude"])
+    assert main(monkeypatch, bridge, "budget", "resume", "--repo", str(repo))
+    assert main(
+        monkeypatch,
+        bridge,
+        "budget",
+        "enforce",
+        "--calls",
+        "100",
+        "--repo",
+        str(repo),
+    )
+    assert capsys.readouterr().err.count("from an operator shell") == 2
+    assert roster.read(directory) == before
+    assert budgets.halted(directory, before)
+    monkeypatch.chdir(repo)
     assert main(monkeypatch, bridge, "budget", "resume", "--repo", str(repo))
     assert "still at or over" in capsys.readouterr().err
     assert not main(
@@ -818,3 +835,84 @@ def test_a_half_written_rollout_is_matched_once_complete(tmp_path):
     assert records._codex_sources(tmp_path, lane) == []
     rollout.write_text(json.dumps({"payload": {"cwd": str(lane)}}) + "\n")
     assert records._codex_sources(tmp_path, lane) == [rollout]
+
+
+@pytest.mark.parametrize("provider", roster.ADAPTERS)
+def test_only_providers_with_a_record_reader_measure_tokens(bridge, provider):
+    assert records.measures_tokens(bridge.home, provider) is (provider != "amp")
+    assert not records.measures_tokens(bridge.home, "undefined-provider")
+
+
+def test_an_enforced_token_limit_with_an_unmeasured_lane_is_refused(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    directory = bridge.project(repo, create=False)[1]
+    bridge.add_participant(repo, "orb", "amp")
+    enforce = ("budget", "enforce", "--tokens", "500", "--repo", str(repo))
+    assert main(monkeypatch, bridge, *enforce)
+    err = capsys.readouterr().err
+    assert "no token count is read for orb," in err
+    assert "--allow-unmeasured" in err
+    assert "run_budget" not in roster.read(directory)
+    assert not main(monkeypatch, bridge, *enforce, "--allow-unmeasured")
+    assert "no token count is read for orb," in capsys.readouterr().err
+    assert roster.read(directory)["run_budget"] == {"tokens": 500}
+    assert not main(
+        monkeypatch,
+        bridge,
+        "budget",
+        "enforce",
+        "--calls",
+        "9",
+        "--repo",
+        str(repo),
+    )
+    assert "no token count" not in capsys.readouterr().err
+
+
+def test_an_advisory_token_limit_warns_for_each_unmeasured_lane(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    bridge.add_participant(repo, "gem", "gemini")
+    bridge.add_participant(repo, "orb", "amp")
+    bridge.add_participant(repo, "sky", "amp")
+    project = ("--tokens", "500", "--repo", str(repo))
+    assert not main(monkeypatch, bridge, "budget", "set", *project)
+    assert "read for orb, sky, so" in capsys.readouterr().err
+    assert not main(
+        monkeypatch, bridge, "participant", "budget", "gem", *project
+    )
+    assert "no token count" not in capsys.readouterr().err
+    assert not main(
+        monkeypatch, bridge, "participant", "budget", "sky", *project
+    )
+    assert "no token count is read for sky, so" in capsys.readouterr().err
+    monkeypatch.chdir(repo)
+    assert not main(
+        monkeypatch, bridge, "provider", "budget", "amp", "--tokens", "5"
+    )
+    assert "no token count is read for amp, so" in capsys.readouterr().err
+
+
+def test_an_active_copilot_lane_counts_as_unmeasured_until_its_session_ends(
+    bridge, repo, paired, monkeypatch, capsys
+):
+    directory = bridge.project(repo, create=False)[1]
+    bridge.add_participant(repo, "pilot", "copilot")
+    assert records.measures_tokens(bridge.home, "copilot")
+    assert records.counts_at_end(bridge.home, "copilot")
+    assert records.unmeasured(bridge.home, roster.read(directory)) == ["pilot"]
+    enforce = ("budget", "enforce", "--tokens", "500", "--repo", str(repo))
+    assert main(monkeypatch, bridge, *enforce)
+    err = capsys.readouterr().err
+    assert "pilot report tokens only once their session ends" in err
+    assert "no token count is read" not in err
+    assert "--allow-unmeasured" in err
+    assert "run_budget" not in roster.read(directory)
+    assert not main(monkeypatch, bridge, *enforce, "--allow-unmeasured")
+    assert roster.read(directory)["run_budget"] == {"tokens": 500}
+    monkeypatch.chdir(repo)
+    assert not main(
+        monkeypatch, bridge, "provider", "budget", "copilot", "--tokens", "5"
+    )
+    assert "copilot report tokens only once" in capsys.readouterr().err

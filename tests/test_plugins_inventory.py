@@ -96,7 +96,7 @@ def test_native_status_probe_uses_short_timeout(monkeypatch):
     )
     timeouts = []
 
-    def probe(executable, arguments, *, timeout):
+    def probe(executable, arguments, *, timeout, env=None):
         timeouts.append(timeout)
         return "agent-parley" if arguments == client.marketplaces else "[]"
 

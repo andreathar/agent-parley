@@ -28,7 +28,7 @@ MAX_WORK_PROMPT = 2_000
 SUBMIT_DELAY = 0.2
 ESCAPE_TIMEOUT = 0.5
 ERASE = frozenset({0x08, 0x7F})
-ANSWERING = re.compile(rb"[\r\n0-9]")
+ANSWERING = re.compile(rb"[\r\n0-9\x03]")
 DETACHED_ROWS = 24
 DETACHED_COLUMNS = 80
 STRING_SEQUENCES = frozenset({ord("]"), ord("P"), ord("X"), ord("^"), ord("_")})
@@ -124,6 +124,12 @@ def selected_prompt(
     leads the prompt with that note, naming the command and saying the
     permission it needed was never granted.
 
+    The prompt names the record by its kind and states that it is not a
+    handoff offer. Its identifier is a digest of the dispatcher's own
+    publication, which no `issue accept --offer-id`, inbox or message
+    search knows, so a lane told to act on an "offer" spent its turn
+    looking for a handoff that never existed.
+
     Args:
         directory: Private project state directory.
         name: Participant owning the terminal socket.
@@ -185,7 +191,11 @@ def selected_prompt(
     if not identifier or not detail:
         return _noted(PROMPT, record)
     issues = ", ".join(f"#{number}" for number in offer.get("issues", [])[:5])
-    heading = f"Act on work offer {identifier}"
+    kind = str(offer.get("kind") or "work")
+    heading = (
+        f"Dispatcher {kind} record {identifier} (not a handoff offer: "
+        "nothing to accept, decline or search for)"
+    )
     if issues:
         heading += f" for {issues}"
     return _noted(
@@ -929,7 +939,11 @@ def _session(
 
     A control prefix the operator leaves incomplete for `ESCAPE_TIMEOUT`
     seconds resolves as a keypress, as terminal programs resolve a lone Esc,
-    so it adds no text and stops refusing wakes as pending input.
+    so it adds no text and stops refusing wakes as pending input. A read
+    ending in a lone Esc, or carrying a Ctrl-C, on a held dialog dismisses
+    it like an answer at once, because the client redraws before the Esc
+    resolves, and the dismissed dialog is never judged again as the screen
+    that replaces it.
 
     Args:
         pid: Native client process.
@@ -1041,7 +1055,9 @@ def _session(
                 control_at = time.monotonic()
                 pending_input = draft(carried + entered, pending_input)
                 os.write(master, entered)
-                if watch.holding and ANSWERING.search(operator):
+                if watch.holding and (
+                    ANSWERING.search(operator) or pending_control == b"\x1b"
+                ):
                     watch.answered()
             if (
                 pending_control

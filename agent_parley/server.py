@@ -19,6 +19,7 @@ from pathlib import Path
 from types import FrameType
 
 from agent_parley import (
+    attachments,
     checkpoints,
     hook,
     metrics,
@@ -33,8 +34,20 @@ from agent_parley import (
 from agent_parley.state import BridgeError, trim_log
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
-MAX_REQUEST_BYTES = 16384
+MAX_REQUEST_BYTES = 2 * attachments.MAX_ATTACHMENT_BYTES + 16384
 MAX_HOOK_BYTES = 1_048_576
+OVERSIZED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": (
+            f"Request exceeds {MAX_REQUEST_BYTES} bytes; send_message bodies "
+            f"above {store.MAX_BODY_BYTES} bytes spill to an attachment up to "
+            f"{attachments.MAX_ATTACHMENT_BYTES} bytes."
+        ),
+    },
+}
 HOOK_PATH = "/hook/"
 REVISION_SECONDS = 2.0
 LOG_NAME = "server.log"
@@ -57,8 +70,8 @@ UNDECIDED = (
 SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 DRIFTED = (
     "Sources changed under the running service; it is answering from a "
-    "module set the checkout no longer holds and is stopping. "
-    + protocol.RELAUNCH
+    "module set the checkout no longer holds and is restarting on the "
+    "sources now on disk."
 )
 
 
@@ -205,7 +218,13 @@ TOOLS = [
                 "maxItems": store.MAX_RECIPIENTS,
             },
             "subject": {**TEXT, "maxLength": 160},
-            "body_md": {**TEXT, "description": "At most 4096 UTF-8 bytes."},
+            "body_md": {
+                **TEXT,
+                "description": (
+                    f"Max {attachments.MAX_ATTACHMENT_BYTES} bytes; above "
+                    f"{store.MAX_BODY_BYTES} it spills to an attachment."
+                ),
+            },
             "idempotency_key": {**TEXT, "maxLength": 80},
             "thread_id": {**TEXT, "maxLength": 80},
             "reply_to": {
@@ -383,7 +402,7 @@ TOOLS = [
             "verdict": {"type": "string", "enum": list(metrics.VERDICTS)},
             "evidence": {
                 **TEXT,
-                "description": "What you checked; at most 4096 UTF-8 bytes.",
+                "description": "What you checked.",
             },
         },
         ["report_id", "verdict", "evidence"],
@@ -433,6 +452,7 @@ class Server(ThreadingHTTPServer):
         self.checked = time.monotonic()
         self.reading = threading.Lock()
         self.stopping = threading.Event()
+        self.signalled = threading.Event()
         self.counting = threading.Lock()
         self.deciding: dict[tuple[str, str], int] = {}
         self.recovering: dict[tuple[str, str], dict | None] = {}
@@ -486,6 +506,67 @@ class Server(ThreadingHTTPServer):
             self.stopping.set()
         threading.Thread(target=self.shutdown, daemon=True).start()
         log(self.home, "drifted", DRIFTED)
+        return True
+
+    def service_actions(self) -> None:
+        """Notices moved sources while no request is arriving.
+
+        `serve_forever` calls this once per poll interval. The drift reading
+        used to be taken only inside a request, so an idle service kept the
+        modules an upgrade had already replaced until the next hook, and an
+        estate with no lane active stayed on the old build for as long as it
+        stayed quiet. The reading is the same rate-limited comparison a
+        request makes, so an idle service pays one directory scan every
+        `REVISION_SECONDS` and nothing more.
+        """
+        self.drifted()
+
+    def relaunching(self) -> bool:
+        """Says whether this stop is followed by a re-execution.
+
+        Only a stop that drift started is. A signal is an operator's or a
+        launcher's instruction to go away, and a signal that arrives while a
+        drift stop is already under way is the same instruction arriving
+        during the hand-over, so the signal wins in either order.
+
+        Returns:
+            Whether the sources moved and no stop signal arrived.
+        """
+        return self.stopping.is_set() and not self.signalled.is_set()
+
+    def drain(self, deadline: float) -> bool:
+        """Waits for the requests in flight before the process is replaced.
+
+        A stop leaves its handler threads running while the listening socket
+        closes, which is right for an exit and wrong for a re-execution that
+        replaces the process image under them: a decision half-written would
+        be cut, and the hook behind it would read the cut as a failure rather
+        than the retry it gets when the connection is refused. Every wait
+        permit is taken first, because a wait holds no worker slot while it
+        sleeps and takes one again before it replies, so a wait still
+        sleeping would otherwise never get the slot it needs to finish. Then
+        every worker slot is taken, so returning means no handler holds one.
+        The deadline bounds the whole wait, because a request that outlives
+        it is cut the way a stop always cut it.
+
+        Args:
+            deadline: Monotonic time after which the wait gives up.
+
+        Returns:
+            Whether every wait and every worker finished before the deadline.
+        """
+        held: list[threading.BoundedSemaphore] = []
+        gates = ((self.waiters, waits.MAX_WAITERS), (self.slots, WORKERS))
+        try:
+            for gate, count in gates:
+                for _ in range(count):
+                    remaining = max(deadline - time.monotonic(), 0.0)
+                    if not gate.acquire(timeout=remaining):
+                        return False
+                    held.append(gate)
+        finally:
+            for gate in held:
+                gate.release()
         return True
 
     @contextlib.contextmanager
@@ -650,11 +731,14 @@ class Server(ThreadingHTTPServer):
                     owed.get("evidence"),
                 )
             except Exception as exc:
+                from agent_parley import supervision
+
                 self.coalesce(
                     "unrecovered",
                     lane,
                     f"{lane[1]} recovery checkpoint not written; the next "
-                    f"event captures again: {type(exc).__name__}",
+                    f"event captures again: "
+                    f"{supervision.failure('recovery', exc)}",
                 )
             with self.counting:
                 waiting = self.recovering.get(lane)
@@ -769,6 +853,35 @@ class Server(ThreadingHTTPServer):
         log(self.home, "failed", "request handling\n" + traceback.format_exc())
 
 
+def argument_refusal(tool: dict, args: dict) -> str | None:
+    """Names what is wrong with the keys of one tool call, if anything.
+
+    An agent told only that its arguments were wrong re-sends the same
+    call, so the refusal names the tool, each unexpected key, each missing
+    required key and every accepted key. It names keys only and never
+    echoes an argument value, which may carry a message body, and it is
+    clipped so an oversized key cannot inflate the reply.
+
+    Args:
+        tool: Declared tool whose input schema the call must match.
+        args: Arguments object the caller sent.
+
+    Returns:
+        The refusal text, or None when the keys match the schema.
+    """
+    schema = tool["inputSchema"]
+    accepted = sorted(schema["properties"])
+    extra = sorted(set(args) - set(accepted))
+    missing = sorted(set(schema["required"]) - set(args))
+    if not extra and not missing:
+        return None
+    parts = [f"unexpected {', '.join(extra)}" if extra else ""]
+    parts.append(f"missing {', '.join(missing)}" if missing else "")
+    named = "; ".join(part for part in parts if part)
+    text = f"{tool['name']}: {named}. Accepted: {', '.join(accepted)}."
+    return text if len(text) <= 300 else text[:297] + "..."
+
+
 class Handler(BaseHTTPRequestHandler):
     """Implements the JSON-response subset of stateless Streamable HTTP."""
 
@@ -823,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path in ("/mcp/", HOOK_PATH):
             try:
                 actor = store.authenticate(self.server.home, token)
-            except sqlite3.Error:
+            except (sqlite3.Error, BridgeError):
                 self._reply(503)
                 return None
             if actor:
@@ -847,6 +960,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         """Authenticates and handles one size-limited JSON-RPC request.
 
+        The request cap admits the largest ``send_message`` body the store
+        accepts, ``attachments.MAX_ATTACHMENT_BYTES``, at twice its size for
+        JSON escaping plus room for the envelope. A larger request is refused
+        with HTTP 413 and a JSON-RPC error naming those limits, so an agent
+        reads why the call failed and can shorten or split the message.
+
         A service whose sources have moved refuses before it reaches the code
         that would import them. The refusal is the status a client already
         treats as an outage, so a hook decides in-process on the same path a
@@ -869,7 +988,7 @@ class Handler(BaseHTTPRequestHandler):
         if version not in VERSIONS:
             self._reply(400)
             return
-        message = self._body(MAX_REQUEST_BYTES)
+        message = self._body(MAX_REQUEST_BYTES, OVERSIZED)
         if message is _REFUSED:
             return
         if message is _INVALID:
@@ -919,11 +1038,14 @@ class Handler(BaseHTTPRequestHandler):
             response["error"] = {"code": -32601, "message": "Method not found"}
         self._reply(200, response)
 
-    def _body(self, limit: int) -> object:
+    def _body(self, limit: int, oversized: dict | None = None) -> object:
         """Reads one bounded JSON body, or replies and returns ``_REFUSED``.
 
         Args:
             limit: Largest body accepted on this path, in bytes.
+            oversized: JSON body sent with the 413 refusal of a body over
+                ``limit``, so the caller can read the limit it crossed; an
+                empty refusal when omitted.
 
         Returns:
             The decoded JSON value, ``_INVALID`` when the body was not JSON,
@@ -945,7 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Transfer-Encoding"
             ):
                 self.rfile.read(length)
-            self._reply(413)
+            self._reply(413, oversized)
             return _REFUSED
         try:
             return json.loads(self.rfile.read(length))
@@ -1108,7 +1230,10 @@ class Handler(BaseHTTPRequestHandler):
         lock until one of them lost and denied a native call. Expiry is
         therefore answered with `hook.DECIDING`, which tells the client the
         decision is held here: it emits no context and exits successfully
-        rather than repeating the event.
+        rather than repeating the event. A tool call a guard refuses from
+        its command line and the roster alone is the exception: it is
+        answered with that denial, by `checkpoints.deadline_refusal`, so a
+        slow decision drops only coordination context, never a refusal.
 
         Only the decisions a lane abandoned are counted, keyed by the lane's
         project and name because one service serves every project and lane
@@ -1214,12 +1339,21 @@ class Handler(BaseHTTPRequestHandler):
         if finished and isinstance(late, dict):
             if owed := late.pop("recovery", None):
                 self.server.recover(lane, owed)
+        refused = checkpoints.deadline_refusal(request)
         log(
             self.server.home,
             "expired",
             f"{self.path} {participant} undecided after {spent:.3f} "
-            "seconds; answered as still deciding: " + stages.report(),
+            "seconds; answered as "
+            + (
+                "refused by a command guard: "
+                if refused
+                else "still deciding: "
+            )
+            + stages.report(),
         )
+        if refused is not None:
+            return refused
         self._reply(hook.DECIDING, {"detail": UNDECIDED})
         return None
 
@@ -1286,13 +1420,16 @@ class Handler(BaseHTTPRequestHandler):
                 (t for t in TOOLS if t["name"] == params.get("name")), None
             )
             args = params.get("arguments", {})
-            if tool is None or not isinstance(args, dict):
-                raise BridgeError("Unknown tool or invalid arguments.")
-            schema = tool["inputSchema"]
-            if set(args) - set(schema["properties"]) or set(
-                schema["required"]
-            ) - set(args):
-                raise BridgeError("Unexpected or missing tool arguments.")
+            if tool is None:
+                raise BridgeError(
+                    f"Unknown tool {str(params.get('name'))[:80]!r}; "
+                    "tools/list names the available tools."
+                )
+            if not isinstance(args, dict):
+                raise BridgeError("arguments must be a JSON object.")
+            wrong = argument_refusal(tool, args)
+            if wrong is not None:
+                raise BridgeError(wrong)
             if roster.paused(self.server.home, actor["project"], actor["name"]):
                 raise BridgeError(roster.PAUSED_REASON)
             if tool["name"] == waits.TOOL:
@@ -1368,6 +1505,7 @@ def stop_on_signal(home: Path, service: Server) -> None:
             number: Signal the process was sent.
             frame: Interrupted stack frame, which is not inspected.
         """
+        service.signalled.set()
         log(
             home,
             "signalled",
@@ -1379,15 +1517,61 @@ def stop_on_signal(home: Path, service: Server) -> None:
         signal.signal(number, received)
 
 
+def replace(home: Path, served: str) -> None:
+    """Re-executes this process on the sources now on disk.
+
+    `uv tool upgrade` replaces the package under a running service and
+    leaves the service to notice. Stopping and waiting for a hook to relaunch
+    it left an idle estate without a service, and left an operator to run
+    `down` and `up` by hand after every upgrade. The process re-executes
+    itself instead, with the interpreter, module and state root the launcher
+    started it with, so its process ID and creation identity, and with them
+    the published record every hook reads, stay valid across the hand-over;
+    the port and credential are read again from the same configuration. A
+    hook that arrives in the gap finds the recorded process alive, decides
+    in-process and does not ask for a second service.
+
+    The version replacing the served one is read from the installed package
+    metadata for the log entry only. The source fingerprint, not the version,
+    decided the restart, so a checkout edit restarts the service the same
+    way, and the new process takes a fresh fingerprint at start, so one
+    change restarts it once. A re-execution the kernel refuses is logged and
+    the process exits, which is the state the hook's relaunch recovers from.
+
+    Args:
+        home: Private bridge state root the service was started with.
+        served: Package version this process was serving.
+    """
+    from importlib import metadata
+
+    try:
+        installed = metadata.version("agent-parley")
+    except metadata.PackageNotFoundError:
+        installed = "unknown"
+    log(
+        home,
+        "relaunching",
+        f"version {served} re-executes as version {installed} on disk, "
+        f"pid {os.getpid()}",
+    )
+    try:
+        os.execv(
+            sys.executable,
+            [sys.executable, "-m", "agent_parley.server", "--home", str(home)],
+        )
+    except OSError as exc:
+        log(home, "relaunch", f"failed: {exc}")
+
+
 def main() -> None:
     """Runs the detached coordination service using its private config.
 
     The background workers are joined against one deadline rather than one
     deadline each, so the whole exit is bounded by `REVISION_SECONDS`. A
-    service that stopped because its sources moved is replaced by the hook
-    that finds its published record dead, and every native call until then
-    pays an in-process decision, so the interval that bounds the detection
-    also bounds the leaving.
+    service that stopped because its sources moved finishes the requests in
+    flight, bounded by the longest a decision may take, and re-executes
+    itself through `replace` once its workers have stopped, so the store is
+    not written by two module sets at once. A signalled stop exits.
 
     Wake sockets left behind by launchers that did not exit cleanly are
     removed at start, so each start begins with only the sockets a live
@@ -1417,12 +1601,22 @@ def main() -> None:
             stop_on_signal(args.home, server)
             server.serve_forever(poll_interval=0.2)
             server.flush_repeats()
+            if server.relaunching() and not server.drain(
+                time.monotonic() + DECISION_SECONDS
+            ):
+                log(
+                    args.home,
+                    "draining",
+                    "requests still running at the deadline; re-executing",
+                )
             log(args.home, "stopped", "no longer accepting connections")
     finally:
         stopped.set()
         deadline = time.monotonic() + REVISION_SECONDS
         for worker in workers:
             worker.join(timeout=max(deadline - time.monotonic(), 0.0))
+    if server.relaunching():
+        replace(args.home, server.version)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,27 @@ def test_limits_inherit_participant_over_provider_over_project(
     assert "informs and does not gate" in account
 
 
+@pytest.mark.parametrize("via", ["token", "worktree"])
+@pytest.mark.parametrize(
+    ("scope", "name"), [("participant", "claude"), ("project", "")]
+)
+def test_a_lane_cannot_change_a_budget(
+    bridge, repo, paired, monkeypatch, via, scope, name
+):
+    directory = bridge.project(repo)[1]
+    before = (directory / "project.json").read_text()
+    if via == "token":
+        monkeypatch.setenv("AGENT_PARLEY_TOKEN", "lane-token")
+    else:
+        monkeypatch.chdir(paired["lanes"]["claude"])
+    with pytest.raises(BridgeError, match="from an operator shell"):
+        bridge.budget(repo, scope, name, {"calls": None, "tokens": 10**9})
+    assert (directory / "project.json").read_text() == before
+    assert "informs and does not gate" in bridge.budget(
+        repo, "participant", "claude"
+    )
+
+
 @pytest.mark.parametrize(
     "changes", [{"tokens": -1}, {"calls": 2.5}, {"hours": "8"}, {"spend": 1}]
 )
@@ -212,9 +233,9 @@ def test_standing_counts_a_transcript_longer_than_one_read(
     starts = []
     advance = records._advance
 
-    def spied(record_path, fold, prior):
+    def spied(record_path, fold, prior, mark=records.USAGE_MARK):
         starts.append(int(prior.get("offset", 0)))
-        return advance(record_path, fold, prior)
+        return advance(record_path, fold, prior, mark)
 
     monkeypatch.setattr(records, "_advance", spied)
     again = budgets.standing(bridge.home, directory, data, "claude")

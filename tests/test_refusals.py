@@ -134,16 +134,73 @@ def test_unregistered_repository_names_setup(tmp_path):
     assert failure.next_command == "agent-parley setup ."
 
 
-def test_main_checkout_names_the_lane_list(tmp_path):
+def test_main_checkout_without_lanes_names_run(tmp_path):
     failure = refused(roster.resolve, {"participants": {}}, tmp_path)
     assert "assigned agent worktree" in str(failure)
+    assert failure.next_command == "agent-parley run claude"
+
+
+def test_main_checkout_names_the_first_active_lane_worktree(tmp_path):
+    manifest = {
+        "participants": {
+            "zed": {"lane": str(tmp_path / "zed")},
+            "abe": {"lane": str(tmp_path / "abe"), "retired": 1.0},
+            "ada": {"lane": str(tmp_path / "a d a")},
+        }
+    }
+    failure = refused(roster.resolve, manifest, tmp_path)
+    assert f"ada's at {tmp_path / 'a d a'}" in str(failure)
     assert failure.next_command == "agent-parley participant list"
+    chooser = refused(roster.resolve, manifest, tmp_path, False, True)
+    assert chooser.next_command == (
+        f"agent-parley issue next --repo '{tmp_path / 'a d a'}'"
+    )
+
+
+def test_main_checkout_mail_reader_names_as_with_the_first_lane(tmp_path):
+    manifest = {
+        "participants": {
+            "zed": {"lane": str(tmp_path / "zed")},
+            "abe": {"lane": str(tmp_path / "abe"), "retired": 1.0},
+            "ada": {"lane": str(tmp_path / "ada")},
+        }
+    }
+    failure = refused(roster.resolve, manifest, tmp_path, True)
+    assert "--as NAME" in str(failure)
+    assert failure.next_command == "agent-parley mail list --as ada"
+
+
+def test_main_checkout_mail_reader_without_lanes_names_run(tmp_path):
+    failure = refused(roster.resolve, {"participants": {}}, tmp_path, True)
+    assert "--as NAME" in str(failure)
+    assert failure.next_command == "agent-parley run claude"
 
 
 def test_missing_credentials_profile_names_its_definition(tmp_path):
     failure = refused(roster.credential, tmp_path, "work")
     assert "Unknown credential profile 'work'" in str(failure)
-    assert failure.next_command == "agent-parley credentials add work"
+    assert failure.next_command == (
+        "agent-parley credentials add work --config-home ~/.claude-work"
+    )
+
+
+def test_suggested_credentials_add_defines_a_profile(tmp_path):
+    failure = refused(roster.credential, tmp_path, "work")
+    parser, _ = cli.root_parser(None)
+    args = parser.parse_args(shlex.split(failure.next_command)[1:])
+    assert args.config_home == "~/.claude-work"
+    home = str(tmp_path / ".claude-work")
+    roster.define_credential(
+        tmp_path, args.name, home, args.env, args.require_env
+    )
+    assert roster.credential(tmp_path, "work")["home"] == home
+
+
+def test_empty_credentials_profile_is_refused_and_not_written(tmp_path):
+    failure = refused(roster.define_credential, tmp_path, "work", "", [], [])
+    assert str(failure) == roster.EMPTY_CREDENTIAL
+    assert "--config-home DIR" in str(failure)
+    assert roster.credentials(tmp_path) == {}
 
 
 def test_unknown_provider_names_the_provider_list(tmp_path):

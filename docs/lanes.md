@@ -87,6 +87,14 @@ is never handed out, and the next fill or `gc --apply` removes its worktree and
 branch. `status` counts spares as ready, preparing or stale, and `gc` lists each
 one. Like `init set`, `pool set` runs only from an operator shell.
 
+A path any participant records as its lane, live, retired or reclaimed, stays
+claimed until that participant leaves the roster: a fill never creates a spare
+there, and a spare recorded at such a path is dropped from the record without
+touching its worktree and is never handed out. Re-admitting a retired lane
+recreates its own worktree on its own branch; when its path already holds a
+recorded spare, another participant's lane, or a worktree on another branch,
+re-admission refuses instead of sharing that worktree.
+
 ### Starting on an issue
 
 ```sh
@@ -192,6 +200,21 @@ attached `run` titles its terminal tab with the lane name, its state and its
 claim progress, and `agent-parley title` prints the same line for a native
 status line.
 
+### Waiting on something
+
+A lane told to wait on a peer, a CI run or an operator decision reports it
+instead of going quiet or reporting blocked:
+
+```sh
+agent-parley report --state waiting --until 3600 --summary "waiting on the CI run"
+```
+
+The lane keeps its session. `status` and `top` show it as waiting on that
+reason with its next-check time, and the supervisor does not wake it until
+then, capped by the project's `deadlines.wait` ceiling. A blocked report is for
+a lane that cannot continue: it ends the lane's work on the claim and the next
+resume starts a fresh session.
+
 ## Integrating one lane
 
 When a lane's work is ready, integrate it from the base checkout:
@@ -215,8 +238,11 @@ agent-parley participant merge claude-2 --preview
 ```
 
 The preview only reads. It changes nothing, and it never takes the lane's
-session lock, so it is safe while that agent is still working. It attempts no
-merge, so it cannot predict conflicts.
+session lock, so it is safe while that agent is still working. On Git 2.38 or
+later it predicts conflicts with `git merge-tree`, which touches no checkout: a
+lane that would conflict is refused with the conflicting paths, and `participant
+merge` refuses it the same way before anything is merged. Older Git cannot
+predict conflicts.
 
 Or send it for review instead:
 
@@ -263,7 +289,10 @@ single-lane path, so nothing is integrated on easier terms than it would be
 alone.
 
 A group is admitted whole or not at all: one refused member leaves the group
-unmerged. Execution is ordered rather than atomic, so a merge or a gate failure
+unmerged. The whole run is predicted first, each lane onto the lanes before it,
+and a run in which any lane would conflict, alone or only in combination, merges
+nothing and names the lanes and paths. Execution is ordered rather than atomic,
+so a merge or a gate failure
 part way through stops the run, leaves the earlier merge commits in place and
 reports what was integrated, what refused and what was not attempted. Nothing is
 reset or reverted.
@@ -317,11 +346,14 @@ their own hook contract. Reservations stay advisory.
 
 ## Running unattended
 
-A project can authorize, ahead of time, the integration of named issues so a
-ready lane need not wait for you to be at the terminal. From the base checkout:
+A project can authorize, ahead of time, the integration of named issues.
+Without `--auto` the policy only sets the terms an operator-typed
+`unattended run` applies; with `--auto` the service runs it, so a ready lane
+need not wait for you to be at the terminal. From the base checkout:
 
 ```sh
 agent-parley unattended set 42 43 --target main   # record the policy
+agent-parley unattended set 42 43 --target main --auto  # let the service run it
 agent-parley unattended show                      # report it
 agent-parley unattended run claude-1              # integrate one lane under it
 agent-parley unattended set                       # remove it
@@ -332,11 +364,21 @@ claim and ready commit are current, the base sits on the target branch, its
 dependencies are verified complete, a verification command is configured and
 no peer reservation covers a changed path. The merge is the
 `participant merge` step with the same locks, approvals and gate, and every
-attempt records a decision in the lane's report log. It never pushes, never
-repairs an unverified integration, and the service never runs it on its own:
-it is an operator command. A lane holding several claims integrates its only
-ready one; when several are ready, name one with `--issue N`, which
-`participant merge NAME` accepts too. The full policy is in
+attempt records a decision in the lane's report log. It never pushes and
+never repairs an unverified integration. A lane holding several claims
+integrates its only ready one; when several are ready, name one with
+`--issue N`, which `participant merge NAME` accepts too.
+
+With `--auto` recorded, each supervision poll makes that same attempt for
+every listed issue whose claim is ready, on its own thread so a slow gate
+never holds the poll. A lane whose session is still running waits until the
+session ends, because every merge refuses a running session. The service
+attempts one claim once per issue, claim generation, ready commit and target
+commit, so an unchanged refusal is recorded once, not on every poll; after
+fixing what it names, run `unattended run NAME` or let a new commit move it.
+Each new decision is mailed to the lane, and a failed attempt raises an
+`unattended integration failed` row in `problems`. Without `--auto` the
+service never attempts it. The full policy is in
 [Operations](operations.md#requiring-a-recorded-approval).
 
 A lane is not left pushing fix after fix against red CI. The `ci_rounds`
@@ -388,7 +430,7 @@ envelope and escalation rules are in
 ## One command for many lanes
 
 With eight lanes, ending the day should not be eight commands. `say`,
-`participant stop`, `participant pause`, `participant resume`,
+`mail send`, `participant stop`, `participant pause`, `participant resume`,
 `participant merge`, `participant pr` and `issue assign` take a lane selector in
 place of the positional name:
 
@@ -403,7 +445,11 @@ agent-parley participant pr --drifted
 `--all` selects every lane and the other filters narrow it, so they combine.
 Each filter reads the same lane facts `status` reports: the provider driving a
 lane, the lane's own latest reported outcome, whether its checkout sits on the
-branch it was assigned, and whether the lane reads as `idle` rather than active.
+branch it was assigned, whether supervision reads the lane as stalled, and
+whether it is over a limit. `--idle` keeps only the lanes supervision reads as
+stalled: live, owing an answer and serving no calls for longer than
+`stalled_after`. `--over-budget` keeps only the lanes over any of their advisory
+token, call or hour limits.
 A positional name and a selector together are refused.
 
 Every bulk run prints the lanes it matched and what will happen to each, then
@@ -446,7 +492,23 @@ ordered list of required steps, so formatting, focused tests or a push happen
 in order instead of whenever the model remembers them. The harness runs the
 deterministic steps itself, with no model call, and hands the lane only the
 steps that need judgment. Blueprints live in coordination state, not in the
-repository:
+repository. The quickest start is a shipped template:
+
+```sh
+agent-parley blueprint templates                     # pr-loop, test-first, review-only
+agent-parley blueprint set feature --template pr-loop --verify "make check"
+agent-parley run codex --issue 42 --blueprint feature
+```
+
+`pr-loop` has the lane implement the issue, runs the verify command (back to
+the lane on failure), pushes, opens the pull request and waits for CI, handing
+red checks back to the lane. `test-first` asks for a failing test, runs the
+verify command expecting it to fail, then asks for the fix and verifies it.
+`review-only` asks the lane to review the linked pull request and report.
+`--verify` fills each template's verify step; without it the project's
+`verify set` command does, and a template that runs one is refused when
+neither exists. The result is validated like a file, and `blueprint show`
+names the template it came from. To write one by hand:
 
 ```json
 {
@@ -484,7 +546,10 @@ Node kinds:
 - `run` runs `command`, a string split like `verify set` or a list of
   arguments, in the lane's worktree as an argument list, never through a
   shell, within `timeout` seconds (default and ceiling 1800). It keeps the
-  last 40 lines of output. `AGENT_PARLEY_BASE` names the base checkout.
+  last 40 lines of output. `AGENT_PARLEY_BASE` names the base checkout. The
+  command runs in a session of its own; past its timeout the whole process
+  group gets SIGTERM, then SIGKILL 5 seconds later, before the node fails or
+  retries, so no grandchild of a wrapper such as `make` keeps running.
 - `push` runs `git push --set-upstream origin HEAD` the same way.
 - `agent` writes `prompt` into the lane's inbox, with the last failing step's
   output attached, and waits. The next `blueprint advance` after the lane
@@ -578,8 +643,8 @@ directly. The decision also records that a human decided, not that the code is
 correct; the verification command, the attribution scan and GitHub's own
 checks all still run.
 
-A separate opt-in decides whether the coordination service may resume a
-`claude` lane without a terminal:
+A separate opt-in decides whether the coordination service may resume a lane
+without a terminal:
 
 ```sh
 agent-parley approval resume                          # show what is recorded
@@ -589,9 +654,13 @@ agent-parley approval resume --auto-mode on --participant claude-2
 
 `--bridge-tools on|off` records `approve_bridge_tools`, which allows this
 bridge's own tools, and `--auto-mode on|off` records `auto_mode`, which starts
-the lane in the client's auto permission mode. Without `--participant NAME`
-the setting is the project default. A `claude` lane with neither recorded is
-not resumed by the service, because the resume would stop at a permission
+a `claude` lane in that client's auto permission mode. Without
+`--participant NAME` the setting is the project default. A lane-scoped opt-in
+the lane's CLI cannot carry is refused by name: `auto_mode` on any lane but
+`claude`, and `approve_bridge_tools` on an `amp` lane. [Providers](providers.md)
+lists how each adapter carries the opt-in. A lane whose adapter carries it,
+with neither recorded, is not resumed by the service, because the resume would
+stop at a permission
 prompt nobody sees; `participant add`, `problems` and `doctor` name it as a
 setup gap with this command.
 

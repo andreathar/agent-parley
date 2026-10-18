@@ -167,6 +167,50 @@ def issue_task(number: str, details: dict | None, data: dict) -> str:
     return "\n".join(lines)
 
 
+def native_executable(
+    command: str,
+    agent: str,
+    provider: str | None = None,
+    credential: str | None = None,
+) -> str:
+    """Resolves a lane's native CLI on ``PATH``.
+
+    A launch calls this before it registers the lane, so a missing CLI
+    leaves no roster entry, worktree or branch behind, and the refusal
+    names the same ``run`` command to repeat once the CLI is installed.
+
+    Args:
+        command: Executable the provider definition names.
+        agent: Participant name being launched.
+        provider: Provider named on the command line, if any.
+        credential: Credential profile named on the command line, if any.
+
+    Returns:
+        The executable's resolved path.
+
+    Raises:
+        BridgeError: If ``command`` is not on ``PATH``.
+    """
+    import shlex
+    import shutil
+
+    executable = shutil.which(command)
+    if executable is None:
+        arguments = shlex.join(
+            [
+                agent,
+                *(["--provider", provider] if provider else []),
+                *(["--credentials", credential] if credential else []),
+            ]
+        )
+        raise BridgeError(
+            f"Install and sign in to the native {command} CLI first, then "
+            f"rerun agent-parley run {arguments}.",
+            next_command=f"agent-parley run {arguments}",
+        )
+    return executable
+
+
 def rotation_task(
     agent: str, data: dict, directory: Path, state: dict, task: str
 ) -> str:
@@ -469,7 +513,11 @@ reported.
         and only where the operator recorded the opt-in for this project or
         this lane, the launch allows that one MCP server through those native
         settings. No other tool is named, no permission decision is weakened
-        and no bypass flag is ever passed. A lane without that opt-in that the
+        and no bypass flag is ever passed. A recorded opt-in the client
+        cannot carry, because its adapter has no such setting or its `codex`
+        release predates one, is named on standard error through
+        `supervision.opt_in_unsupported` instead of being dropped silently.
+        A lane without that opt-in that the
         service could resume is named on standard error, because the service
         withholds its resume rather than start a session nobody can answer.
         A client whose adapter `denials.EVENTS` names also runs the lane's
@@ -490,6 +538,23 @@ reported.
         rotation point, which the service then resumes this way; it is
         withheld for a lane the service would not resume.
 
+        The activity record names the client's adapter as ``client`` and
+        the first line its ``--version`` prints as ``client_version``, so
+        the dialog watcher and ``doctor`` can name the release that drew a
+        dialog; a client that cannot say leaves the version empty. It also
+        holds the version of the plugin manifest this launch read as
+        ``plugin_version``, so the hook, `status`, `top` and supervision
+        learn that the session runs a plugin older than the launcher without
+        reading a manifest themselves, and it drops ``plugin_notified`` so
+        the new session is told once if it is stale too.
+
+        Before anything is registered the launch takes one
+        `process.host_load` reading and refuses while the host is past the
+        project's ``max_load_ratio`` or below its ``min_available_mib``,
+        naming the numbers and the setting. There is no override flag; the
+        thresholds are supervision settings. An unreadable reading is not
+        judged, and on Windows the check is skipped with one line saying so.
+
         Args:
             agent: Participant name within the project.
             repo: Target Git repository.
@@ -507,16 +572,22 @@ reported.
 
         Raises:
             BridgeError: If the provider, account, or lane cannot be used, or
-                the participant already has a launcher, or the repository
+                the provider's native CLI is not on ``PATH``, which is checked
+                before the lane is registered so a refusal leaves no lane or
+                worktree, or the participant already has a launcher, or the
+                repository
                 lies on a mounted Windows drive under WSL, or the lane's
                 checkpoint lock stays held for `LAUNCH_LOCK_SECONDS`, or the
-                project's enforced run budget is exhausted, or the lane
+                project's enforced run budget is exhausted, or the host is
+                past its launch load threshold, or the lane
                 retired while the launch waited for that lock, since a
                 retirement removes the worktree under the same lock, or
                 ``issue`` is not an issue number or its claim is refused,
                 or a blueprint is named without ``issue``, from a lane, or
-                is unknown.
+                is unknown, or a ``copilot`` lane's profile already runs
+                another live lane's hooks.
         """
+        from agent_parley import plugins, records
         from agent_parley.cli import (
             COPILOT_EVENTS,
             LAUNCH_LOCK_SECONDS,
@@ -535,12 +606,13 @@ reported.
             process,
             protocol,
             roster,
-            shutil,
             store,
             supervision,
             terminal,
             write_json,
         )
+        from agent_parley.copilot import occupants
+        from agent_parley.hook import PARTICIPANT_ENV
 
         began = time.monotonic()
         number = parse_issue(issue) if issue else ""
@@ -575,21 +647,43 @@ reported.
                     "output_task", ""
                 )
             roster.identifier(output_task, "output task (--output-task)")
-        stopped = (
-            budgets.halted(directory, roster.read(directory))
+        recorded = (
+            current_manifest
             if (directory / "project.json").exists()
-            else None
+            else {}
         )
+        stopped = budgets.halted(directory, recorded) if recorded else None
         if stopped:
             raise BridgeError(
                 f"The run budget is exhausted ({stopped['cause']}), so no "
                 f"lane is launched or resumed; {budgets.RESUME}.",
                 next_command="agent-parley budget resume",
             )
+        host = process.host_load()
+        if host.skipped:
+            print(host.skipped, file=sys.stderr)
+        limits = supervision.configuration(self.home, recorded)
+        if pressure := process.overloaded(
+            host, limits["max_load_ratio"], limits["min_available_mib"]
+        ):
+            raise BridgeError(
+                f"The host is past its launch threshold ({pressure}), so no "
+                "lane is launched or resumed; change that setting under "
+                "supervision in the project manifest or supervision.json, "
+                "or launch again once the host has headroom.",
+                next_command="agent-parley doctor",
+            )
+        registered = (recorded or {}).get("participants", {}).get(agent, {})
+        known = roster.providers(self.home).get(
+            provider or registered.get("provider") or agent
+        )
+        if known is not None:
+            native_executable(known["command"], agent, provider, credential)
         data = self.add_participant(repo, agent, provider, credential)
-        if supervision.opt_in_missing(self.home, data, agent):
+        if gap := supervision.opt_in_adapter(self.home, data, agent):
             print(
-                supervision.OPT_IN_WARNING.format(name=agent), file=sys.stderr
+                supervision.OPT_IN_WARNING.format(name=agent, adapter=gap),
+                file=sys.stderr,
             )
         if number:
             from agent_parley import blueprints
@@ -605,28 +699,58 @@ reported.
         account = roster.launch_environment(
             self.home, entry, participant["credential"]
         )
-        executable = shutil.which(entry["command"])
-        if executable is None:
-            raise BridgeError(
-                f"Install and sign in to the native {entry['command']} CLI "
-                "first."
+        executable = native_executable(
+            entry["command"], agent, provider, credential
+        )
+        loaded = None
+        if entry["adapter"] in plugins.HOME_ENV:
+            selected = account.get(entry.get("home_env", ""))
+            loaded = plugins.installed_manifest(
+                entry["adapter"],
+                Path(selected)
+                if selected
+                else Path(records.DEFAULT_HOMES[entry["adapter"]]).expanduser(),
             )
-        manifest = protocol.manifests(protocol.plugin_root()).get(
+        manifest = loaded or protocol.manifests(protocol.plugin_root()).get(
             entry["adapter"]
         )
+        plugin_version = ""
         if manifest is not None and manifest.exists():
-            declared = protocol.installed(manifest)
-            if not protocol.compatible(declared):
+            reading = plugins.assessed(manifest)
+            plugin_version = str(reading["version"] or "")
+            if reading["state"] == protocol.MISMATCH:
                 raise BridgeError(
-                    protocol.mismatch("installed plugin", declared),
+                    protocol.mismatch("installed plugin", reading["protocol"]),
                     next_command="agent-parley plugins install",
+                )
+            if loaded and reading["state"] == protocol.STALE:
+                print(
+                    f"The {entry['adapter']} plugin this lane loads is "
+                    f"{reading['version'] or 'of unknown version'}, the "
+                    f"launcher is {protocol.launcher_version()}. "
+                    f"{protocol.UPDATE}",
+                    file=sys.stderr,
                 )
         missing = [
             event
             for event in roster.REQUIRED_HOOKS
             if event in roster.unavailable_hooks(entry["adapter"])
         ]
-        if missing:
+        degraded = (
+            roster.delivery_path(entry["adapter"]) == roster.POLLED_DELIVERY
+            and bool(missing)
+            and not set(missing) & set(roster.POLLED_REQUIRED_HOOKS)
+        )
+        if degraded:
+            print(
+                roster.DEGRADED_WARNING.format(
+                    name=agent,
+                    adapter=entry["adapter"],
+                    missing=", ".join(missing),
+                ),
+                file=sys.stderr,
+            )
+        elif missing:
             raise BridgeError(
                 f"The {entry['adapter']!r} adapter cannot deliver "
                 f"{', '.join(missing)}, so its lanes would run without the "
@@ -698,15 +822,22 @@ reported.
                     parents=True, exist_ok=True, mode=0o700
                 )
             hooks = self.hooks(agent, lane.parent)
+            inherited = dict(os.environ)
+            inherited.pop(entry.get("home_env") or "", None)
             env = {
-                **os.environ,
+                **inherited,
                 **account,
                 "AGENT_PARLEY_TOKEN": identity["registration_token"],
                 "AGENT_PARLEY_HOME": str(self.home),
-                "AGENT_PARLEY_PARTICIPANT": agent,
+                PARTICIPANT_ENV: agent,
                 "AGENT_PARLEY_PROJECT_ROOT": str(data["root"]),
                 **shared_roots,
             }
+            client_version = dialogs.version_of(executable)
+            if limit := supervision.opt_in_unsupported(
+                self.home, data, agent, client_version
+            ):
+                print(limit, file=sys.stderr)
             if entry["adapter"] == "claude":
                 config = lane.parent / f"{agent}-mcp.json"
                 write_json(
@@ -740,7 +871,7 @@ reported.
                 }
                 if dialogs.pre_approved(data, agent):
                     native["permissions"] = {
-                        "allow": [protocol.TOOL_PREFIX, protocol.cli_rule()]
+                        "allow": [protocol.TOOL_PREFIX, *protocol.cli_rules()]
                     }
                 if dialogs.auto_mode(data, agent):
                     native.setdefault("permissions", {})["defaultMode"] = "auto"
@@ -763,6 +894,7 @@ reported.
                         self.url + "/mcp/",
                         hooks,
                         env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH"),
+                        trusted=dialogs.pre_approved(data, agent),
                     )
                 )
                 command = [
@@ -778,6 +910,7 @@ reported.
                         self.url + "/mcp/",
                         hooks,
                         env.get("OPENCODE_CONFIG_DIR"),
+                        trusted=dialogs.pre_approved(data, agent),
                     )
                 )
                 command = [
@@ -819,6 +952,19 @@ reported.
                         "--credentials NAME.",
                         next_command="agent-parley credentials list --json",
                     )
+                sharing = occupants(
+                    self.home, Path(config_home), lane.parent, agent
+                )
+                if sharing:
+                    raise BridgeError(
+                        f"Copilot profile {participant['credential']!r} "
+                        f"already runs the hooks of {', '.join(sharing)}, "
+                        "and Copilot runs every hook in a profile for every "
+                        "session on it, so each lane would decide the "
+                        "other's tool calls. Define a second profile with "
+                        "`agent-parley credentials add NAME --config-home "
+                        "DIR` and launch this lane with --credentials NAME."
+                    )
                 configure_copilot(
                     Path(config_home),
                     {
@@ -842,12 +988,15 @@ reported.
                         for event, groups in hooks.items()
                         if event in COPILOT_EVENTS
                     },
+                    agent,
                 )
                 command = [
                     executable,
-                    "-p",
+                    "-i",
                     prompt + "\nUser task:\n" + task,
                 ]
+                if dialogs.pre_approved(data, agent):
+                    command += ["--allow-tool", "agent_parley"]
             else:
                 command = [
                     executable,
@@ -857,6 +1006,15 @@ reported.
                     "-c",
                     'mcp_servers.agent_parley.bearer_token_env_var="AGENT_PARLEY_TOKEN"',
                 ]
+                if dialogs.pre_approved(data, agent) and (
+                    dialogs.release_of(client_version)
+                    >= roster.CODEX_APPROVAL_RELEASE
+                ):
+                    command += [
+                        "-c",
+                        "mcp_servers.agent_parley."
+                        'default_tools_approval_mode="approve"',
+                    ]
                 for event, groups in hooks.items():
                     hook = groups[0]["hooks"][0]
                     value = (
@@ -946,12 +1104,17 @@ reported.
                     launcher_ticks=process.start_ticks(os.getpid()),
                     session_started=time.time(),
                     attached=sys.stdin.isatty(),
+                    client=entry["adapter"],
+                    client_version=client_version,
+                    plugin_version=plugin_version,
+                    degraded=degraded,
                 )
                 if shared_roots:
                     previous.update(
                         output_task=output_task,
                         output_root=shared_roots["AGENT_PARLEY_OUTPUT_ROOT"],
                     )
+                previous.pop("plugin_notified", None)
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)
                 previous.pop("rotation", None)

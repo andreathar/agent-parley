@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_parley import demo, demo_scenario, server
+from agent_parley import demo, demo_scenario, plugins, roster, server
 
 STAGES = (
     ("One loopback coordination server", "$ agent-parley up"),
@@ -47,6 +47,12 @@ def test_a_line_wider_than_the_frame_wraps_between_words():
     wrapped = demo.lines(body)
     assert wrapped == (first, "agent-parley ends")
     assert len(wrapped[0]) <= demo.COLUMNS
+
+
+def test_the_sandbox_never_repairs_the_operators_plugin(tmp_path, monkeypatch):
+    monkeypatch.setenv(plugins.REPAIR_ENV, "on")
+    values = demo.environment(tmp_path, tmp_path / "bin", tmp_path, port=0)
+    assert values[plugins.REPAIR_ENV] == "off"
 
 
 def test_the_tour_is_a_cut_of_the_recorded_story():
@@ -97,6 +103,11 @@ def test_the_demo_tells_every_stage_and_removes_everything(monkeypatch):
         ), (caption, command, text)
     assert "PARTICIPANT" in text
     assert "\x1b[" not in text
+    closing_hint = text.rstrip().splitlines()[-1]
+    assert closing_hint.endswith(
+        "agent-parley setup . && agent-parley run claude"
+    )
+    assert "claude" in roster.PRESETS
     (base,) = created
     assert not base.exists()
     assert remaining_before_sweep == []
@@ -118,8 +129,18 @@ def read_until(stream, marker, deadline):
     return seen
 
 
-@pytest.mark.parametrize("stop", ["q", "ctrl-c"])
-def test_q_or_ctrl_c_stops_the_demo_and_removes_everything(stop):
+@pytest.mark.parametrize(
+    ("stop", "status"),
+    [
+        ("q", 130),
+        ("ctrl-c", 130),
+        (signal.SIGTERM, 143),
+        (signal.SIGHUP, 129),
+    ],
+)
+def test_q_ctrl_c_or_a_signal_stops_the_demo_and_removes_everything(
+    stop, status
+):
     controller, keyboard = pty.openpty()
     child = subprocess.Popen(
         [sys.executable, "-m", "agent_parley", "demo"],
@@ -134,8 +155,10 @@ def test_q_or_ctrl_c_stops_the_demo_and_removes_everything(stop):
         seen = read_until(child.stdout, b"ada runs on claude", deadline)
         if stop == "q":
             os.write(controller, b"q")
-        else:
+        elif stop == "ctrl-c":
             os.killpg(child.pid, signal.SIGINT)
+        else:
+            os.kill(child.pid, stop)
         rest, _ = child.communicate(timeout=60)
     finally:
         os.close(controller)
@@ -143,7 +166,7 @@ def test_q_or_ctrl_c_stops_the_demo_and_removes_everything(stop):
             child.kill()
             child.wait()
     text = (seen + rest).decode()
-    assert child.returncode == 130, text
+    assert child.returncode == status, text
     assert "Stopped." in text
     assert "The sandbox is removed." in text
     found = SANDBOX.search(text)

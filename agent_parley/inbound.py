@@ -13,15 +13,19 @@ hands off, answers a native permission prompt, or types into a session, and
 a note reaches a lane only quoted beside the answer.
 
 Admission is two independent checks for text. The update must come from the
-configured chat, and its first word must be the passcode read at service
-start from the environment or the settings `notify setup` stored. Only a
-salted digest of that passcode is held, it is compared in constant time, and
-a message that fails either check is dropped in silence rather than answered
-with a hint. Five failures inside ten minutes lock the path for an hour and
-send one outbound notification saying so; the counter and the lock live only
-in memory and are forgotten with the process. A button tap carries no
-passcode: it is admitted only from the configured chat and only for an open
-decision this state root issued.
+configured chat, and from one of the configured users when a user list is
+set, and its first word must be the passcode read at service start from the
+environment or the settings `notify setup` stored. A group chat without a
+user list is a configuration fault, because every member could answer. Only
+a salted digest of that passcode is held, it is compared in constant time,
+and a message that fails either check is dropped in silence rather than
+answered with a hint. Five failures from one sender inside ten minutes lock
+that sender out for an hour and send one outbound notification saying so;
+the failure times and the lock are kept in the state root, never the
+passcode or a guess, so a service restart neither resets the guess budget
+nor lifts a lock. A button tap carries no passcode: it is admitted only from
+the configured chat and user list, and only for the open occurrence of a
+decision this state root issued that the button was posted for.
 
 Updates arrive by long polling the Bot API from this process, so no port is
 opened, no webhook is registered, and nothing is exposed on the network.
@@ -42,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 from agent_parley import decisions, notify
-from agent_parley.state import BridgeError
+from agent_parley.state import BridgeError, write_json
 
 if TYPE_CHECKING:
     from agent_parley import cli
@@ -55,6 +59,7 @@ MINIMUM_PASSCODE = 12
 FAILURE_LIMIT = 5
 FAILURE_WINDOW = 600.0
 LOCK_SECONDS = 3600.0
+GATE_NAME = "inbound-gate.json"
 POLL_SECONDS = 25
 RETRY_SECONDS = 5.0
 MAX_REPLY_CHARS = 4096
@@ -73,8 +78,17 @@ USAGE = (
     "[--over-budget] [--since WINDOW] [--issue N]"
 )
 DECIDE_USAGE = "usage: decide ID OPTION [NOTE]"
+SUPERSEDED = (
+    "Decision {name} was replaced by a newer question; use the latest message."
+)
 UNREADABLE = "The status reading could not be taken."
 POLLING = "reading status queries from Telegram"
+POLL_FAILED = (
+    "polling Telegram failed ({reason}); retrying every "
+    f"{RETRY_SECONDS:g} seconds"
+)
+RECOVERED = f"polling recovered; {POLLING}"
+REDACTED_TOKEN = "<bot token>"
 LOCKED_DETAIL = (
     f"Inbound status queries are refused for {int(LOCK_SECONDS // 60)} "
     f"minutes after {FAILURE_LIMIT} wrong passcodes."
@@ -122,62 +136,160 @@ class Passcode:
         return hmac.compare_digest(self._digest, self._hash(candidate))
 
 
-class Gate:
-    """Admits an incoming message and locks the path after repeated failures.
+def held(path: Path) -> tuple[dict[str, list[float]], dict[str, float]]:
+    """Reads the failure times and lock expiries a gate stored.
 
-    The gate holds the failure times of the current window and the instant a
-    lock expires. Both live only in this process: a restart forgets them, and
-    neither is written to coordination state or to any log.
+    Args:
+        path: Gate file in the private state root.
+
+    Returns:
+        Failure times and lock expiries keyed by sender, both empty when the
+        file is missing, unreadable or not in the shape a gate writes.
+    """
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}, {}
+    if not isinstance(value, dict):
+        return {}, {}
+    failures = value.get("failures")
+    until = value.get("until")
+    return (
+        {
+            str(sender): [
+                float(moment)
+                for moment in moments
+                if isinstance(moment, int | float)
+            ]
+            for sender, moments in failures.items()
+            if isinstance(moments, list)
+        }
+        if isinstance(failures, dict)
+        else {},
+        {
+            str(sender): float(moment)
+            for sender, moment in until.items()
+            if isinstance(moment, int | float)
+        }
+        if isinstance(until, dict)
+        else {},
+    )
+
+
+class Gate:
+    """Admits an incoming message and locks a sender after repeated failures.
+
+    The gate holds, per sender, the failure times of the current window and
+    the Unix time a lock expires, so one chat member's guesses cannot lock
+    out another. Given a path, it writes both there after every change and
+    reads them back at construction, so a service restart neither resets
+    the guess budget nor lifts a lock. Neither the passcode, its digest nor
+    any guess is written, and a missing or unreadable file starts an
+    unlocked gate with no failures.
     """
 
-    def __init__(self, passcode: Passcode) -> None:
-        """Starts an unlocked gate with no recorded failures.
+    def __init__(self, passcode: Passcode, path: Path | None = None) -> None:
+        """Starts a gate from the stored state, or unlocked without a path.
+
+        A stored expiry further than `LOCK_SECONDS` ahead, as a clock that
+        jumped back leaves, is read as ending `LOCK_SECONDS` from now.
 
         Args:
             passcode: Digest of the configured passcode.
+            path: Private file the failures and locks persist in; held only
+                in memory when None.
         """
         self._passcode = passcode
-        self._failures: list[float] = []
-        self._until = 0.0
+        self._path = path
+        self._failures, until = held(path) if path else ({}, {})
+        ceiling = time.time() + LOCK_SECONDS
+        self._until = {
+            sender: min(moment, ceiling) for sender, moment in until.items()
+        }
 
-    def locked(self, now: float) -> bool:
-        """Reports whether the path is inside a lock.
+    def locked(self, now: float, sender: str = "") -> bool:
+        """Reports whether one sender is inside a lock.
 
         Args:
-            now: Monotonic instant to read the lock against.
+            now: Unix time to read the lock against.
+            sender: Telegram user identifier, empty when the update named
+                none.
 
         Returns:
-            Whether an earlier run of failures still refuses every message.
+            Whether an earlier run of failures still refuses the sender.
         """
-        return now < self._until
+        return now < self._until.get(sender, 0.0)
 
-    def admits(self, candidate: str, now: float) -> str:
+    def admits(self, candidate: str, now: float, sender: str = "") -> str:
         """Decides one message's admission and records a failed passcode.
 
         Args:
             candidate: First word of the incoming message.
-            now: Monotonic instant the message arrived.
+            now: Unix time the message arrived.
+            sender: Telegram user identifier, empty when the update named
+                none; such updates share one counter.
 
         Returns:
             `ACCEPTED` when the passcode matched, `LOCKED` when this failure
-            is the one that locked the path, and `REFUSED` otherwise. Every
-            answer other than `ACCEPTED` means the caller replies nothing.
+            is the one that locked the sender out, and `REFUSED` otherwise.
+            Every answer other than `ACCEPTED` means the caller replies
+            nothing.
         """
-        if self.locked(now):
+        if self.locked(now, sender):
             return REFUSED
         if self._passcode.matches(candidate):
-            self._failures.clear()
+            if self._failures.pop(sender, None):
+                self._save(now)
             return ACCEPTED
-        self._failures = [
-            moment
-            for moment in [*self._failures, now]
-            if now - moment < FAILURE_WINDOW
-        ]
-        if len(self._failures) < FAILURE_LIMIT:
+        recent = self._recent([*self._failures.get(sender, []), now], now)
+        if len(recent) < FAILURE_LIMIT:
+            self._failures[sender] = recent
+            self._save(now)
             return REFUSED
-        self._failures.clear()
-        self._until = now + LOCK_SECONDS
+        self._failures.pop(sender, None)
+        self._until[sender] = now + LOCK_SECONDS
+        self._save(now)
         return LOCKED
+
+    @staticmethod
+    def _recent(moments: list[float], now: float) -> list[float]:
+        """Keeps the failure times inside the current window.
+
+        Args:
+            moments: Failure times of one sender.
+            now: Unix time the window ends at.
+
+        Returns:
+            The times less than `FAILURE_WINDOW` before now.
+        """
+        return [moment for moment in moments if now - moment < FAILURE_WINDOW]
+
+    def _save(self, now: float) -> None:
+        """Drops expired entries and writes the rest to the gate file.
+
+        A write that fails leaves the gate working from memory, because
+        refusing every message for a full disk would lock the operator out.
+
+        Args:
+            now: Unix time to judge expiry by.
+        """
+        self._failures = {
+            sender: kept
+            for sender, moments in self._failures.items()
+            if (kept := self._recent(moments, now))
+        }
+        self._until = {
+            sender: moment
+            for sender, moment in self._until.items()
+            if moment > now
+        }
+        if self._path is None:
+            return
+        with contextlib.suppress(OSError):
+            write_json(
+                self._path,
+                {"failures": self._failures, "until": self._until},
+            )
 
 
 class Refusing(argparse.ArgumentParser):
@@ -347,21 +459,49 @@ def fault(environ: Mapping[str, str] | None = None) -> str:
             "Inbound status queries need AGENT_PARLEY_TELEGRAM_TOKEN and "
             "AGENT_PARLEY_TELEGRAM_CHAT."
         )
+    if (
+        config["telegram"]["chat"].startswith("-")
+        and not config["telegram"]["users"]
+    ):
+        return (
+            "AGENT_PARLEY_TELEGRAM_CHAT names a group chat, where every "
+            "member could answer; set AGENT_PARLEY_TELEGRAM_USERS to the "
+            "numeric Telegram user ids allowed to answer, or use a private "
+            "chat."
+        )
     return ""
 
 
-def reported(environ: Mapping[str, str] | None = None) -> dict:
+def reported(
+    environ: Mapping[str, str] | None = None, home: Path | None = None
+) -> dict:
     """Describes the inbound reader for one status reading.
 
     Args:
         environ: Environment mapping to read; the process environment by
             default.
+        home: Private state root holding the gate file, or None to skip the
+            lock reading.
 
     Returns:
-        Whether the reader was asked for and the configuration fault, if any,
-        that stops it from running.
+        Whether the reader was asked for, the configuration fault, if any,
+        that stops it from running, and the Unix time the latest sender
+        lock ends, zero when no sender is locked out.
     """
-    return {"enabled": enabled(environ), "fault": fault(environ)}
+    now = time.time()
+    until = held(home / GATE_NAME)[1].values() if home else ()
+    return {
+        "enabled": enabled(environ),
+        "fault": fault(environ),
+        "locked_until": max(
+            (
+                min(moment, now + LOCK_SECONDS)
+                for moment in until
+                if moment > now
+            ),
+            default=0.0,
+        ),
+    }
 
 
 def polling(home: Path) -> bool:
@@ -370,14 +510,16 @@ def polling(home: Path) -> bool:
     The reader announces itself in the service log once it passes every
     configuration check, and the service announces each start with a
     ``bound`` entry, so the reader is running when its announcement follows
-    the latest start.
+    the latest start. A failed poll logs `POLL_FAILED` and a later success
+    logs `RECOVERED`, which ends with the announcement, so the reader counts
+    as polling only while its latest entry is not a failure.
 
     Args:
         home: Private state root holding the service log.
 
     Returns:
         True when the latest service start was followed by the reader's
-        announcement.
+        announcement and no failure has been logged since its latest one.
     """
     from agent_parley import server
 
@@ -392,8 +534,8 @@ def polling(home: Path) -> bool:
             continue
         if words[1] == "bound":
             running = False
-        elif words[1] == "inbound" and line.endswith(POLLING):
-            running = True
+        elif words[1] == "inbound":
+            running = line.endswith(POLLING)
     return running
 
 
@@ -444,15 +586,15 @@ def serve(
     Args:
         home: Private state directory the reading is taken from.
         config: Resolved notification configuration.
-        gate: Passcode and lockout state of this process.
+        gate: Passcode and lockout state of the reader.
         update: One update as the Bot API reported it.
-        now: Monotonic instant the update arrived; read from the clock when
-            omitted.
+        now: Unix time the update arrived; read from the clock when omitted.
 
     Returns:
-        `DROPPED` when the update is not a message from the configured chat,
-        `REFUSED` when the passcode did not match, `LOCKED` when this message
-        locked the path, and `ACCEPTED` when a reply was sent.
+        `DROPPED` when the update is not a message from the configured chat
+        and user list, `REFUSED` when the passcode did not match, `LOCKED`
+        when this message locked its sender out, and `ACCEPTED` when a reply
+        was sent.
     """
     query = update.get("callback_query")
     if isinstance(query, dict):
@@ -463,10 +605,14 @@ def serve(
     identity = _chat(message)
     if not identity or identity != config["telegram"]["chat"]:
         return DROPPED
+    if not _allowed(config, message):
+        return DROPPED
     words = str(message.get("text") or "").split()
     if not words:
         return DROPPED
-    verdict = gate.admits(words[0], time.monotonic() if now is None else now)
+    verdict = gate.admits(
+        words[0], time.time() if now is None else now, _user(message)
+    )
     if verdict == LOCKED:
         announce(config)
         return LOCKED
@@ -502,6 +648,33 @@ def _chat(message: Mapping[str, object]) -> str:
     return str(chat.get("id", "")) if isinstance(chat, dict) else ""
 
 
+def _user(item: Mapping[str, object]) -> str:
+    """Reads the Telegram user identifier an update came from.
+
+    Args:
+        item: A message or callback query as the Bot API reported it.
+
+    Returns:
+        The identifier as text, empty when the update names no sender.
+    """
+    user = item.get("from")
+    return str(user.get("id", "")) if isinstance(user, dict) else ""
+
+
+def _allowed(config: dict, item: Mapping[str, object]) -> bool:
+    """Reports whether an update's sender may use the inbound path.
+
+    Args:
+        config: Resolved notification configuration.
+        item: A message or callback query as the Bot API reported it.
+
+    Returns:
+        True when no user list is configured or the sender is on it.
+    """
+    users = config["telegram"].get("users") or []
+    return not users or _user(item) in users
+
+
 def _sender(item: Mapping[str, object]) -> str:
     """Names the Telegram user an update came from, for the answer record.
 
@@ -511,33 +684,34 @@ def _sender(item: Mapping[str, object]) -> str:
     Returns:
         ``telegram:`` followed by the user identifier.
     """
-    user = item.get("from")
-    identity = user.get("id", "") if isinstance(user, dict) else ""
-    return f"{TRANSPORT}:{identity}"
+    return f"{TRANSPORT}:{_user(item)}"
 
 
 def answering(
     message: Mapping[str, object], words: Sequence[str]
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str | None] | None:
     """Reads an admitted message as an answer to a decision, if it is one.
 
     A message answers a decision when it carries `DECIDE` with the decision
     identifier and an option, or when it replies to a digest holding exactly
     one decision and starts with one of that decision's options. Anything
-    after the option is the note.
+    after the option is the note. A reply answers only the occurrence the
+    digest was written for, so it carries that occurrence's nonce; a typed
+    `DECIDE` is written against the current message and carries none.
 
     Args:
         message: The admitted message.
         words: Its words after the passcode.
 
     Returns:
-        The decision identifier, the option and the note, or None when the
-        message is not an answer.
+        The decision identifier, the option, the note and the occurrence
+        nonce to match, None for a typed answer, or None when the message is
+        not an answer.
     """
     if words and words[0] == DECIDE:
         if len(words) < 3:
             raise BridgeError(DECIDE_USAGE)
-        return words[1], words[2], " ".join(words[3:])
+        return words[1], words[2], " ".join(words[3:]), None
     replied = message.get("reply_to_message")
     if not words or not isinstance(replied, dict):
         return None
@@ -548,7 +722,8 @@ def answering(
     ]
     if len(named) != 1:
         return None
-    return named[0], words[0], " ".join(words[1:])
+    name, _, nonce = named[0].partition(decisions.OCCURRENCE)
+    return name, words[0], " ".join(words[1:]), nonce
 
 
 def settle(home: Path, directory: Path, record: Mapping[str, object]) -> None:
@@ -567,14 +742,19 @@ def settle(home: Path, directory: Path, record: Mapping[str, object]) -> None:
         directory: Private project state directory holding the decision.
         record: The answered decision.
     """
-    from agent_parley import roster, store
+    from agent_parley import roster, store, timeouts
 
     manifest = roster.read(directory)
     participant = manifest.get("participants", {}).get(record.get("lane"))
     if not isinstance(participant, dict):
         return
+    answerer = (
+        "The service's decision timeout"
+        if record.get("answered_by") == timeouts.ANSWERED_BY
+        else "The operator"
+    )
     body = (
-        f"The operator answered decision {record['id']} "
+        f"{answerer} answered decision {record['id']} "
         f"({record.get('question', '')}): {record['answer']}, "
         f"by {record.get('answered_by', '')}. Take the step this answer "
         "asks for with the matching agent-parley command; nothing was done "
@@ -602,6 +782,7 @@ def decide(
     answered_by: str,
     note: str = "",
     confirmed: bool = False,
+    nonce: str | None = None,
 ) -> tuple[str, dict]:
     """Records one answer and hands it to its lane, or asks to confirm it.
 
@@ -616,16 +797,21 @@ def decide(
         answered_by: Who answered, such as ``telegram:42``.
         note: Free text attached to the answer.
         confirmed: Whether an irreversible option was already confirmed.
+        nonce: Occurrence nonce the button or digest was posted with, empty
+            for one posted before nonces existed, or None for a typed answer
+            that names the current occurrence.
 
     Returns:
         `ANSWERED` with the answered record, or `CONFIRMING` with the open
         record when the option takes a confirmation not yet given.
 
     Raises:
-        BridgeError: If the decision is unknown, no longer open, or does not
-            offer the option.
+        BridgeError: If the decision is unknown, was replaced by a newer
+            occurrence, is no longer open, or does not offer the option.
     """
     directory, record = decisions.find(home, name)
+    if nonce is not None and nonce != str(record.get("nonce") or ""):
+        raise BridgeError(SUPERSEDED.format(name=name))
     if refused := decisions.refusal(record, option, time.time()):
         raise BridgeError(refused)
     if decisions.confirming(record, option) and not confirmed:
@@ -668,7 +854,9 @@ def _confirm(
                             {
                                 "text": f"confirm {option}",
                                 "callback_data": decisions.callback(
-                                    str(record["id"]), index, confirmed=True
+                                    decisions.occurrence(record),
+                                    index,
+                                    confirmed=True,
                                 ),
                             }
                         ]
@@ -705,6 +893,7 @@ def typed(
     name: str,
     option: str,
     note: str,
+    nonce: str | None = None,
 ) -> str:
     """Answers a decision from an admitted text message.
 
@@ -716,6 +905,8 @@ def typed(
         name: Decision identifier.
         option: The chosen option.
         note: Free text after the option.
+        nonce: Occurrence nonce a reply's digest carried, or None for a
+            typed answer.
 
     Returns:
         The reply to send.
@@ -723,7 +914,9 @@ def typed(
     Raises:
         BridgeError: If the answer is refused.
     """
-    verdict, record = decide(home, name, option, _sender(message), note)
+    verdict, record = decide(
+        home, name, option, _sender(message), note, nonce=nonce
+    )
     if verdict == CONFIRMING:
         _confirm(config, chat, record, option)
         return f"Decision {name}: tap confirm to answer {option}."
@@ -731,17 +924,21 @@ def typed(
 
 
 def _remaining(markup: object, name: str) -> dict:
-    """Drops the answered decision's button row from a digest's keyboard.
+    """Drops one decision's button rows from a digest's keyboard.
 
     Args:
         markup: The ``reply_markup`` the tapped message carried.
-        name: Identifier of the decision just answered.
+        name: Identifier of the decision just answered or refused; rows of
+            every occurrence of it are dropped.
 
     Returns:
         The keyboard with every other decision's row kept.
     """
     rows = markup.get("inline_keyboard") if isinstance(markup, dict) else []
-    prefix = f"{decisions.CALLBACK_PREFIX}:{name}:"
+    prefix = tuple(
+        f"{decisions.CALLBACK_PREFIX}:{name}{mark}"
+        for mark in (":", decisions.OCCURRENCE)
+    )
     return {
         "inline_keyboard": [
             row
@@ -759,13 +956,16 @@ def _remaining(markup: object, name: str) -> dict:
 def tap(home: Path, config: dict, query: Mapping[str, object]) -> str:
     """Answers one button tap on a decision message.
 
-    A tap is admitted only from the configured chat and only for a decision
-    this state root issued that is still open; it carries no passcode,
-    because only a member of the configured chat can tap a button the bot
-    posted there. The tap is acknowledged with ``answerCallbackQuery``; an
-    answered decision's message is edited to say which option was chosen,
-    by whom and when, keeping the other decisions' buttons, and an
-    irreversible option first asks for a confirming tap.
+    A tap is admitted only from the configured chat, only from a listed
+    user when a user list is set, and only for the occurrence of a decision
+    this state root issued that the button was posted for while it is still
+    open; it carries no passcode, because only the chat's allowed users can
+    tap a button the bot posted there. The tap is acknowledged with
+    ``answerCallbackQuery``; an answered decision's message is edited to say
+    which option was chosen, by whom and when, keeping the other decisions'
+    buttons, and an irreversible option first asks for a confirming tap. A
+    tap refused because its decision was replaced, settled or is unknown
+    loses its button row, so the stale button leaves the chat.
 
     Args:
         home: Private bridge state root.
@@ -773,8 +973,8 @@ def tap(home: Path, config: dict, query: Mapping[str, object]) -> str:
         query: The callback query as the Bot API reported it.
 
     Returns:
-        `DROPPED` when the tap is not from the configured chat or not a
-        decision button, `REFUSED` when the answer was refused, and
+        `DROPPED` when the tap is not from the configured chat and user list
+        or not a decision button, `REFUSED` when the answer was refused, and
         `ACCEPTED` otherwise.
     """
     message = query.get("message")
@@ -783,13 +983,20 @@ def tap(home: Path, config: dict, query: Mapping[str, object]) -> str:
     chat = _chat(message)
     if not chat or chat != config["telegram"]["chat"]:
         return DROPPED
+    if not _allowed(config, query):
+        return DROPPED
     try:
-        name, index, confirmed = decisions.tapped(str(query.get("data", "")))
+        named, index, confirmed = decisions.tapped(str(query.get("data", "")))
     except BridgeError:
         return DROPPED
+    name, _, nonce = named.partition(decisions.OCCURRENCE)
     notice = ""
+    current = False
     try:
         _, record = decisions.find(home, name)
+        current = record.get("state") == decisions.OPEN and nonce == str(
+            record.get("nonce") or ""
+        )
         offered = decisions.options(record)
         if index >= len(offered):
             raise BridgeError(f"Decision {name} has no option {index}.")
@@ -799,11 +1006,24 @@ def tap(home: Path, config: dict, query: Mapping[str, object]) -> str:
             offered[index],
             _sender(query),
             confirmed=confirmed,
+            nonce=nonce,
         )
     except BridgeError as refused:
         verdict, notice = REFUSED, str(refused)
     with contextlib.suppress(OSError, ValueError, BridgeError):
-        if verdict == CONFIRMING:
+        if verdict == REFUSED and not current:
+            notify.call(
+                config,
+                "editMessageReplyMarkup",
+                {
+                    "chat_id": chat,
+                    "message_id": message.get("message_id"),
+                    "reply_markup": json.dumps(
+                        _remaining(message.get("reply_markup"), name)
+                    ),
+                },
+            )
+        elif verdict == CONFIRMING:
             _confirm(config, chat, record, offered[index])
             notice = f"Tap confirm to answer {offered[index]}."
         elif verdict == ANSWERED:
@@ -856,6 +1076,38 @@ def updates(config: dict, offset: int) -> list[dict]:
     return [item for item in reported_updates if isinstance(item, dict)]
 
 
+def failure(config: dict, exc: Exception) -> str:
+    """Names why one poll failed, without the bot token.
+
+    The exception class is always named. A `BridgeError` adds its message,
+    an HTTP error its status and reason, which is how a second poller (409)
+    and a revoked token (401) are told apart, and any other request error
+    its reason, such as a failed name lookup. The token is part of the
+    request URL, so it is replaced by `REDACTED_TOKEN` wherever it appears.
+
+    Args:
+        config: Resolved notification configuration holding the token.
+        exc: Exception the poll raised.
+
+    Returns:
+        One line describing the failure.
+    """
+    import urllib.error
+
+    if isinstance(exc, BridgeError):
+        detail = str(exc)
+    elif isinstance(exc, urllib.error.HTTPError):
+        detail = f"HTTP {exc.code} {exc.reason}"
+    elif isinstance(exc, urllib.error.URLError):
+        detail = str(exc.reason)
+    else:
+        detail = str(exc)
+    token = str(config.get("telegram", {}).get("token") or "")
+    if token:
+        detail = detail.replace(token, REDACTED_TOKEN)
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
 def run(home: Path, stopped: threading.Event) -> None:
     """Polls for status queries until the local service stops.
 
@@ -864,7 +1116,10 @@ def run(home: Path, stopped: threading.Event) -> None:
     poller running and is reported by `status` instead. A failed poll is
     retried after a short pause rather than ending the reader, because the
     Bot API is a remote service and a service restart is not an operator's
-    remedy for one dropped connection.
+    remedy for one dropped connection. The service log names each failure
+    through `failure` when its text differs from the last one logged, so an
+    outage writes one line rather than one per retry, and the first poll
+    that succeeds after it logs `RECOVERED`.
 
     Args:
         home: Private state directory the readings are taken from.
@@ -879,15 +1134,25 @@ def run(home: Path, stopped: threading.Event) -> None:
         server.log(home, "inbound", refusal)
         return
     config = notify.settings(values)
-    gate = Gate(Passcode(values["AGENT_PARLEY_INBOUND_PASSCODE"]))
+    gate = Gate(
+        Passcode(values["AGENT_PARLEY_INBOUND_PASSCODE"]), home / GATE_NAME
+    )
     server.log(home, "inbound", POLLING)
     offset = 0
+    failing = ""
     while not stopped.is_set():
         try:
             batch = updates(config, offset)
-        except (OSError, ValueError, BridgeError):
+        except (OSError, ValueError, BridgeError) as exc:
+            reason = failure(config, exc)
+            if reason != failing:
+                server.log(home, "inbound", POLL_FAILED.format(reason=reason))
+                failing = reason
             stopped.wait(RETRY_SECONDS)
             continue
+        if failing:
+            server.log(home, "inbound", RECOVERED)
+            failing = ""
         for update in batch:
             offset = max(offset, int(update.get("update_id", 0)) + 1)
             if stopped.is_set():

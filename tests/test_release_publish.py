@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from scripts import release_publish as release
+from scripts.release_artifacts import release_notes
 
 VERSION = "0.1.1"
 TAG = f"v{VERSION}"
@@ -789,6 +790,108 @@ def test_changelog_keeps_typed_sections_when_anything_counted(
     assert "docs: repair" not in changelog
 
 
+MILESTONE_BODY = """## Problem and result
+
+Milestone 0.19.0 is complete on `integration/0.19.0`. This pull request \
+carries it to `main` in one squash commit.
+
+### Security and policy
+
+- Archive import and roster adoption are hardened (#1157).
+- Peer text in mail previews stays on one quoted line (#1162).
+
+### Metrics
+
+- Sliding-window and retained totals are exported as gauges with \
+`_window` or `_retained` suffixes, and empty medians are omitted (#1204).
+
+## Verification
+
+A combined `make check` on `integration/0.19.0` at `e69e162` exited 0.
+
+## Compatibility and risks
+
+- Breaking for Prometheus consumers: twelve metric families change from \
+counters to gauges (#1204).
+- `--auto` integration and the webhook transport are opt-in.
+
+- [x] Scope is focused and existing work is preserved.
+- [ ] Documentation and changelog reflect the final change.
+
+Closes #1157 Closes #1162 Closes #1204
+"""
+
+
+def test_milestone_squash_renders_its_sections_and_upgrade_notes(
+    counted_repo, local
+):
+    product_commit(
+        counted_repo,
+        "feat: deliver the 0.19.0 milestone (#1230)",
+        body=MILESTONE_BODY,
+    )
+    changelog = release.changelog_entry(counted_repo, TAG, VERSION, "0.1.2")
+    body = changelog.split("\n", 2)[2]
+    query = "is%3Aissue%20is%3Aclosed%20milestone%3A0.1.2"
+    assert body == (
+        "\n### Security and policy\n\n"
+        "- Archive import and roster adoption are hardened (#1157).\n"
+        "- Peer text in mail previews stays on one quoted line (#1162).\n"
+        "\n### Metrics\n\n"
+        "- Sliding-window and retained totals are exported as gauges with "
+        "`_window` or `_retained` suffixes, and empty medians are omitted "
+        "(#1204).\n"
+        "\n### Upgrade notes\n\n"
+        "- Breaking for Prometheus consumers: twelve metric families change "
+        "from counters to gauges (#1204).\n"
+        "- `--auto` integration and the webhook transport are opt-in.\n"
+        "\nClosed issues: [milestone 0.1.2]"
+        f"({release.REPOSITORY_URL}/issues?q={query}).\n\n"
+    )
+    assert "/issues/" not in changelog
+    assert "This pull request" not in changelog
+    assert "[x]" not in changelog
+    assert "make check" not in changelog
+    notes = release_notes(f"# Changelog\n\n{changelog}", "0.1.2")
+    assert "### Upgrade notes" in notes
+    assert notes.endswith(f"{release.REPOSITORY_URL}/issues?q={query}).\n")
+
+
+def test_milestone_squash_beside_plain_commits_keeps_their_lines(
+    counted_repo, local
+):
+    product_commit(counted_repo, "fix: a real repair", body="Refs #3")
+    product_commit(
+        counted_repo,
+        "feat: deliver the milestone",
+        body=MILESTONE_BODY,
+    )
+    changelog = release.changelog_entry(counted_repo, TAG, VERSION, "0.1.2")
+    link = f"([#3]({release.REPOSITORY_URL}/issues/3))"
+    assert f"### Bug fixes\n\n* a real repair {link}\n" in changelog
+    assert "### Features" not in changelog
+    assert changelog.index("### Metrics") < changelog.index("### Bug fixes")
+    assert changelog.count("Closed issues: [milestone 0.1.2]") == 1
+
+
+def test_template_body_without_subsections_keeps_one_line(counted_repo, local):
+    product_commit(
+        counted_repo,
+        "fix: repair the parser",
+        body=(
+            "## Problem and result\n\nThe parser is repaired.\n\n"
+            "## Compatibility and risks\n\n- None.\n\nCloses #12\n"
+        ),
+    )
+    changelog = release.changelog_entry(counted_repo, TAG, VERSION, "0.1.2")
+    link = f"([#12]({release.REPOSITORY_URL}/issues/12))"
+    assert changelog.endswith(
+        f"### Bug fixes\n\n* repair the parser {link}\n\n"
+    )
+    assert "Upgrade notes" not in changelog
+    assert "milestone" not in changelog
+
+
 @pytest.mark.parametrize(
     ("path", "eligible"),
     [
@@ -851,6 +954,21 @@ def test_pypi_response_requires_the_expected_schema(monkeypatch):
     )
     with pytest.raises(KeyError):
         release.pypi_files(VERSION)
+
+
+def test_pypi_files_come_from_the_project_releases_map(monkeypatch):
+    seen = []
+    files = [{"filename": "agent_parley.whl"}]
+    body = json.dumps({"releases": {VERSION: files, "0.0.1": []}})
+
+    def request(url, **kwargs):
+        seen.append(url)
+        return io.BytesIO(body.encode())
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", request)
+    assert release.pypi_files(VERSION) == files
+    assert release.pypi_files("9.9.9") == []
+    assert seen[0] == "https://pypi.org/pypi/agent-parley/json"
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
@@ -1275,9 +1393,35 @@ def test_the_evidence_phase_refuses_a_minor_release_by_name(
     release.main()
 
 
-def test_the_acceptance_suite_passes_on_this_commit():
-    root = Path(__file__).resolve().parents[1]
-    assert release.run_acceptance_suite(root) == ""
+def test_a_passing_acceptance_suite_run_reports_nothing(tmp_path, monkeypatch):
+    (tmp_path / "test_tiny.py").write_text("def test_tiny():\n    pass\n")
+    monkeypatch.setattr(release, "ACCEPTANCE_SUITE", "test_tiny.py")
+    assert release.run_acceptance_suite(tmp_path) == ""
+
+
+def test_a_failing_acceptance_suite_run_reports_its_last_line(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "test_tiny.py").write_text("def test_tiny():\n    fail\n")
+    monkeypatch.setattr(release, "ACCEPTANCE_SUITE", "test_tiny.py")
+    assert release.run_acceptance_suite(tmp_path).startswith("1 failed")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.TimeoutExpired(["pytest"], 600),
+        OSError("no interpreter"),
+    ],
+)
+def test_an_acceptance_suite_that_cannot_finish_names_why(
+    tmp_path, monkeypatch, error
+):
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(release.subprocess, "run", fail)
+    assert release.run_acceptance_suite(tmp_path) == str(error)
 
 
 def test_the_version_workflow_gates_the_release_on_evidence():

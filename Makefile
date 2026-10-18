@@ -39,4 +39,4 @@ check:
 	uv run --locked mypy
 	uv run --locked python scripts/check_policy.py
 	$(MAKE) build
-	uv run --locked pytest -q -n auto
+	uv run --locked pytest -q -n auto --cov --cov-report=term

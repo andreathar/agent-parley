@@ -10,16 +10,23 @@ vendors count differently enough that their numbers do not compare.
 Every reading is best effort. Absent, unreadable, malformed or unexpectedly
 shaped records report nothing rather than raising, because an operator view
 must not fail on a client's private file format.
+
+Claude Code, Codex, Gemini CLI and Copilot CLI append their session records
+as JSON lines, read incrementally by byte offset. OpenCode keeps a running
+total per session in its own SQLite database, read as a snapshot. Amp keeps
+no local usage record, so its lanes are reported as not measured.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import functools
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import zoneinfo
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -38,7 +45,22 @@ CLAUDE_FIELDS = (
     "cache_read_input_tokens",
     "output_tokens",
 )
-DEFAULT_HOMES = {"claude": "~/.claude", "codex": "~/.codex"}
+COPILOT_CANDIDATES = 16
+COPILOT_FIELDS = ("inputTokens", "outputTokens")
+GEMINI_MARK = b'"tokens"'
+OPENCODE_DATA = "~/.local/share"
+OPENCODE_QUERY = (
+    "SELECT id, parent_id, time_updated, tokens_input + tokens_output"
+    " + tokens_reasoning + tokens_cache_read + tokens_cache_write"
+    " FROM session WHERE directory = ?"
+)
+DEFAULT_HOMES = {
+    "claude": "~/.claude",
+    "codex": "~/.codex",
+    "copilot": "~/.copilot",
+    "gemini": "~",
+    "opencode": "~/.config/opencode",
+}
 UNSAFE = re.compile(r"[^A-Za-z0-9]")
 MAX_TAIL = 1 << 16
 STRONG_EXHAUSTION = re.compile(
@@ -99,6 +121,10 @@ def _newest(paths: Iterable[Path]) -> Path | None:
 def _config_home(home: Path, entry: dict, profile: str | None) -> Path | None:
     """Resolves the config home the lane's own launch selected.
 
+    A default-account lane runs without the caller's config-home variable,
+    so its records sit under the client's default home, never under a
+    directory the reading process happens to export.
+
     Args:
         home: Private bridge state root.
         entry: Provider definition driving the lane.
@@ -113,8 +139,6 @@ def _config_home(home: Path, entry: dict, profile: str | None) -> Path | None:
             the provider cannot apply.
     """
     selected = roster.config_home(home, entry, profile)
-    if not selected:
-        selected = os.environ.get(entry.get("home_env") or "", "")
     if not selected:
         selected = DEFAULT_HOMES.get(str(entry.get("adapter", "")), "")
     return Path(selected).expanduser() if selected else None
@@ -144,7 +168,12 @@ def _codex_cwd(path: Path, inode: int) -> str:
 
 
 def _codex_lane(path: Path) -> str:
-    """Reads the working directory a Codex rollout recorded for itself."""
+    """Reads the working directory a session log's first record names.
+
+    A Codex rollout names it as ``cwd`` in its first record or that record's
+    ``payload``; a Copilot CLI event log names it in the ``data.context`` of
+    the ``session.start`` event it opens with.
+    """
     with path.open("rb") as handle:
         line = handle.readline(MAX_META)
     try:
@@ -153,9 +182,37 @@ def _codex_lane(path: Path) -> str:
         return ""
     if not isinstance(record, dict):
         return ""
+    data = record.get("data")
+    if isinstance(data, dict) and isinstance(data.get("context"), dict):
+        return str(data["context"].get("cwd", ""))
     payload = record.get("payload")
     source = payload if isinstance(payload, dict) else record
     return str(source.get("cwd", ""))
+
+
+def _naming_lane(
+    candidates: Iterable[Path], lane: Path, limit: int
+) -> list[Path]:
+    """Keeps the newest session logs whose first record names this lane.
+
+    Args:
+        candidates: Session logs of every project the client served.
+        lane: Lane worktree the logs must name.
+        limit: How many of the most recently modified logs are opened.
+
+    Returns:
+        The matching logs among the ``limit`` newest, newest first.
+    """
+    ordered = sorted(candidates, key=_mtime, reverse=True)
+    found = []
+    for path in ordered[:limit]:
+        try:
+            cwd = _codex_cwd(path, path.stat().st_ino) or _codex_lane(path)
+            if cwd == str(lane):
+                found.append(path)
+        except OSError:
+            continue
+    return found
 
 
 def _codex_sources(config: Path, lane: Path) -> list[Path]:
@@ -172,21 +229,105 @@ def _codex_sources(config: Path, lane: Path) -> list[Path]:
         day = today - datetime.timedelta(days=offset)
         directory = root / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
         candidates.extend(directory.glob("rollout-*.jsonl"))
-    ordered = sorted(candidates, key=_mtime, reverse=True)
-    found = []
-    for path in ordered[:CODEX_CANDIDATES]:
-        try:
-            cwd = _codex_cwd(path, path.stat().st_ino) or _codex_lane(path)
-            if cwd == str(lane):
-                found.append(path)
-        except OSError:
-            continue
-    return found
+    return _naming_lane(candidates, lane, CODEX_CANDIDATES)
 
 
 def _codex_records(config: Path, lane: Path) -> Path | None:
     """Finds a recent Codex rollout whose own record names this lane."""
     return next(iter(_codex_sources(config, lane)), None)
+
+
+def _copilot_sources(config: Path, lane: Path) -> list[Path]:
+    """Lists the recent Copilot CLI event logs whose own start names a lane.
+
+    Copilot CLI keeps one ``session-state/<session>/events.jsonl`` per
+    session under its config home. Only the ``COPILOT_CANDIDATES`` most
+    recently modified are considered, newest first.
+    """
+    candidates = (config / "session-state").glob("*/events.jsonl")
+    return _naming_lane(candidates, lane, COPILOT_CANDIDATES)
+
+
+def _copilot_records(config: Path, lane: Path) -> Path | None:
+    """Finds the newest Copilot CLI event log whose start names this lane."""
+    return next(iter(_copilot_sources(config, lane)), None)
+
+
+def _gemini_sources(config: Path, lane: Path) -> list[Path]:
+    """Lists every Gemini CLI chat log recorded for one lane.
+
+    Gemini CLI keeps its state in ``.gemini`` under the home its
+    ``GEMINI_CLI_HOME`` names. Its ``projects.json`` registry maps each
+    project root to a short identifier, and the project's chat logs, those
+    of the subagent sessions it started included, sit under
+    ``tmp/<identifier>/chats``.
+    """
+    root = config / ".gemini"
+    try:
+        registry = json.loads((root / "projects.json").read_text())
+    except (OSError, ValueError):
+        return []
+    projects = registry.get("projects") if isinstance(registry, dict) else None
+    slug = projects.get(str(lane)) if isinstance(projects, dict) else None
+    if (
+        not isinstance(slug, str)
+        or slug in ("", ".", "..")
+        or (Path(slug).name != slug)
+    ):
+        return []
+    return sorted((root / "tmp" / slug / "chats").glob("**/*.jsonl"))
+
+
+def _gemini_records(config: Path, lane: Path) -> Path | None:
+    """Finds the newest Gemini CLI chat log recorded for one lane."""
+    return _newest(_gemini_sources(config, lane))
+
+
+def _opencode_sessions(lane: Path) -> list[tuple[str, float, int]] | None:
+    """Reads the token totals OpenCode recorded for one lane's sessions.
+
+    OpenCode keeps every session in ``opencode.db`` under its data
+    directory, ``$XDG_DATA_HOME/opencode`` or ``~/.local/share/opencode``,
+    or in the file ``OPENCODE_DB`` names. Each session row carries the
+    running input, output, reasoning and cache totals of that session. A
+    subagent session it starts is folded into the session that started it.
+    The database is opened read-only, so the client's own writes are never
+    blocked; a database without those columns reads as no record.
+
+    Args:
+        lane: Lane worktree the sessions must have run in.
+
+    Returns:
+        One ``(session, last update in seconds, tokens)`` entry per top-level
+        session, or None when no database or no session can be read.
+    """
+    data = Path(os.environ.get("XDG_DATA_HOME") or OPENCODE_DATA).expanduser()
+    path = data / "opencode" / os.environ.get("OPENCODE_DB", "opencode.db")
+    if not path.is_absolute() or not path.is_file():
+        return None
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)
+        ) as connection:
+            rows = connection.execute(OPENCODE_QUERY, (str(lane),)).fetchall()
+    except sqlite3.Error:
+        return None
+    parents = {str(row[0]): str(row[1] or "") for row in rows}
+    totals: dict[str, tuple[float, int]] = {}
+    for identifier, _, updated, tokens in rows:
+        root, visited = str(identifier), set()
+        while parents.get(root) in parents and root not in visited:
+            visited.add(root)
+            root = parents[root]
+        stamp, total = totals.get(root, (0.0, 0))
+        if isinstance(updated, (int, float)):
+            stamp = max(stamp, float(updated) / 1000)
+        if isinstance(tokens, int):
+            total += tokens
+        totals[root] = (stamp, total)
+    return [
+        (session, stamp, total) for session, (stamp, total) in totals.items()
+    ] or None
 
 
 def _fold_claude(record: dict, reading: dict) -> None:
@@ -224,14 +365,194 @@ def _fold_codex(record: dict, reading: dict) -> None:
         reading["tokens"] = value
 
 
+def _fold_copilot(record: dict, reading: dict) -> None:
+    """Takes the session totals Copilot CLI's latest shutdown reported.
+
+    Copilot CLI persists no per-call usage: its ``assistant.usage`` events
+    are ephemeral. Each ``session.shutdown`` event carries the whole
+    session's input and output tokens per model, resumed runs included, so
+    a live session reads its tokens only once it has ended. Cache fields are
+    not added, because the event does not say whether input includes them.
+    """
+    data = record.get("data")
+    if record.get("type") != "session.shutdown" or not isinstance(data, dict):
+        return
+    metrics = data.get("modelMetrics")
+    if not isinstance(metrics, dict):
+        return
+    total = 0
+    for metric in metrics.values():
+        usage = metric.get("usage") if isinstance(metric, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        for name in COPILOT_FIELDS:
+            value = usage.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                total += value
+    reading["tokens"] = total
+
+
+def _fold_gemini(record: dict, reading: dict) -> None:
+    """Adds one Gemini CLI chat message's reported tokens, once per message.
+
+    Gemini CLI appends a message again each time it updates it, so a message
+    identifier is counted once, from the first copy that carries its
+    ``tokens``, whose ``total`` is the response's whole token count.
+    """
+    tokens = record.get("tokens")
+    identifier = record.get("id")
+    if (
+        record.get("type") != "gemini"
+        or not isinstance(tokens, dict)
+        or not isinstance(identifier, str)
+        or identifier in reading["seen"]
+    ):
+        return
+    value = tokens.get("total")
+    if isinstance(value, int) and not isinstance(value, bool):
+        reading["seen"].add(identifier)
+        reading["last"] = identifier
+        reading["tokens"] += value
+
+
 ADAPTERS: dict[str, tuple[Finder, Fold]] = {
     "claude": (_claude_records, _fold_claude),
     "codex": (_codex_records, _fold_codex),
+    "copilot": (_copilot_records, _fold_copilot),
+    "gemini": (_gemini_records, _fold_gemini),
 }
 SOURCES: dict[str, Callable[[Path, Path], list[Path]]] = {
     "claude": _claude_sources,
     "codex": _codex_sources,
+    "copilot": _copilot_sources,
+    "gemini": _gemini_sources,
 }
+END_OF_SESSION = frozenset({"copilot"})
+MARKS = {"gemini": GEMINI_MARK}
+TOTALS: dict[str, Callable[[Path], list[tuple[str, float, int]] | None]] = {
+    "opencode": _opencode_sessions,
+}
+UNMEASURED_WARNING = (
+    "warning: no token count is read for {lanes}, so a token limit never "
+    "counts their use; only {readers} lanes report tokens."
+)
+END_OF_SESSION_WARNING = (
+    "warning: {lanes} report tokens only once their session ends, so a "
+    "token limit cannot stop them while a session runs."
+)
+
+
+def _adapter(home: Path, provider: str) -> str:
+    """Names the adapter a provider rides, or nothing for an undefined one."""
+    try:
+        entry = roster.provider(home, provider)
+    except BridgeError:
+        return ""
+    return str(entry.get("adapter", ""))
+
+
+def counts_at_end(home: Path, provider: str) -> bool:
+    """Reports whether a provider's lanes read tokens only after a session.
+
+    Args:
+        home: Private bridge state root.
+        provider: Provider name a lane runs.
+
+    Returns:
+        True when the provider's adapter is in ``END_OF_SESSION``: its reader
+        sees a session's tokens only once that session has ended, so a
+        running lane reads 0 and a token limit cannot fire mid-session.
+    """
+    return _adapter(home, provider) in END_OF_SESSION
+
+
+def measures_tokens(home: Path, provider: str) -> bool:
+    """Reports whether a provider's lanes have a token reader at all.
+
+    Args:
+        home: Private bridge state root.
+        provider: Provider name a lane runs.
+
+    Returns:
+        True when the provider is defined and its adapter has a session
+        record reader in ``ADAPTERS`` or ``TOTALS``; a provider without one
+        always reports no tokens, so a token limit can never count its lanes.
+    """
+    return _adapter(home, provider) in readers()
+
+
+def readers() -> list[str]:
+    """Names the adapters whose lanes report tokens, in a stable order."""
+    return sorted({*ADAPTERS, *TOTALS})
+
+
+def unmeasured(
+    home: Path, manifest: dict, names: Iterable[str] | None = None
+) -> list[str]:
+    """Names the active lanes a token limit cannot count while they run.
+
+    Args:
+        home: Private bridge state root.
+        manifest: Project manifest as the roster reports it.
+        names: Lanes to check; every participant when omitted.
+
+    Returns:
+        Sorted names of active lanes whose provider ``measures_tokens``
+        rejects or ``counts_at_end`` accepts.
+    """
+    participants = manifest.get("participants") or {}
+    return sorted(
+        name
+        for name in (participants if names is None else names)
+        if name in participants
+        and not roster.retired(participants[name])
+        and (
+            not measures_tokens(home, lane_provider(participants, name))
+            or counts_at_end(home, lane_provider(participants, name))
+        )
+    )
+
+
+def lane_provider(participants: dict, name: str) -> str:
+    """Names the provider a participant runs, defaulting to its own name.
+
+    Args:
+        participants: Manifest participants keyed by name.
+        name: Participant name present in ``participants``.
+
+    Returns:
+        The recorded provider name.
+    """
+    return str(participants[name].get("provider", name))
+
+
+def unmeasured_warning(lanes: Iterable[str], ended: Iterable[str] = ()) -> str:
+    """Formats the warning for lanes or providers a token limit cannot count.
+
+    Args:
+        lanes: Names of the unmeasured lanes or providers.
+        ended: Those of ``lanes`` whose tokens are read once their session
+            ends, rather than never.
+
+    Returns:
+        A line naming the lanes no reader counts and the readable adapters,
+        and a line naming the lanes counted only at session end; a line
+        with no lanes is left out.
+    """
+    later = set(ended)
+    unread = [lane for lane in lanes if lane not in later]
+    lines = []
+    if unread:
+        lines.append(
+            UNMEASURED_WARNING.format(
+                lanes=", ".join(unread), readers=", ".join(readers())
+            )
+        )
+    if later:
+        lines.append(
+            END_OF_SESSION_WARNING.format(lanes=", ".join(sorted(later)))
+        )
+    return "\n".join(lines)
 
 
 def _stamp(value: object) -> float | None:
@@ -598,7 +919,9 @@ def reported_refusal(home: Path, participant: dict) -> float | None:
     return None
 
 
-def _advance(path: Path, fold: Fold, reading: dict) -> dict:
+def _advance(
+    path: Path, fold: Fold, reading: dict, mark: bytes = USAGE_MARK
+) -> dict:
     """Folds only the records appended since the previous reading.
 
     A live session appends to its record continuously, so re-reading the whole
@@ -616,13 +939,15 @@ def _advance(path: Path, fold: Fold, reading: dict) -> dict:
     and folding resumes from the following newline.
 
     Every adapter folds only records carrying a usage object, whose key ends
-    in ``USAGE_MARK``, so a line without those bytes is skipped unparsed.
-    Most transcript lines are prompts and tool output with no usage at all.
+    in ``USAGE_MARK`` or the adapter's own mark in ``MARKS``, so a line
+    without those bytes is skipped unparsed. Most transcript lines are
+    prompts and tool output with no usage at all.
 
     Args:
         path: Session record file.
         fold: Adapter-specific accumulator for one parsed record.
         reading: Previous reading for this lane, or an empty mapping.
+        mark: Bytes every line the fold can use contains.
 
     Returns:
         The updated reading.
@@ -652,7 +977,7 @@ def _advance(path: Path, fold: Fold, reading: dict) -> dict:
         return reading
     reading["offset"] += end + 1
     for line in chunk[:end].split(b"\n"):
-        if USAGE_MARK not in line:
+        if mark not in line:
             continue
         try:
             record = json.loads(line)
@@ -674,6 +999,8 @@ def reported_tokens(
     count of the tokens its session consumed: not billed spend, not a price,
     and not comparable between vendors. It is also unrelated to the injected
     bytes the view reports, which measure only what coordination itself adds.
+    An OpenCode lane reports the running total of its most recently updated
+    session, read from OpenCode's own database.
 
     Args:
         home: Private bridge state root.
@@ -691,19 +1018,26 @@ def reported_tokens(
     key = str(participant.get("lane", ""))
     try:
         entry = roster.provider(home, str(participant.get("provider", "")))
-        finder, fold = ADAPTERS[str(entry.get("adapter", ""))]
+        adapter = str(entry.get("adapter", ""))
         config = _config_home(home, entry, participant.get("credential"))
         if config is None:
             return None
+        if adapter in TOTALS:
+            sessions = TOTALS[adapter](Path(key))
+            if not sessions:
+                return None
+            return max(sessions, key=lambda row: row[1])[2]
+        finder, fold = ADAPTERS[adapter]
+        mark = MARKS.get(adapter, USAGE_MARK)
         path = finder(config, Path(key))
         if path is None:
             cache.pop(key, None)
             return None
         size = path.stat().st_size
-        reading = _advance(path, fold, cache.get(key, {}))
+        reading = _advance(path, fold, cache.get(key, {}), mark)
         while whole and reading["offset"] < size:
             before = reading["offset"]
-            reading = _advance(path, fold, reading)
+            reading = _advance(path, fold, reading, mark)
             if reading["offset"] <= before:
                 break
     except (BridgeError, KeyError, OSError, ValueError):
@@ -782,15 +1116,21 @@ def lane_sources(
     Returns:
         One reading per record with its ``key``, ``offset``, ``tokens`` and
         ``last``, or None when this lane has no readable session records.
+        An adapter in ``TOTALS`` reports one reading per session instead,
+        as ``_session_readings`` describes.
     """
     try:
         entry = roster.provider(home, str(participant.get("provider", "")))
         adapter = str(entry.get("adapter", ""))
-        fold = ADAPTERS[adapter][1]
         config = _config_home(home, entry, participant.get("credential"))
         if config is None:
             return None
-        paths = SOURCES[adapter](config, Path(str(participant.get("lane", ""))))
+        lane = Path(str(participant.get("lane", "")))
+        if adapter in TOTALS:
+            return _session_readings(TOTALS[adapter](lane), known, since)
+        fold = ADAPTERS[adapter][1]
+        mark = MARKS.get(adapter, USAGE_MARK)
+        paths = SOURCES[adapter](config, lane)
     except (BridgeError, KeyError, OSError, ValueError):
         return None
     readings = []
@@ -812,11 +1152,12 @@ def lane_sources(
                         "seen": {last} if last else set(),
                         "last": last,
                     },
+                    mark,
                 )
             elif stat.st_mtime < since:
                 reading = {**base, "offset": stat.st_size, "tokens": 0}
             else:
-                reading = _advance(path, fold, {})
+                reading = _advance(path, fold, {}, mark)
         except (KeyError, OSError, TypeError, ValueError):
             continue
         readings.append(
@@ -825,6 +1166,49 @@ def lane_sources(
                 "offset": int(reading["offset"]),
                 "tokens": int(reading["tokens"]),
                 "last": str(reading.get("last", "")),
+            }
+        )
+    return readings or None
+
+
+def _session_readings(
+    sessions: list[tuple[str, float, int]] | None,
+    known: dict,
+    since: float,
+) -> list[dict] | None:
+    """Reports per-session running totals in the shape of record readings.
+
+    A database total cannot be resumed by byte offset, so the ``offset`` of
+    each reading holds the session's total when counting of it began, and
+    ``tokens`` what the session reported beyond that. A session absent from
+    ``known`` and last updated before ``since`` starts at its current total,
+    so use from before the caller began counting is not charged.
+
+    Args:
+        sessions: ``(session, last update, tokens)`` entries, or None.
+        known: Previous reading per session key, as ``lane_sources`` takes.
+        since: Instant from which a new session's whole total is counted.
+
+    Returns:
+        One reading per session with its ``key``, ``offset``, ``tokens`` and
+        an empty ``last``, or None when no session was read.
+    """
+    readings = []
+    for session, stamp, total in sessions or []:
+        key = f"session:{session}"
+        prior = known.get(key)
+        try:
+            base = int(prior["offset"]) if prior is not None else None
+        except (KeyError, TypeError, ValueError):
+            continue
+        if base is None:
+            base = total if stamp < since else 0
+        readings.append(
+            {
+                "key": key,
+                "offset": base,
+                "tokens": max(0, total - base),
+                "last": "",
             }
         )
     return readings or None

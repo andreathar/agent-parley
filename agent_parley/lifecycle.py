@@ -26,7 +26,7 @@ ACTIVE = (QUEUED, RUNNING, RECOVERY)
 STATES = (*ACTIVE, BLOCKED, READY, COMPLETE)
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
 MAX_HISTORY = 50
-_MARKER_ACTIONS = ("claim", "take", "complete")
+_MARKER_ACTIONS = ("claim", "accept", "take", "complete")
 
 
 def append_history(record: dict, entry: dict, cap: int = MAX_HISTORY) -> None:
@@ -35,10 +35,10 @@ def append_history(record: dict, entry: dict, cap: int = MAX_HISTORY) -> None:
     A lane that claims and releases the same issue hundreds of times would
     otherwise grow this list without limit, and every idempotent retry then
     copies the whole growing list again. Retention keeps the most recent
-    `cap` entries, plus the latest claim, take and complete marker when an
-    older one would otherwise fall outside that window, so a capped history
-    still answers when the current claim began and when the issue last
-    completed.
+    `cap` entries, plus the latest claim, accept, take and complete marker
+    when an older one would otherwise fall outside that window, so a capped
+    history still answers when the current claim began, who it moved to and
+    when the issue last completed.
 
     Args:
         record: Issue record whose history is being extended.
@@ -186,12 +186,15 @@ def authorize(record: dict) -> dict:
     return execution
 
 
-def claimed(record: dict, claim_id: str) -> dict:
+def claimed(record: dict, claim_id: str, usage: dict | None = None) -> dict:
     """Starts a new authorized execution generation on a claim.
 
     Args:
         record: Mutable issue ledger record carrying earlier execution state.
         claim_id: Newly generated ownership identifier.
+        usage: The new owner's consumption reading at the claim, kept as
+            ``usage_start`` so resolution can report what the claim used.
+            None drops any reading an earlier generation left.
 
     Returns:
         The execution mapping stored on the record.
@@ -210,7 +213,55 @@ def claimed(record: dict, claim_id: str) -> dict:
         progress=previous.get("progress"),
     )
     record["execution"] = execution
+    if usage:
+        record["usage_start"] = dict(usage)
+    else:
+        record.pop("usage_start", None)
     return execution
+
+
+def usage_between(start: dict | None, end: dict) -> dict:
+    """Reports what one claim consumed between two consumption readings.
+
+    Within one session the claim used the difference of each reading. When
+    the claim started before this ledger recorded readings, or the lane
+    rotated to a new session inside it, the token and hour figures are the
+    current session's own, and served calls, which are counted per lane
+    rather than per session, are unknown without a starting reading.
+
+    Args:
+        start: Reading taken at the claim, or None when none was recorded.
+        end: Reading taken at resolution.
+
+    Returns:
+        Tokens, calls and hours, each None when unknown and never negative,
+        and ``basis``: ``claim`` for a difference within one session,
+        ``session`` when the current session's own figures stand in.
+    """
+    begun = (
+        start
+        if start and start.get("participant") == end.get("participant")
+        else None
+    )
+    same = begun is not None and begun.get("session") == end.get("session")
+    base = begun if same and begun else {}
+    tokens = end.get("tokens")
+    calls = end.get("calls")
+    hours = float(end.get("hours") or 0.0)
+    return {
+        "tokens": (
+            None
+            if tokens is None
+            else max(0, int(tokens) - int(base.get("tokens") or 0))
+        ),
+        "calls": (
+            None
+            if begun is None or calls is None
+            else max(0, int(calls) - int(begun.get("calls") or 0))
+        ),
+        "hours": round(max(0.0, hours - float(base.get("hours") or 0.0)), 2),
+        "basis": "claim" if same else "session",
+    }
 
 
 def released(record: dict, closed: bool = False) -> dict:
@@ -221,6 +272,15 @@ def released(record: dict, closed: bool = False) -> dict:
     marked through `end_on_forge` rather than offered again as free work;
     the next claim builds a fresh record without the mark, so a reopened
     issue can still be taken.
+
+    A claim blocked on a recorded external condition keeps that condition
+    when it is released. `operator_blocked` decides which claims qualify,
+    so an older record with a string condition or no condition counts as
+    external here too. The work stays ``blocked`` with no owner and no
+    claim generation, so neither a work offer nor `issue next` presents it
+    as unblocked to the next lane, which would only rediscover the same
+    unmet condition. A lane or operator that knows the condition is met
+    lifts it by claiming the issue, which starts a fresh generation.
 
     Args:
         record: Mutable issue ledger record.
@@ -239,7 +299,15 @@ def released(record: dict, closed: bool = False) -> dict:
             "Ready work must remain claimed until verified integration "
             "completes."
         )
-    if execution["state"] != COMPLETE:
+    if not closed and operator_blocked(record):
+        execution.update(
+            claim_id=None,
+            next_action=_next_action(execution),
+            updated_at=time.time(),
+            commit="",
+            gate=None,
+        )
+    elif execution["state"] != COMPLETE:
         execution.update(
             state=QUEUED,
             claim_id=None,
@@ -830,6 +898,7 @@ def resolve(
     actor: str,
     reason: str = "",
     claim_id: str | None = None,
+    usage: dict | None = None,
 ) -> dict:
     """Ends a claim whose holder never answered its completion reminder.
 
@@ -864,6 +933,10 @@ def resolve(
         reason: Operator rationale kept beside the evidence.
         claim_id: Claim the supervisor observed ending on the forge, which
             stands in for the escalation and must still be current.
+        usage: The holder's consumption reading taken just before this
+            call. Its difference from the reading taken at the claim is
+            kept as ``usage`` on the resolution and its history entry. A
+            reading of another participant, or none, records no usage.
 
     Returns:
         The resolved issue record.
@@ -942,6 +1015,12 @@ def resolve(
                 gate=None,
             )
         drop_offer(directory, record)
+        started = record.pop("usage_start", None)
+        used = (
+            {"usage": usage_between(started, usage)}
+            if usage and usage.get("participant") == holder
+            else {}
+        )
         record.update(
             owner=None,
             offer=None,
@@ -956,6 +1035,7 @@ def resolve(
                 "at": now,
                 "claim_id": record.get("claim_id"),
                 "evidence": dict(evidence),
+                **used,
             },
         )
         record.pop("unresolved_completion", None)
@@ -973,6 +1053,7 @@ def resolve(
                 "outcome": outcome,
                 "holder": holder,
                 "evidence": dict(evidence),
+                **used,
             },
         )
         if outcome == "complete":

@@ -1,5 +1,155 @@
 # Changelog
 
+## [0.20.1](https://github.com/suneel944/agent-parley/compare/v0.20.0...v0.20.1) (2026-10-15)
+
+
+### Bug fixes
+
+* keep the sandbox service from repairing the operator's plugin (#1292) ([#1290](https://github.com/suneel944/agent-parley/issues/1290))
+
+## [0.20.0](https://github.com/suneel944/agent-parley/compare/v0.19.1...v0.20.0) (2026-10-15)
+
+### Upgrades
+
+- One `uv tool upgrade` now upgrades the estate. The service re-executes itself when its sources move after a launcher upgrade (#1240).
+- The service refreshes a stale plugin itself and names the lanes that must restart (#1239). Lanes learn their plugin is stale; unattended lanes restart themselves and attended lanes receive a notice (#1241).
+- `doctor` reports plugin and server version drift per config home (#1245).
+
+### Coordination
+
+- A lane receives mail when a merged change alters a symbol its diff calls (#1242).
+- `run` and dispatch refuse a new lane past a host load threshold (#1243).
+- Dispatch groups backlog issues that share forecast paths onto one lane (#1244).
+- `participant retire --ready` retires every lane that `problems` lists as ready to retire (#1248).
+- A token budget no longer treats copilot lanes as measured while they read zero until the session ends (#1253).
+
+### Diagnostics
+
+- `doctor` reports recent hook deadline expiries and the slowest stage (#1249).
+- `doctor` no longer runs the component and version columns together for the shell plugin row (#1262).
+- `status` names `agent-parley up` when the service is not running (#1261), and no longer says the service is not refreshing when the project has no GitHub remote (#1259).
+- `issue next` from the main checkout gives a next step that works (#1260).
+- `run` for a provider whose CLI is not installed no longer leaves a registered lane and worktree behind (#1256).
+
+### Notifications and policy
+
+- Email notifications verify the SMTP server certificate and refuse to send credentials in clear (#1250).
+- The Telegram status reader logs why polling fails instead of retrying silently (#1251).
+- The attribution policy refuses credits naming opencode, kimi, deepseek and grok lanes (#1252).
+
+### Documentation
+
+- Keeping the service across reboots on macOS and WSL2 is documented (#1254).
+- A short troubleshooting page covers first-run failures (#1258).
+- The provider capability table states that resume approval opt-ins reach only claude lanes (#1255).
+- README examples no longer steer, merge and restart a `claude-2` lane the quickstart never creates (#1257).
+
+### Upgrade notes
+
+- The service re-executes itself when its source files change and rewrites the installed plugin when it is older than the launcher. Unattended lanes restart on a stale plugin; attended lanes only receive a notice.
+- SMTP notifications now refuse unverified certificates and clear-text logins, which can stop mail from a misconfigured relay.
+
+Closed issues: [milestone 0.20.0](https://github.com/suneel944/agent-parley/issues?q=is%3Aissue%20is%3Aclosed%20milestone%3A0.20.0).
+
+## [0.19.1](https://github.com/suneel944/agent-parley/compare/v0.19.0...v0.19.1) (2026-10-14)
+
+
+### Metrics
+
+- The twelve Prometheus families that 0.19.0 renamed are exported again under their 0.18.x `_total` names as deprecated aliases, next to the `_window` and `_retained` gauges that replace them. Each alias names its replacement in `# HELP`, and `metrics --json` marks it `deprecated` (#1234).
+
+### Release notes
+
+- A milestone release now publishes its notes: the `###` sections of the squash commit body, upgrade notes from its compatibility bullets and one link to the milestone's closed issues, instead of one headline and a link per issue. Commits without such sections keep the one-line form (#1235).
+- The 0.19.0 entry in `CHANGELOG.md` now matches the corrected v0.19.0 release notes (#1235).
+
+### Upgrade notes
+
+- The 0.18.x metric names are deprecated, not removed. Move dashboards and alerts to the `_window` and `_retained` names; removing the aliases needs a release marked breaking.
+- No configuration or state changes.
+
+Closed issues: [milestone 0.19.1](https://github.com/suneel944/agent-parley/issues?q=is%3Aissue%20is%3Aclosed%20milestone%3A0.19.1).
+
+## [0.19.0](https://github.com/suneel944/agent-parley/compare/v0.18.2...v0.19.0) (2026-10-14)
+
+
+0.19.0 delivers the 0.19.0 milestone: 139 issues from the 0.19.0 audit, merged as #1230. Numbers below are the pull requests that carried each change.
+
+### Highlights
+
+- **Webhook notifications** for Slack, Discord, Teams and generic receivers (#1173).
+- **Unattended integration**: the service can merge ready work with `--auto` (#1227).
+- **Web view of `top`**: a read-only loopback page (#1210).
+- **Every built-in provider** is detected, launched and budgeted, with token usage read for gemini, copilot and opencode and usage reported per resolved claim (#1202, #1228, #1217).
+- **Approval prompts** of every provider are recognized and escalated, Codex included (#1178, #1229).
+
+### Security and policy
+
+- Archive import and roster adoption are hardened (#1157).
+- Linked attribution footers are caught and every forge text command is gated (#1158).
+- Operator-only settings and plan revisions stay out of lane reach; accepted plan revisions survive a re-applied plan file (#1159, #1163).
+- Lane gates are read through shell wrappers, compound syntax and `cd` (#1160).
+- Late and oversize PreToolUse decisions are refused instead of allowed (#1161).
+- Dialog answers are tied to the prompt the operator saw; Telegram answers are bound to one occurrence and one operator (#1164, #1166).
+- Merge admission is preflighted and approvals are bound to the reported commit (#1165).
+- Peer text in mail previews stays on one quoted line (#1162).
+
+### Coordination and dispatch
+
+- Dispatcher wakes no longer present a record id as a work offer, next work is ranked by published leads, and issues closed on the forge or landed on integration are no longer offered (#1177, #1186).
+- Ownership generations end on handoff and completion; the overdue transition stays off claims whose quiet is not the holder's; held-issue mail wakes the holder (#1176, #1175, #1187).
+- A retiring lane withdraws its takeover requests; refused lanes stay in the gone-root record and every reclaim step runs; an unanswered orphan decision stays open until its work returns; the timeout sweep retires decision kinds it never settles (#1215, #1208, #1222, #1214).
+- A spare never takes a path a participant records as its lane; reservation paths compare without case on case-insensitive checkouts (#1218, #1220).
+- Plan, pull request and merge conflict reporting is settled (#1179).
+- A refusing forge is backed off, the issue catalog is paged and forge assignment is respected (#1170).
+
+### Store and recovery
+
+- Read-only commands no longer create an empty store; corrupt activity records are set aside with a named repair; a missing required key names the state file (#1181, #1183, #1171).
+- Damaged decision files are kept and negated convergence evidence is refused (#1174).
+- Settled store rows are pruned and the attachment allowance is indexed (#1221).
+- Review evidence is bounded and exported atomically; stale spooled lane evidence no longer overrides newer states; a failed recovery checkpoint logs its cause (#1212, #1213, #1211).
+- Cross-device strays are rebuilt and preserved worktrees are restored (#1172).
+- Timed-out blueprint nodes and demo sandboxes are stopped, and starter blueprints ship (#1182).
+
+### Providers
+
+- copilot, opencode and default-account lanes keep their own configuration (#1203).
+- The bridge tool opt-in reaches codex, and opt-ins a CLI cannot carry are named (#1226).
+- `doctor` lists the token usage readers (#1228).
+- macOS process identity and working directories are read without guessing (#1219).
+
+### Operator surface
+
+- `watch` stays in order and the history row cap applies to the query; the project feed pages so older entries are not skipped (#1205, #1216).
+- `problems` reads dirtiness in parallel and honours `NO_COLOR` (#1206).
+- Lanes are refused in a repository with no commits; first-commit and stash behavior is described and a pending stash is listed (#1189, #1192).
+- Refusals on the new-user path point at a remedy that works; setup and credential commands print plain confirmations; a refused tool call names the offending keys; setup summarizes its merge gate and suggests a detected check (#1190, #1191, #1196, #1209).
+- Every CLI argument has help and positional values complete (#1188).
+
+### Notifications and MCP
+
+- Missing SMTP settings are reported as an outbound fault; a decision is retried only on the transports that refused it; notice-only polled batches are kept until the lane acts (#1197, #1198, #1199).
+- Spilled `send_message` bodies are accepted over MCP and the request limit is named (#1200).
+
+### Metrics
+
+- Sliding-window and retained totals are exported as gauges with `_window` or `_retained` suffixes, and empty medians are omitted (#1204).
+
+### Documentation, tests and CI
+
+- Documentation matches the code across monitoring, operations, acceptance, provider, state layout, catalog and release guides (#1167, #1193, #1194, #1195, #1201).
+- The suite is isolated from host state and tolerates clock drift (#1168, #1225).
+- Action pins are unified, dependency bumps are grouped and coverage is measured (#1169).
+
+### Upgrade notes
+
+- **Prometheus metric names:** twelve families that were `_total` counters are now gauges named with a `_window` or `_retained` suffix (#1204). Dashboards and alert rules that query the old `_total` names return no data on 0.19.0. 0.19.1 exports the old names again as deprecated aliases (#1232). `agent_parley_lane_tokens_total` is unchanged.
+- The store now prunes settled messages, recipients and released reservations (#1221).
+- `--auto` integration and the webhook transport are opt-in.
+
+Closed issues: [milestone 0.19.0](https://github.com/suneel944/agent-parley/milestone/36?closed=1).
+
 ## [0.18.2](https://github.com/suneel944/agent-parley/compare/v0.18.1...v0.18.2) (2026-10-12)
 
 

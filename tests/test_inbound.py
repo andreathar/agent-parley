@@ -1,12 +1,15 @@
 """Checks the inbound status reader, decision answers and the passcode gate."""
 
+import io
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from agent_parley import decisions, inbound, notify, store
+from agent_parley import cli, decisions, inbound, notify, store, timeouts
+from agent_parley.state import BridgeError
 
 PASSCODE = "correct-horse-battery"
 CONFIG = {
@@ -34,13 +37,14 @@ def gate():
     return inbound.Gate(inbound.Passcode(PASSCODE))
 
 
-def message(text, chat=42, identifier=7, number=1):
+def message(text, chat=42, identifier=7, number=1, user=1):
     """Builds one Bot API update carrying a chat message."""
     return {
         "update_id": number,
         "message": {
             "message_id": identifier,
             "chat": {"id": chat},
+            "from": {"id": user},
             "text": text,
         },
     }
@@ -78,7 +82,7 @@ def test_the_right_passcode_answers_with_the_status_reading(
     assert verdict == inbound.ACCEPTED
     assert [method for method, _ in calls] == ["deleteMessage", "sendMessage"]
     assert calls[0][1] == {"chat_id": "42", "message_id": 7}
-    assert replies(calls)[0].startswith("Server:")
+    assert replies(calls)[0].startswith("Service:")
     assert str(bridge.home) in replies(calls)[0]
 
 
@@ -247,6 +251,86 @@ def test_the_reader_refuses_to_start_without_a_usable_passcode(
     assert "AGENT_PARLEY_INBOUND_PASSCODE" in capsys.readouterr().out
 
 
+def test_a_failing_poll_logs_once_and_logs_its_recovery(
+    bridge, monkeypatch, capsys
+):
+    token = "123456:SECRET-bot-token"
+    for variable, value in (
+        ("AGENT_PARLEY_INBOUND", "telegram"),
+        ("AGENT_PARLEY_INBOUND_PASSCODE", PASSCODE),
+        ("AGENT_PARLEY_NOTIFY", "telegram"),
+        ("AGENT_PARLEY_TELEGRAM_TOKEN", token),
+        ("AGENT_PARLEY_TELEGRAM_CHAT", "42"),
+    ):
+        monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(inbound, "RETRY_SECONDS", 0)
+    stopped = threading.Event()
+    answers = [
+        BridgeError(f"Telegram answered 409 at /bot{token}/getUpdates."),
+        BridgeError(f"Telegram answered 409 at /bot{token}/getUpdates."),
+        [],
+    ]
+
+    def updates(config, offset):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        stopped.set()
+        return answer
+
+    monkeypatch.setattr(inbound, "updates", updates)
+    inbound.run(bridge.home, stopped)
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if " inbound " in line]
+    assert len(lines) == 3
+    assert lines[0].endswith(inbound.POLLING)
+    assert lines[1].endswith(
+        inbound.POLL_FAILED.format(
+            reason="BridgeError: Telegram answered 409 at "
+            f"/bot{inbound.REDACTED_TOKEN}/getUpdates."
+        )
+    )
+    assert inbound.REDACTED_TOKEN in lines[1]
+    assert lines[2].endswith(inbound.RECOVERED)
+    assert token not in out
+
+
+def test_the_reader_is_not_polling_after_a_logged_failure(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "2026-09-29T10:00:00+0000 bound 127.0.0.1:1\n"
+        f"2026-09-29T10:00:01+0000 inbound {inbound.POLLING}\n"
+        "2026-09-29T10:00:02+0000 inbound "
+        + inbound.POLL_FAILED.format(reason="HTTPError: HTTP 401")
+        + "\n"
+    )
+    assert not inbound.polling(tmp_path)
+    with log.open("a") as stream:
+        stream.write(f"2026-09-29T10:01:00+0000 inbound {inbound.RECOVERED}\n")
+    assert inbound.polling(tmp_path)
+
+
+def test_a_failure_names_the_http_status_without_the_token():
+    import urllib.error
+
+    config = {"telegram": {"token": "999:TOKEN"}}
+    with urllib.error.HTTPError(
+        "https://api/bot999:TOKEN/getUpdates",
+        409,
+        "Conflict",
+        {},
+        io.BytesIO(),
+    ) as refused:
+        assert inbound.failure(config, refused) == (
+            "HTTPError: HTTP 409 Conflict"
+        )
+    lookup = urllib.error.URLError("no route to bot999:TOKEN")
+    assert inbound.failure(config, lookup) == (
+        f"URLError: no route to bot{inbound.REDACTED_TOKEN}"
+    )
+    assert inbound.failure(config, ValueError()) == "ValueError"
+
+
 def test_the_reader_stays_off_when_the_environment_never_asked(
     bridge, monkeypatch, calls, capsys
 ):
@@ -299,13 +383,14 @@ def waiting(paired, reversibility=decisions.REVERSIBLE):
     )
 
 
-def tapping(name, index, chat=42, confirmed=False, markup=None):
-    """Builds the callback query one button tap produces."""
+def tapping(record, index, chat=42, confirmed=False, markup=None, user=5):
+    """Builds the callback query one button tap on a record produces."""
+    name = decisions.occurrence(record) if isinstance(record, dict) else record
     return {
         "update_id": 9,
         "callback_query": {
             "id": "q1",
-            "from": {"id": 5},
+            "from": {"id": user},
             "data": decisions.callback(name, index, confirmed=confirmed),
             "message": {
                 "message_id": 11,
@@ -325,7 +410,7 @@ def test_a_tap_answers_the_decision_and_hands_it_to_the_lane(
     markup = decisions.keyboard([record])
     markup["inline_keyboard"].append(other)
     verdict = inbound.serve(
-        bridge.home, CONFIG, gate, tapping(record["id"], 1, markup=markup)
+        bridge.home, CONFIG, gate, tapping(record, 1, markup=markup)
     )
     assert verdict == inbound.ACCEPTED
     stored = decisions.find(bridge.home, record["id"])[1]
@@ -342,13 +427,30 @@ def test_a_tap_answers_the_decision_and_hands_it_to_the_lane(
     assert "decline" in mail[0]["subject"]
 
 
+def test_a_timeout_answer_is_not_attributed_to_the_operator(
+    bridge, paired, mail
+):
+    record = waiting(paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    answered = decisions.answer(
+        directory, record["id"], "accept", timeouts.ANSWERED_BY
+    )
+
+    inbound.settle(bridge.home, directory, answered)
+
+    assert "operator" not in mail[0]["body"]
+    assert mail[0]["body"].startswith(
+        f"The service's decision timeout answered decision {record['id']}"
+    )
+
+
 def test_a_second_tap_is_refused_with_who_answered_first(
     bridge, paired, gate, calls, mail
 ):
     record = waiting(paired)
-    inbound.serve(bridge.home, CONFIG, gate, tapping(record["id"], 0))
+    inbound.serve(bridge.home, CONFIG, gate, tapping(record, 0))
     calls.clear()
-    verdict = inbound.serve(bridge.home, CONFIG, gate, tapping(record["id"], 1))
+    verdict = inbound.serve(bridge.home, CONFIG, gate, tapping(record, 1))
     assert verdict == inbound.REFUSED
     assert calls[-1][0] == "answerCallbackQuery"
     assert "already answered accept" in calls[-1][1]["text"]
@@ -360,7 +462,7 @@ def test_a_tap_from_another_chat_or_an_unknown_decision_is_dropped(
 ):
     record = waiting(paired)
     assert (
-        inbound.serve(bridge.home, CONFIG, gate, tapping(record["id"], 0, 99))
+        inbound.serve(bridge.home, CONFIG, gate, tapping(record, 0, 99))
         == inbound.DROPPED
     )
     assert calls == []
@@ -375,18 +477,16 @@ def test_an_irreversible_option_waits_for_the_confirming_tap(
     bridge, paired, gate, calls, mail
 ):
     record = waiting(paired, decisions.IRREVERSIBLE)
-    first = inbound.serve(bridge.home, CONFIG, gate, tapping(record["id"], 0))
+    first = inbound.serve(bridge.home, CONFIG, gate, tapping(record, 0))
     assert first == inbound.ACCEPTED
     stored = decisions.find(bridge.home, record["id"])[1]
     assert stored["state"] == decisions.OPEN
     button = json.loads(calls[0][1]["reply_markup"])["inline_keyboard"][0][0]
     assert button["callback_data"] == decisions.callback(
-        record["id"], 0, confirmed=True
+        decisions.occurrence(record), 0, confirmed=True
     )
     assert mail == []
-    inbound.serve(
-        bridge.home, CONFIG, gate, tapping(record["id"], 0, confirmed=True)
-    )
+    inbound.serve(bridge.home, CONFIG, gate, tapping(record, 0, confirmed=True))
     assert decisions.find(bridge.home, record["id"])[1]["answer"] == "accept"
     assert len(mail) == 1
 
@@ -434,3 +534,244 @@ def test_a_malformed_or_closed_typed_answer_is_refused_in_the_reply(
     )
     assert "already closed" in replies(calls)[-1]
     assert mail == []
+
+
+def test_an_old_button_does_not_answer_a_reopened_decision(
+    bridge, paired, gate, calls, mail
+):
+    record = waiting(paired, decisions.IRREVERSIBLE)
+    markup = decisions.keyboard([record])
+    stale_confirm = tapping(record, 1, confirmed=True, markup=markup)
+    stale_option = tapping(record, 1, markup=markup)
+    directory = Path(paired["lanes"]["codex"]).parent
+    decisions.close(directory, record["id"])
+    again = waiting(paired, decisions.IRREVERSIBLE)
+    assert again["id"] == record["id"]
+    assert again["nonce"] != record["nonce"]
+    for update in (stale_confirm, stale_option):
+        calls.clear()
+        verdict = inbound.serve(bridge.home, CONFIG, gate, update)
+        assert verdict == inbound.REFUSED
+        assert "replaced by a newer question" in calls[-1][1]["text"]
+        stripped = [
+            fields
+            for method, fields in calls
+            if method == "editMessageReplyMarkup"
+        ]
+        assert json.loads(stripped[0]["reply_markup"]) == {
+            "inline_keyboard": []
+        }
+    stored = decisions.find(bridge.home, record["id"])[1]
+    assert stored["state"] == decisions.OPEN
+    assert mail == []
+    calls.clear()
+    fresh = inbound.serve(bridge.home, CONFIG, gate, tapping(again, 1))
+    assert fresh == inbound.ACCEPTED
+    assert decisions.find(bridge.home, record["id"])[1]["state"] == (
+        decisions.OPEN
+    )
+    button = json.loads(calls[0][1]["reply_markup"])["inline_keyboard"][0][0]
+    assert button["callback_data"] == decisions.callback(
+        decisions.occurrence(again), 1, confirmed=True
+    )
+
+
+def test_a_reply_to_an_old_digest_does_not_answer_a_reopened_decision(
+    bridge, paired, gate, calls, mail
+):
+    record = waiting(paired)
+    digest = decisions.compose([record])[1]
+    decisions.close(Path(paired["lanes"]["codex"]).parent, record["id"])
+    waiting(paired)
+    update = message(f"{PASSCODE} decline")
+    update["message"]["reply_to_message"] = {"text": digest}
+    inbound.serve(bridge.home, CONFIG, gate, update)
+    assert "replaced by a newer question" in replies(calls)[-1]
+    stored = decisions.find(bridge.home, record["id"])[1]
+    assert stored["state"] == decisions.OPEN
+
+
+def test_a_button_and_digest_from_before_nonces_answer_an_old_record(
+    bridge, paired, gate, calls, mail
+):
+    record = waiting(paired)
+    directory = Path(paired["lanes"]["codex"]).parent
+    path = directory / decisions.RECORD_NAME
+    stored = json.loads(path.read_text())
+    del stored[record["id"]]["nonce"]
+    path.write_text(json.dumps(stored))
+    old = {key: value for key, value in record.items() if key != "nonce"}
+    assert decisions.callback(decisions.occurrence(old), 0) == (
+        f"d:{record['id']}:0"
+    )
+    verdict = inbound.serve(bridge.home, CONFIG, gate, tapping(record["id"], 0))
+    assert verdict == inbound.ACCEPTED
+    assert decisions.find(bridge.home, record["id"])[1]["answer"] == "accept"
+    other = decisions.open_or_refresh(
+        directory,
+        project="/repo",
+        lane="codex",
+        kind="handoff_offered",
+        key="s2",
+        question="Another offer is waiting",
+        options=("accept", "decline"),
+    )
+    stored = json.loads(path.read_text())
+    del stored[other["id"]]["nonce"]
+    path.write_text(json.dumps(stored))
+    update = message(f"{PASSCODE} decline")
+    update["message"]["reply_to_message"] = {
+        "text": decisions.compose(
+            [{key: value for key, value in other.items() if key != "nonce"}]
+        )[1]
+    }
+    inbound.serve(bridge.home, CONFIG, gate, update)
+    assert decisions.find(bridge.home, other["id"])[1]["answer"] == "decline"
+
+
+GROUP = {
+    "transports": ["telegram"],
+    "telegram": {
+        "token": "t",
+        "chat": "-1001",
+        "api": "https://api",
+        "users": ["1"],
+    },
+}
+
+
+def test_a_group_chat_without_a_user_list_is_a_configuration_fault():
+    asked = {
+        "AGENT_PARLEY_INBOUND": "telegram",
+        "AGENT_PARLEY_INBOUND_PASSCODE": PASSCODE,
+        "AGENT_PARLEY_NOTIFY": "telegram",
+        "AGENT_PARLEY_TELEGRAM_TOKEN": "t",
+        "AGENT_PARLEY_TELEGRAM_CHAT": "-1001",
+    }
+    assert "AGENT_PARLEY_TELEGRAM_USERS" in inbound.fault(asked)
+    listed = {**asked, "AGENT_PARLEY_TELEGRAM_USERS": "1, 2"}
+    assert inbound.fault(listed) == ""
+    assert notify.settings(listed)["telegram"]["users"] == ["1", "2"]
+    assert inbound.fault({**asked, "AGENT_PARLEY_TELEGRAM_CHAT": "42"}) == ""
+
+
+def test_an_unlisted_member_changes_nothing_and_cannot_lock_the_operator(
+    bridge, paired, gate, calls, mail
+):
+    record = waiting(paired)
+    tap = tapping(record, 0, chat=-1001, user=555)
+    assert inbound.serve(bridge.home, GROUP, gate, tap) == inbound.DROPPED
+    assert decisions.find(bridge.home, record["id"])[1]["state"] == (
+        decisions.OPEN
+    )
+    guesses = [
+        inbound.serve(
+            bridge.home,
+            GROUP,
+            gate,
+            message("guessing status", chat=-1001, user=555),
+            now=float(attempt),
+        )
+        for attempt in range(inbound.FAILURE_LIMIT + 1)
+    ]
+    assert set(guesses) == {inbound.DROPPED}
+    assert calls == []
+    operator = inbound.serve(
+        bridge.home,
+        GROUP,
+        gate,
+        message(f"{PASSCODE} status", chat=-1001, user=1),
+        now=10.0,
+    )
+    assert operator == inbound.ACCEPTED
+    listed = inbound.serve(
+        bridge.home, GROUP, gate, tapping(record, 0, chat=-1001, user=1)
+    )
+    assert listed == inbound.ACCEPTED
+
+
+def test_one_senders_failures_do_not_lock_out_another(
+    bridge, paired, gate, calls
+):
+    verdicts = [
+        inbound.serve(
+            bridge.home,
+            CONFIG,
+            gate,
+            message("guessing status", user=555),
+            now=float(attempt),
+        )
+        for attempt in range(inbound.FAILURE_LIMIT)
+    ]
+    assert verdicts[-1] == inbound.LOCKED
+    operator = inbound.serve(
+        bridge.home, CONFIG, gate, message(f"{PASSCODE} status"), now=10.0
+    )
+    assert operator == inbound.ACCEPTED
+    assert gate.locked(10.0, "555")
+    assert not gate.locked(10.0, "1")
+
+
+def test_a_lock_and_recent_failures_survive_a_restart(tmp_path, monkeypatch):
+    path = tmp_path / inbound.GATE_NAME
+    now = time.time()
+    first = inbound.Gate(inbound.Passcode(PASSCODE), path)
+    for attempt in range(inbound.FAILURE_LIMIT - 1):
+        first.admits("guessing", now + attempt, "1")
+    assert first.admits("guessing", now + 4, "1") == inbound.LOCKED
+    written = path.read_text()
+    assert PASSCODE not in written
+    assert "guessing" not in written
+    assert path.stat().st_mode & 0o777 == 0o600
+    restarted = inbound.Gate(inbound.Passcode(PASSCODE), path)
+    assert restarted.locked(now + 20, "1")
+    assert restarted.admits(PASSCODE, now + 20, "1") == inbound.REFUSED
+    assert (
+        restarted.admits(PASSCODE, now + inbound.LOCK_SECONDS + 5, "1")
+        == inbound.ACCEPTED
+    )
+    counted = tmp_path / "counted.json"
+    partway = inbound.Gate(inbound.Passcode(PASSCODE), counted)
+    for attempt in range(inbound.FAILURE_LIMIT - 1):
+        partway.admits("guessing", now + attempt, "1")
+    again = inbound.Gate(inbound.Passcode(PASSCODE), counted)
+    assert again.admits("guessing", now + 5, "1") == inbound.LOCKED
+
+
+def test_a_stored_lock_shows_in_status_until_it_ends(tmp_path):
+    path = tmp_path / inbound.GATE_NAME
+    gate = inbound.Gate(inbound.Passcode(PASSCODE), path)
+    now = time.time()
+    for attempt in range(inbound.FAILURE_LIMIT):
+        gate.admits("guessing", now + attempt)
+    asked = {
+        "AGENT_PARLEY_INBOUND": "telegram",
+        "AGENT_PARLEY_INBOUND_PASSCODE": PASSCODE,
+        "AGENT_PARLEY_NOTIFY": "telegram",
+        "AGENT_PARLEY_TELEGRAM_TOKEN": "t",
+        "AGENT_PARLEY_TELEGRAM_CHAT": "42",
+    }
+    received = inbound.reported(asked, tmp_path)
+    assert received["locked_until"] > now
+    line = cli.notification_line(
+        {"fault": "", "transports": ["telegram"]}, received
+    )
+    assert "inbound locked until" in line
+    assert inbound.reported(asked)["locked_until"] == 0.0
+
+
+def test_old_corrupt_or_far_future_gate_state_is_bounded(tmp_path):
+    path = tmp_path / inbound.GATE_NAME
+    now = time.time()
+    old = now - inbound.FAILURE_WINDOW - 1
+    path.write_text(
+        json.dumps({"failures": {"1": [old] * 4}, "until": {"2": now * 2}})
+    )
+    gate = inbound.Gate(inbound.Passcode(PASSCODE), path)
+    assert gate.admits("guessing", now, "1") == inbound.REFUSED
+    assert gate.locked(now, "2")
+    assert not gate.locked(now + inbound.LOCK_SECONDS + 1, "2")
+    path.write_text("not json")
+    clean = inbound.Gate(inbound.Passcode(PASSCODE), path)
+    assert not clean.locked(now, "1")
+    assert clean.admits(PASSCODE, now, "1") == inbound.ACCEPTED

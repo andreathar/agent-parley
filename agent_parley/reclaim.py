@@ -58,7 +58,7 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
-from agent_parley import forge, issues, pool, retirement, store
+from agent_parley import forge, issues, pool, process, retirement, store
 from agent_parley.lanes import extras
 from agent_parley.state import BridgeError, LockBusy, lock
 
@@ -91,6 +91,7 @@ OUTSIDE = "its worktree is outside the project state directory"
 UNREGISTERED = "the base checkout does not register its worktree"
 UNREADABLE = "Git could not inspect it"
 SESSION = "a session is running in it"
+UNLISTED = "the processes working in it could not be listed"
 IDLE = "an idle session is still running in it"
 CLAIMED = "it still holds a claim"
 UNCOMMITTED = "it holds uncommitted changes"
@@ -116,6 +117,7 @@ FOREIGN = (
 REFUSED = "Git refused to move it"
 FRESH = "it changed within the relocation grace period"
 NESTED = "another registered worktree sits inside it"
+CROSSDEVICE = "it sits on another filesystem than its destination"
 STRAYS = "strays"
 TEMPORARY = ("/tmp", "/var/tmp", "/dev/shm")
 REMOVABLE = frozenset(
@@ -323,34 +325,25 @@ def _busy(directory: Path, name: str) -> bool:
         return True
 
 
-def _occupied(path: Path) -> bool:
+def _occupied(path: Path) -> bool | None:
     """Reports whether any process works inside a worktree.
 
     Moving a directory out from under a process strands its shell or
     session, whoever started it, so every process whose working directory
-    is the worktree or lies inside it counts. Linux exposes that through
-    `/proc`; a host without it, such as macOS, reports none, and only the
-    owning lane's session lock guards the move there.
+    is the worktree or lies inside it counts. Linux reads that from
+    `/proc` and macOS from `lsof`.
 
     Args:
         path: Worktree about to be moved.
 
     Returns:
-        Whether a readable process has its working directory inside it.
+        Whether a process has its working directory inside it, or None
+        when the platform could not list working directories, as when
+        `lsof` is missing or times out. A caller treats None as occupied,
+        so the worktree is never moved blind.
     """
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return False
-    target = path.resolve()
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if Path(os.readlink(entry / "cwd")).is_relative_to(target):
-                return True
-        except OSError:
-            continue
-    return False
+    pids = process.cwd_pids(path)
+    return None if pids is None else bool(pids)
 
 
 def assess(
@@ -1112,7 +1105,7 @@ def strays(directory: Path, manifest: dict, *, sizes: bool) -> list[dict]:
                 entry,
                 busy=_busy(directory, owner)
                 if owner
-                else path.parent not in owned and _occupied(path),
+                else path.parent not in owned and _occupied(path) is not False,
                 retired=bool(owner)
                 and bool(participants[owner].get("retired")),
                 after=after,
@@ -1149,6 +1142,24 @@ def _free(folder: Path, name: str, taken: set[Path]) -> Path:
     return candidate
 
 
+def _device(path: Path) -> int | None:
+    """Returns the filesystem of a path or of its nearest existing ancestor.
+
+    Args:
+        path: A directory that may not exist yet.
+
+    Returns:
+        The `st_dev` of the path, or of the closest ancestor that exists,
+        or None when none can be read.
+    """
+    for candidate in (path, *path.parents):
+        try:
+            return os.stat(candidate).st_dev
+        except OSError:
+            continue
+    return None
+
+
 def relocations(directory: Path, manifest: dict) -> list[dict]:
     """Plans moving every stray worktree into the project state directory.
 
@@ -1165,6 +1176,9 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
     never moved. A taken name gets a numeric
     suffix. A move never deletes anything: Git renames the directory,
     so uncommitted edits, unpushed commits and ignored files travel with it.
+    Git cannot rename across filesystems, so one on another filesystem
+    than its destination, such as a `tmpfs` `/tmp`, passes the same
+    guards under `CROSSDEVICE` and is rebuilt there by `rebuild` instead.
     The base checkout, the lanes themselves, spares, a worktree already
     inside a lane, its `-wt` directory or the `strays` directory, and one
     whose directory is gone are not planned at all. One whose directory
@@ -1218,12 +1232,18 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
             reason = NESTED
         elif entry["locked"]:
             reason = LOCKED
-        elif (owner and _busy(directory, owner)) or _occupied(path):
+        elif owner and _busy(directory, owner):
+            reason = SESSION
+        elif (occupied := _occupied(path)) is None:
+            reason = UNLISTED
+        elif occupied:
             reason = SESSION
         elif time.time() - _used(path) < RELOCATE_AFTER:
             reason = FRESH
         elif _within(destination, path):
             reason = REFUSED
+        elif _device(path) != _device(destination):
+            reason = CROSSDEVICE
         else:
             reason = outside
         rows.append(
@@ -1232,22 +1252,24 @@ def relocations(directory: Path, manifest: dict) -> list[dict]:
                 "branch": entry["branch"],
                 "participant": owner,
                 "destination": str(destination),
-                "relocate": reason == outside,
+                "relocate": reason in (outside, CROSSDEVICE),
                 "reason": reason,
             }
         )
     return rows
 
 
-def relocate(root: str, row: dict) -> dict:
+def relocate(root: str, directory: Path, row: dict) -> dict:
     """Moves one planned worktree through Git's own refusals.
 
     `git worktree move` without force refuses a locked worktree, a
     destination that exists and a move across filesystems, so a change
-    made between the plan and the move leaves the worktree in place.
+    made between the plan and the move leaves the worktree in place. A
+    row planned under `CROSSDEVICE` is handed to `rebuild`.
 
     Args:
         root: Base checkout the worktree is registered with.
+        directory: Private project state directory holding checkpoints.
         row: One plan `relocations` produced.
 
     Returns:
@@ -1265,10 +1287,57 @@ def relocate(root: str, row: dict) -> dict:
         destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return refused
+    if row["reason"] == CROSSDEVICE:
+        return rebuild(root, directory, row)
     moved = _read(root, "worktree", "move", row["worktree"], str(destination))
     if moved is None:
         return refused
     return {**row, "moved": True}
+
+
+def rebuild(root: str, directory: Path, row: dict) -> dict:
+    """Recreates a worktree Git cannot rename onto another filesystem.
+
+    A recovery checkpoint of the worktree's index, uncommitted files and
+    commits is written first, and nothing is removed when it fails. Only
+    then is the worktree force-removed, which frees its branch, and added
+    again at the destination from that checkpoint. A worktree holding
+    ignored files other than regenerable tool output is left in place,
+    because the checkpoint cannot carry them.
+
+    Args:
+        root: Base checkout the worktree is registered with.
+        directory: Private project state directory holding checkpoints.
+        row: One `CROSSDEVICE` plan `relocations` produced.
+
+    Returns:
+        The row with whether it was rebuilt and the checkpoint written. A
+        refusal before the removal leaves the worktree in place; one after
+        it leaves the checkpoint, whose id the row names.
+    """
+    from agent_parley import recovery
+
+    refused = {**row, "relocate": False, "reason": REFUSED, "moved": False}
+    ignored = retirement.ignored_files(row["worktree"])
+    if ignored is None:
+        return refused
+    if kept := [name for name in ignored if not _regenerable(name)]:
+        return {**refused, "reason": IGNORED, "paths": kept}
+    try:
+        saved = recovery.preserve(directory, Path(row["worktree"]))
+    except (BridgeError, OSError):
+        return refused
+    refused["checkpoint"] = saved["id"]
+    removed = _read(root, "worktree", "remove", "--force", row["worktree"])
+    if removed is None:
+        return refused
+    try:
+        recovery.restore_preserved(
+            directory, Path(root), saved["id"], Path(row["destination"])
+        )
+    except (BridgeError, OSError):
+        return refused
+    return {**row, "moved": True, "checkpoint": saved["id"]}
 
 
 def prune(directory: Path, manifest: dict, now: float) -> list[str]:
@@ -1377,12 +1446,14 @@ def summary_line(summary: dict) -> str:
     """Renders what the last sweep measured for one project.
 
     Args:
-        summary: The state directory size and worktree counts the last
-            sweep published.
+        summary: The state directory size, worktree counts and refused
+            steps the last sweep published.
 
     Returns:
-        One line naming the state directory's size and the worktrees a
-        reclaim would remove, or an empty string before the first sweep.
+        One line naming the state directory's size, the worktrees a reclaim
+        would remove and, when the sweep refused any step, how many it
+        refused and the first refusal, or an empty string before the first
+        sweep.
     """
     if summary.get("state_bytes") is None:
         return ""
@@ -1392,7 +1463,31 @@ def summary_line(summary: dict) -> str:
     )
     if forced := summary.get("forceable"):
         line += f", {forced} more with --force"
+    errors = [
+        row for row in summary.get("errors") or [] if isinstance(row, dict)
+    ]
+    if errors:
+        first = errors[0]
+        line += (
+            f"; sweep steps refused: {len(errors)}, first "
+            f"{first.get('step')}: {first.get('error')}"
+        )
     return line
+
+
+def restore_command(identifier: str, destination: str) -> str:
+    """Renders the command that puts one preserved worktree back.
+
+    Args:
+        identifier: The `worktree-*` checkpoint identifier.
+        destination: Path the worktree would be recreated at.
+
+    Returns:
+        A shell-quoted `agent-parley gc --restore` command line.
+    """
+    return shlex.join(
+        ["agent-parley", "gc", "--restore", identifier, "--to", destination]
+    )
 
 
 def lines(rows: list[dict]) -> list[str]:
@@ -1420,7 +1515,13 @@ def lines(rows: list[dict]) -> list[str]:
                 verb = f"to move to {row['destination']}"
             else:
                 verb = "left in place"
-            rendered.append(f"{label}: {verb} ({row['reason']})")
+            detail = f"; {', '.join(row['paths'])}" if row.get("paths") else ""
+            if "checkpoint" in row and not row.get("moved"):
+                detail += (
+                    f"; its work is in checkpoint {row['checkpoint']}: "
+                    f"{restore_command(row['checkpoint'], row['destination'])}"
+                )
+            rendered.append(f"{label}: {verb} ({row['reason']}){detail}")
             continue
         if row.get("removed"):
             verb = "reclaimed"
@@ -1435,6 +1536,11 @@ def lines(rows: list[dict]) -> list[str]:
             bundled = row["reason"] in BUNDLED
             action = "bundled to" if bundled else "forced after"
             detail += f"; {action} checkpoint {row['checkpoint']}"
+            if row.get("removed"):
+                detail += (
+                    f", restore with "
+                    f"{restore_command(row['checkpoint'], row['worktree'])}"
+                )
         if row.get("remedy"):
             detail += f"; {row['remedy']}"
         rendered.append(f"{label}: {verb} ({row['reason']}){detail}")

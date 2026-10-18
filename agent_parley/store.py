@@ -33,6 +33,8 @@ SCHEMA_ABSENT = "absent"
 SCHEMA_BEHIND = "needs migration"
 SCHEMA_CURRENT = "ok"
 SCHEMA_UNSUPPORTED = "unsupported"
+SCHEMA_DAMAGED = "damaged"
+DAMAGED_SCHEMA = -1
 SCHEMA_USABLE = frozenset({SCHEMA_ABSENT, SCHEMA_CURRENT})
 BUSY_TIMEOUT = 5.0
 MAX_BODY_BYTES = 4096
@@ -40,6 +42,46 @@ MAX_RESULT_BYTES = 8192
 MAX_RECIPIENTS = 16
 MAX_ROSTER = 32
 MAX_EVENT_ROWS = 2000
+RETENTION_DAYS = 90
+PRUNE_BATCH = 5000
+SETTLED_BEFORE = "datetime(:epoch,'unixepoch')"
+UNATTACHED = "m.body_md NOT LIKE '%[attachment message-%'"
+PRUNES = (
+    (
+        "message_recipients",
+        "DELETE FROM message_recipients WHERE rowid IN (SELECT r.rowid FROM "
+        "message_recipients r JOIN messages m ON m.id=r.message_id WHERE "
+        f"m.created_ts<{SETTLED_BEFORE} AND m.decision=0 AND {UNATTACHED} "
+        "AND (r.ack_ts IS NOT NULL OR (r.read_ts IS NOT NULL "
+        "AND m.ack_required=0)) LIMIT :limit)",
+    ),
+    (
+        "messages",
+        "DELETE FROM messages WHERE id IN (SELECT m.id FROM messages m WHERE "
+        f"m.created_ts<{SETTLED_BEFORE} AND m.decision=0 AND {UNATTACHED} "
+        "AND m.id<(SELECT max(id) FROM messages) AND NOT EXISTS (SELECT 1 "
+        "FROM message_recipients r WHERE r.message_id=m.id) LIMIT :limit)",
+    ),
+    (
+        "file_reservations",
+        "DELETE FROM file_reservations WHERE id IN (SELECT id FROM "
+        f"file_reservations WHERE released_ts<{SETTLED_BEFORE} "
+        "AND id<(SELECT max(id) FROM file_reservations) LIMIT :limit)",
+    ),
+    (
+        "reservation_requests",
+        "DELETE FROM reservation_requests WHERE id IN (SELECT id FROM "
+        "reservation_requests WHERE "
+        f"coalesce(granted_ts,cancelled_ts)<{SETTLED_BEFORE} "
+        "AND id<(SELECT max(id) FROM reservation_requests) LIMIT :limit)",
+    ),
+    (
+        "scheduled_deliveries",
+        "DELETE FROM scheduled_deliveries WHERE id IN (SELECT id FROM "
+        "scheduled_deliveries WHERE coalesce(delivered_ts,cancelled_ts)<:epoch "
+        "AND id<(SELECT max(id) FROM scheduled_deliveries) LIMIT :limit)",
+    ),
+)
 REFUSAL_SECONDS = 86400.0
 MAX_THREAD_PAGE = 10
 MAX_SEARCH_HITS = 5
@@ -244,6 +286,24 @@ def missing() -> BridgeError:
     return BridgeError(MISSING, next_command="agent-parley up")
 
 
+def present(home: Path) -> bool:
+    """Reports whether a store with content exists to be read.
+
+    A zero-byte file, such as the one a read left behind before 0.19.0,
+    declares no tables, so it is read as no store at all.
+
+    Args:
+        home: Private bridge state root.
+
+    Returns:
+        True when the store file exists and is not empty.
+    """
+    try:
+        return (home / DATABASE).stat().st_size > 0
+    except FileNotFoundError:
+        return False
+
+
 @contextlib.contextmanager
 def connect(
     home: Path, *, write: bool = False, timeout: float = BUSY_TIMEOUT
@@ -268,7 +328,17 @@ def connect(
 
     A transaction that rolls back also runs every removal registered in its
     ``undo`` list, so no file written for it outlives it.
+
+    A read never creates the store. SQLite creates a missing database file on
+    open, and an empty file left by a read made later readers query tables
+    that were never created.
+
+    Raises:
+        BridgeError: If a read finds no store or an empty file, naming
+            ``agent-parley up``.
     """
+    if not write and not present(home):
+        raise missing()
     db = sqlite3.connect(
         home / DATABASE, timeout=0 if write else timeout, factory=Transaction
     )
@@ -1216,29 +1286,37 @@ def mark_read(home: Path, root: str, name: str, ids: list[int]) -> int:
 
 
 def feed(home: Path, root: str, after: int = 0, limit: int = 3) -> dict:
-    """Reads the newest live project feed entries after a cursor.
+    """Reads one page of live project feed entries after a cursor.
 
     An entry is live while no newer entry from the same sender carries the
-    same non-empty topic; a replaced entry is only counted.
+    same non-empty topic; a replaced entry is only counted. A reader with no
+    cursor, such as a fresh session, gets the newest live entries and owes
+    no backlog. A reader with a cursor gets the oldest live entries after
+    it, so moving the cursor to the newest returned entry shows every live
+    entry over successive reads instead of skipping those older than the
+    newest page.
 
     Args:
         home: Private bridge state root.
         root: Canonical project key registered with the store.
-        after: Last feed entry this reader already saw.
+        after: Last feed entry this reader already saw, or 0 for none.
         limit: Most entries to return.
 
     Returns:
         ``items`` newest first, each with its identifier, sender, topic,
-        subject and creation time, and ``superseded``, the number of entries
-        after the cursor that a newer one replaced.
+        subject and creation time; ``superseded``, the number of replaced
+        entries after the cursor, up to the newest returned entry when a
+        cursor is set; and ``omitted``, the number of live entries after a
+        cursor's page left for the next read, always 0 without a cursor.
     """
     if not (home / DATABASE).exists():
-        return {"items": [], "superseded": 0}
+        return {"items": [], "superseded": 0, "omitted": 0}
     replaced = (
         "EXISTS (SELECT 1 FROM messages n WHERE n.project_id=m.project_id "
         "AND n.feed=1 AND n.sender_id=m.sender_id AND n.topic=m.topic "
         "AND m.topic<>'' AND n.id>m.id)"
     )
+    fresh = after <= 0
     with connect(home) as db:
         rows = db.execute(
             "SELECT m.id,a.name AS sender,m.topic,substr(m.subject,1,80) "
@@ -1246,16 +1324,22 @@ def feed(home: Path, root: str, after: int = 0, limit: int = 3) -> dict:
             "JOIN agents a ON a.id=m.sender_id "
             "JOIN projects p ON p.id=m.project_id WHERE p.human_key=? "
             f"AND m.feed=1 AND m.id>? AND NOT {replaced} "
-            "ORDER BY m.id DESC LIMIT ?",
+            f"ORDER BY m.id {'DESC' if fresh else 'ASC'} LIMIT ?",
             (root, after, limit),
         ).fetchall()
-        superseded = db.execute(
-            "SELECT count(*) FROM messages m JOIN projects p "
-            "ON p.id=m.project_id WHERE p.human_key=? AND m.feed=1 "
-            f"AND m.id>? AND {replaced}",
-            (root, after),
-        ).fetchone()[0]
-    return {"items": [dict(row) for row in rows], "superseded": superseded}
+        newest = rows[-1]["id"] if rows and not fresh else 2**63 - 1
+        superseded, live = db.execute(
+            f"SELECT coalesce(sum({replaced} AND m.id<=?),0),"
+            f"coalesce(sum(NOT {replaced}),0) FROM messages m "
+            "JOIN projects p ON p.id=m.project_id WHERE p.human_key=? "
+            "AND m.feed=1 AND m.id>?",
+            (newest, root, after),
+        ).fetchone()
+    return {
+        "items": [dict(row) for row in (rows if fresh else reversed(rows))],
+        "superseded": superseded,
+        "omitted": 0 if fresh else live - len(rows),
+    }
 
 
 def _ack_window(directory: Path | None) -> float:
@@ -1497,7 +1581,7 @@ def _send(
             MAX_BODY_BYTES,
             actor["name"],
             sorted(readers),
-            _settled_attachments(db, actor, message_id),
+            _settled_attachments(db, actor, message_id, directory),
         )
         db.execute(
             "UPDATE messages SET body_md=? WHERE id=?", (stored, message_id)
@@ -1508,36 +1592,98 @@ def _send(
 
 
 def _settled_attachments(
-    db: sqlite3.Connection, actor: dict, message_id: int | None
+    db: sqlite3.Connection,
+    actor: dict,
+    message_id: int | None,
+    directory: Path,
 ) -> list[str]:
     """Lists the sender's attachment-bearing messages every recipient read.
 
-    Messages are never pruned, so this is what lets a lane's attachment
-    allowance free again. A recipient whose copy was superseded counts as
-    finished with it; a message with no recipient row, such as a feed-only
-    post, and a decision, which every participant may read, are never
-    listed. The list is oldest first so the longest-settled
-    bodies are released before newer ones.
+    This is what lets a lane's attachment allowance free again. A recipient
+    whose copy was superseded counts as finished with it; a message with no
+    recipient row, such as a feed-only post, and a decision, which every
+    participant may read, are never listed. The list is oldest first so the
+    longest-settled bodies are released before newer ones.
+
+    Only messages whose attachment the sender still holds are examined,
+    read from the allowance index, so the query runs while the write lock
+    is held at a cost bounded by the sender's live attachments rather than
+    by every message it ever wrote.
 
     Args:
         db: Open store connection.
         actor: Sending participant.
         message_id: Message being sent, which is never listed.
+        directory: Private state directory of the sender's project.
 
     Returns:
         Attachment references of those messages, oldest first.
     """
+    ids = [
+        int(number)
+        for ref in attachments.held(directory, actor["name"])
+        if (number := ref.removeprefix("message-")) != ref and number.isdigit()
+    ]
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
     rows = db.execute(
-        "SELECT m.id FROM messages m WHERE m.sender_id=? AND m.id IS NOT ? "
-        "AND m.decision=0 AND m.body_md LIKE '%[attachment message-%' "
+        f"SELECT m.id FROM messages m WHERE m.id IN ({marks}) "
+        "AND m.sender_id=? AND m.id IS NOT ? AND m.decision=0 "
         "AND EXISTS ("
         "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id) "
         "AND NOT EXISTS ("
         "SELECT 1 FROM message_recipients r WHERE r.message_id=m.id "
         "AND r.read_ts IS NULL AND r.superseded_ts IS NULL) ORDER BY m.id",
-        (actor["id"], message_id),
+        (*ids, actor["id"], message_id),
     ).fetchall()
     return [attachments.reference("message", row[0]) for row in rows]
+
+
+def prune(
+    home: Path, now: float, keep_days: float = RETENTION_DAYS
+) -> dict[str, int]:
+    """Deletes settled coordination rows older than the retention window.
+
+    A recipient copy goes once it is acknowledged, or read when the message
+    asks for no acknowledgement; a message goes once no recipient copy is
+    left. Unread and unacknowledged mail therefore stays at any age, and so
+    do decisions. A released reservation, an answered reservation request
+    and a delivered or cancelled scheduled item go once they are older than
+    the window; a live reservation, a queued request and a pending item
+    stay.
+
+    A message that carries an attachment marker stays with its recipient
+    copies. Its search entry was indexed from the full body, which the
+    message row no longer holds, and deleting it would hand the search index
+    a body it never indexed; its attachment stays bounded by the writer's
+    allowance instead. The newest row of every table stays too, because
+    SQLite gives the next row the highest identifier plus one, and a reused
+    message identifier would name an earlier message's attachment.
+
+    Each batch of at most `PRUNE_BATCH` rows is its own write transaction,
+    so a large first pass never holds the write lock for long. Freed pages
+    stay in the file for reuse.
+
+    Args:
+        home: Private bridge state root.
+        now: Current wall-clock time in seconds since the epoch.
+        keep_days: Age in days a settled row must reach before it goes.
+
+    Returns:
+        Number of rows deleted from each table.
+    """
+    counts = {table: 0 for table, _ in PRUNES}
+    if not present(home):
+        return counts
+    bounds = {"epoch": now - keep_days * 86400, "limit": PRUNE_BATCH}
+    for table, statement in PRUNES:
+        deleted = PRUNE_BATCH
+        while deleted == PRUNE_BATCH:
+            with connect(home, write=True) as db:
+                deleted = db.execute(statement, bounds).rowcount
+            counts[table] += deleted
+    return counts
 
 
 def _roster(db: sqlite3.Connection, actor: dict) -> dict:
@@ -1911,7 +2057,7 @@ def named_resource(pattern: str) -> bool:
     return bool(separator) and "/" not in scheme
 
 
-def overlapping(pattern: str, other: str) -> bool:
+def overlapping(pattern: str, other: str, *, fold: bool = False) -> bool:
     """Reports whether two reservation keys can name the same thing.
 
     Named resources overlap only when spelled identically. Paths overlap when
@@ -1923,15 +2069,23 @@ def overlapping(pattern: str, other: str) -> bool:
     ever the text being matched, never a compiled pattern, which gives the
     same answer without one regular expression per dirty path.
 
+    A project on a case-insensitive file system folds case, so two paths
+    that open the same file overlap however each is spelled. Named
+    resources are still compared exactly.
+
     Args:
         pattern: Reservation key or repository-relative path.
         other: Reservation key it is compared against.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         Whether the two keys overlap.
     """
     if named_resource(pattern) or named_resource(other):
         return pattern == other
+    if fold:
+        pattern = pattern.casefold()
+        other = other.casefold()
     pattern_glob = any(c in pattern for c in "*?[")
     other_glob = any(c in other for c in "*?[")
     return (
@@ -1944,7 +2098,9 @@ def overlapping(pattern: str, other: str) -> bool:
     )
 
 
-def overlapping_paths(paths: list[str], patterns: list[str]) -> set[str]:
+def overlapping_paths(
+    paths: list[str], patterns: list[str], *, fold: bool = False
+) -> set[str]:
     """Names the paths that overlap any pattern, as ``overlapping`` judges.
 
     A dirty checkout can list tens of thousands of paths, and one call per
@@ -1955,17 +2111,34 @@ def overlapping_paths(paths: list[str], patterns: list[str]) -> set[str]:
     collides with every globbed path. A named resource overlaps only its own
     spelling, so either side being one is answered by a set lookup; only a
     globbed path checked against a plain pattern uses the pairwise rule.
+    Folding case answers the same question over casefolded paths and
+    reports each match in the spelling the caller gave.
 
     Args:
         paths: Reservation keys or repository-relative paths.
         patterns: Reservation keys each path is compared against.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
-        Every path that ``overlapping(path, pattern)`` reports for some
-        pattern.
+        Every path that ``overlapping(path, pattern, fold=fold)`` reports for
+        some pattern.
     """
     if not patterns:
         return set()
+    if fold:
+        spellings: dict[str, list[str]] = {}
+        for path in paths:
+            key = path if named_resource(path) else path.casefold()
+            spellings.setdefault(key, []).append(path)
+        folded = [
+            pattern if named_resource(pattern) else pattern.casefold()
+            for pattern in patterns
+        ]
+        return {
+            path
+            for key in overlapping_paths(list(spellings), folded)
+            for path in spellings[key]
+        }
     globbed = [
         path for path in paths if "*" in path or "?" in path or "[" in path
     ]
@@ -2225,7 +2398,11 @@ def _reclaim_notice(
 
 
 def _conflicts(
-    db: sqlite3.Connection, actor: dict, paths: list[str], exclusive: bool
+    db: sqlite3.Connection,
+    actor: dict,
+    paths: list[str],
+    exclusive: bool,
+    fold: bool = False,
 ) -> tuple[list[sqlite3.Row], list[dict]]:
     """Names every peer lease that blocks one batch of keys.
 
@@ -2234,6 +2411,7 @@ def _conflicts(
         actor: Authenticated project and lane.
         paths: Normalized keys the batch asks for.
         exclusive: Whether the batch asks exclusively.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         Every live peer lease of this project, and one conflict entry per
@@ -2253,7 +2431,7 @@ def _conflicts(
         for lease in leases:
             other = lease["path_pattern"]
             if (exclusive or lease["exclusive"]) and overlapping(
-                pattern, other
+                pattern, other, fold=fold
             ):
                 conflict = {"path": pattern, "owner": lease["name"]}
                 if lease["reason"]:
@@ -2304,6 +2482,7 @@ def _reserve(
     declared: frozenset[str] | None = None,
     claim: str = "",
     commits: list[list[str]] | None = None,
+    fold: bool = False,
 ) -> dict:
     """Grants all requested leases or none; two globs conservatively overlap.
 
@@ -2346,6 +2525,8 @@ def _reserve(
             history can follow one piece of work. Empty records no claim.
         commits: Files per recent commit of the base checkout, read before
             the transaction opened, or None when no history is available.
+        fold: Whether paths are compared without regard to case, as on a
+            case-insensitive file system.
 
     Returns:
         The granted leases, or the conflicts that granted nothing. A grant
@@ -2360,7 +2541,7 @@ def _reserve(
     """
     paths, ttl, exclusive, reason = _keys(args, declared)
     _reclaim(db, actor["project_id"])
-    leases, conflicts = _conflicts(db, actor, paths, exclusive)
+    leases, conflicts = _conflicts(db, actor, paths, exclusive, fold)
     if conflicts:
         return _refusal(conflicts)
     return _grant(
@@ -2459,6 +2640,7 @@ def _request(
     declared: frozenset[str] | None = None,
     claim: str = "",
     commits: list[list[str]] | None = None,
+    fold: bool = False,
 ) -> dict:
     """Takes the leases that are free and queues a request for the rest.
 
@@ -2485,6 +2667,7 @@ def _request(
             claim.
         commits: Files per recent commit of the base checkout, or None when
             no history is available.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         The granted leases and an empty queue, or the conflicts that granted
@@ -2497,13 +2680,13 @@ def _request(
     """
     paths, ttl, exclusive, reason = _keys(args, declared)
     _reclaim(db, actor["project_id"])
-    leases, conflicts = _conflicts(db, actor, paths, exclusive)
+    leases, conflicts = _conflicts(db, actor, paths, exclusive, fold)
     if not conflicts:
         granted = _grant(
             db, actor, paths, ttl, exclusive, reason, claim, leases, commits
         )
         return {**granted, "queued": []}
-    queued = _queue(db, actor, conflicts, ttl, exclusive, reason, claim)
+    queued = _queue(db, actor, conflicts, ttl, exclusive, reason, claim, fold)
     return _refusal(conflicts, queued)
 
 
@@ -2515,6 +2698,7 @@ def _queue(
     exclusive: bool,
     reason: str,
     claim: str,
+    fold: bool = False,
 ) -> list[dict]:
     """Records this lane's place behind the holders of the blocked keys.
 
@@ -2526,6 +2710,7 @@ def _queue(
         exclusive: Whether the batch was asked for exclusively.
         reason: Declared scope, carried onto the lease a grant writes.
         claim: Claim identifier the lane holds, or empty for none.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         One entry per blocked key, in key order, naming the request, the
@@ -2584,7 +2769,7 @@ def _queue(
             for row in queue
             if row["id"] < waiting["id"]
             and row["agent_id"] != actor["id"]
-            and overlapping(path, row["path_pattern"])
+            and overlapping(path, row["path_pattern"], fold=fold)
         )
         entries.append(
             {
@@ -2627,7 +2812,7 @@ def _cancel_request(db: sqlite3.Connection, actor: dict, args: dict) -> dict:
     return {"cancelled": cancelled}
 
 
-def _release(db: sqlite3.Connection, actor: dict) -> dict:
+def _release(db: sqlite3.Connection, actor: dict, fold: bool = False) -> dict:
     """Releases this lane's leases and grants what a peer queued for them.
 
     The release, the grant and the notice that names it are one transaction,
@@ -2637,6 +2822,7 @@ def _release(db: sqlite3.Connection, actor: dict) -> dict:
     Args:
         db: Open transaction owned by the caller.
         actor: Authenticated project and lane.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         How many leases were released and, as ``granted``, one entry per
@@ -2653,7 +2839,9 @@ def _release(db: sqlite3.Connection, actor: dict) -> dict:
         "WHERE agent_id=? AND released_ts IS NULL",
         (actor["id"],),
     ).rowcount
-    granted = _grant_queued(db, actor, sorted({row[0] for row in held}))
+    granted = _grant_queued(
+        db, actor, sorted({row[0] for row in held}), fold=fold
+    )
     return {"released": released, "granted": granted}
 
 
@@ -2663,6 +2851,7 @@ def _grant_queued(
     released: list[str],
     reclaimed: bool = False,
     reason: str = "",
+    fold: bool = False,
 ) -> list[dict]:
     """Hands each released key to the lane that queued for it first.
 
@@ -2683,6 +2872,7 @@ def _grant_queued(
             says so the taking lane knows the holder never handed over.
         reason: Why the runtime released the keys on the holder's behalf,
             stated in the notice in place of the expiry, or empty.
+        fold: Whether paths are compared without regard to case.
 
     Returns:
         One entry per lane granted something, naming that lane, the keys it
@@ -2713,7 +2903,7 @@ def _grant_queued(
     first: dict[str, int] = {}
     for request in queued:
         pattern = request["path_pattern"]
-        if not any(overlapping(pattern, key) for key in released):
+        if not any(overlapping(pattern, key, fold=fold) for key in released):
             continue
         if any(
             owner == request["agent_id"]
@@ -2730,7 +2920,7 @@ def _grant_queued(
         if any(
             owner != request["agent_id"]
             and (request["exclusive"] or exclusive)
-            and overlapping(pattern, key)
+            and overlapping(pattern, key, fold=fold)
             for owner, key, exclusive in held
         ):
             continue
@@ -2948,17 +3138,131 @@ def schema_version(home: Path) -> int:
         home: Private bridge state root.
 
     Returns:
-        The declared schema, or zero when no store has been created yet or the
-        file cannot be opened. Reading never creates or upgrades a store.
+        The declared schema, zero when no store has been created yet or the
+        file cannot be opened for now, and `DAMAGED_SCHEMA` when the file
+        exists but SQLite cannot read it as a database. Reading never creates
+        or upgrades a store.
     """
     path = home / DATABASE
     if not path.exists():
         return 0
     try:
-        with contextlib.closing(sqlite3.connect(path)) as db:
+        with contextlib.closing(_reader(path)) as db:
             return int(db.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.Error:
-        return 0
+        return DAMAGED_SCHEMA if damage(home) else 0
+
+
+def damage(home: Path) -> str:
+    """Names why an existing store cannot be read as a database.
+
+    A busy or unopenable file is an operational failure that passes, so only
+    the errors SQLite raises for a file that is not a readable database
+    count as damage.
+
+    Args:
+        home: Private bridge state root.
+
+    Returns:
+        The SQLite message for a damaged store, or an empty string when the
+        store is missing or readable.
+    """
+    path = home / DATABASE
+    if not path.exists():
+        return ""
+    try:
+        with contextlib.closing(_reader(path)) as db:
+            db.execute("PRAGMA user_version").fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    except sqlite3.DatabaseError as exc:
+        return str(exc)
+    return ""
+
+
+def _reader(path: Path, timeout: float = 5.0) -> sqlite3.Connection:
+    """Opens a store file read-only, so that probing it changes nothing.
+
+    Closing the last writable connection to a file SQLite cannot read
+    deletes its ``-wal`` file, which may hold the only intact pages, so
+    every probe of a store that may be damaged reads through this instead.
+
+    Args:
+        path: Store database file.
+        timeout: Seconds to wait for a lock held by another connection.
+
+    Returns:
+        A read-only connection.
+    """
+    return sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro", timeout=timeout, uri=True
+    )
+
+
+def _integrity(path: Path) -> str:
+    """Runs SQLite's quick integrity check over one store file.
+
+    Args:
+        path: Store database file.
+
+    Returns:
+        The failure SQLite reports, or an empty string when the check passes.
+
+    Raises:
+        BridgeError: If the store is busy and cannot be checked now.
+    """
+    try:
+        with contextlib.closing(_reader(path, BUSY_TIMEOUT)) as db:
+            rows = [str(row[0]) for row in db.execute("PRAGMA quick_check")]
+    except sqlite3.OperationalError as exc:
+        raise BridgeError(f"Could not check the store {path}: {exc}") from exc
+    except sqlite3.DatabaseError as exc:
+        return str(exc)
+    return "" if rows == ["ok"] else "; ".join(rows[:3])
+
+
+def repair(home: Path) -> tuple[str, list[Path]]:
+    """Sets a damaged store aside and creates an empty one in its place.
+
+    The check and the move run under the store lock, so no process creates
+    or migrates the store meanwhile. The database and its ``-wal`` and
+    ``-shm`` side files move to ``<name>.corrupt-<unix time>`` beside it,
+    never over an earlier copy and never deleted, so the bytes stay
+    available for manual salvage. A store that passes the check is left
+    untouched. The repair runs only on an explicit operator command.
+
+    Args:
+        home: Private bridge state root.
+
+    Returns:
+        The integrity failure found, or an empty string when the store
+        passed or does not exist, and the paths the damaged files moved to.
+
+    Raises:
+        BridgeError: If the store is busy and cannot be checked now.
+    """
+    path = home / DATABASE
+    kept: list[Path] = []
+    with lock(home / "store.lock"):
+        fault = (damage(home) or _integrity(path)) if path.exists() else ""
+        if fault:
+            names = [
+                name
+                for name in (DATABASE, f"{DATABASE}-wal", f"{DATABASE}-shm")
+                if (home / name).exists()
+            ]
+            stamp = int(time.time())
+            while any(
+                (home / f"{name}.corrupt-{stamp}").exists() for name in names
+            ):
+                stamp += 1
+            for name in names:
+                target = home / f"{name}.corrupt-{stamp}"
+                (home / name).replace(target)
+                kept.append(target)
+    if fault:
+        initialize(home)
+    return fault, kept
 
 
 def schema_state(schema: int) -> str:
@@ -2976,9 +3280,12 @@ def schema_state(schema: int) -> str:
     Returns:
         `SCHEMA_ABSENT` when no store has been created, `SCHEMA_CURRENT` when
         the store matches this build, `SCHEMA_BEHIND` when it predates this
-        build and has not been migrated, and `SCHEMA_UNSUPPORTED` when a newer
-        build wrote it, which is refused rather than downgraded.
+        build and has not been migrated, `SCHEMA_UNSUPPORTED` when a newer
+        build wrote it, which is refused rather than downgraded, and
+        `SCHEMA_DAMAGED` when the file exists but cannot be read.
     """
+    if schema == DAMAGED_SCHEMA:
+        return SCHEMA_DAMAGED
     if not schema:
         return SCHEMA_ABSENT
     if schema < SCHEMA_VERSION:
@@ -3006,6 +3313,8 @@ def remedy(state: str) -> str:
         return protocol.MIGRATE
     if state == SCHEMA_UNSUPPORTED:
         return protocol.UPGRADE
+    if state == SCHEMA_DAMAGED:
+        return protocol.REPAIR
     return ""
 
 
@@ -3069,6 +3378,11 @@ def reconcile(home: Path, cause: str = "") -> str:
         )
     if state == SCHEMA_UNSUPPORTED:
         return f"Store schema {schema} is newer; {needed}. {protocol.UPGRADE}"
+    if state == SCHEMA_DAMAGED:
+        return (
+            f"Store {home / DATABASE} is damaged ({damage(home)}); "
+            f"{protocol.REPAIR}"
+        )
     return ""
 
 
@@ -3170,7 +3484,9 @@ def _dispatch(
     only a state directory can resolve, so it is read here and handed to the
     tool rather than looked up inside the transaction. The co-change history
     a reservation is forecast against is read the same way, before the
-    transaction, so a Git read never holds the store's write lock.
+    transaction, so a Git read never holds the store's write lock. Whether
+    the checkout ignores case is read from the manifest the same way for
+    the tools that compare reservation keys.
 
     A recommendation reads the ledger, the recorded plan and, best effort, the
     forge. It writes nothing and its slowest reading is another process, so it
@@ -3205,9 +3521,13 @@ def _dispatch(
         if tool in ATTACHED
         else None
     )
+    fold = tool in (
+        *RESERVING,
+        "release_file_reservations",
+    ) and case_insensitive(home, str(actor.get("project", "")))
     with connect(home, write=tool not in READ_ONLY) as db:
         result = _serve(
-            db, actor, tool, args, declared, claim, commits, directory
+            db, actor, tool, args, declared, claim, commits, directory, fold
         )
         if tool in RESERVING and result.get("conflicts"):
             _record_refusals(db, actor, result["conflicts"])
@@ -3246,6 +3566,12 @@ def _recommended(home: Path, actor: dict, args: dict) -> dict:
     reserves nothing, so a lane still takes the issue it chooses through the
     explicit claim and still races a peer that chose the same one.
 
+    The ranking reads the same published leads `issue next` reads: an issue
+    a peer's published work names ranks last and the lead this lane's own
+    publication names ranks first, so lanes in session spread out the same
+    way lanes reading the command do. The supervisor module is imported
+    lazily so the hook path that imports this module never pays for it.
+
     Args:
         home: Private bridge state root.
         actor: Authenticated project and lane.
@@ -3269,8 +3595,22 @@ def _recommended(home: Path, actor: dict, args: dict) -> dict:
         1,
         recommend.MAX_SHORTLIST,
     )
+    from agent_parley import supervision
+
     held = active_reservations(home, root)
     held.pop(actor["name"], None)
+    try:
+        manifest = roster.read(directory)
+    except (BridgeError, OSError, ValueError):
+        manifest = {"participants": {}}
+    key = next(
+        (
+            name
+            for name, entry in manifest["participants"].items()
+            if entry.get("display") == actor["name"]
+        ),
+        "",
+    )
     return recommend.shortlist(
         directory,
         root,
@@ -3279,6 +3619,9 @@ def _recommended(home: Path, actor: dict, args: dict) -> dict:
         held,
         overlapping,
         limit,
+        supervision.named_leads(directory, manifest, key),
+        supervision.own_lead(directory, key) if key else "",
+        key,
     )
 
 
@@ -3465,6 +3808,27 @@ def declared_resources(home: Path, root: str) -> frozenset[str] | None:
     except (BridgeError, OSError, ValueError):
         return None
     return frozenset(resources) if resources else None
+
+
+def case_insensitive(home: Path, root: str) -> bool:
+    """Reads whether a project's checkout ignores case in file names.
+
+    Args:
+        home: Private bridge state root.
+        root: Canonical project key recorded in the manifest.
+
+    Returns:
+        Whether the manifest records ``case_insensitive``. An unregistered
+        project or an unreadable manifest reports False, which keeps the
+        exact comparison every project used before the flag existed.
+    """
+    directory = roster.locate(home, root) if root else None
+    if directory is None:
+        return False
+    try:
+        return roster.case_insensitive(roster.read(directory))
+    except (BridgeError, OSError, ValueError):
+        return False
 
 
 def cochange_history(home: Path, root: str) -> list[list[str]]:
@@ -3766,6 +4130,7 @@ def _serve(
     claim: str = "",
     commits: list[list[str]] | None = None,
     directory: Path | None = None,
+    fold: bool = False,
 ) -> dict:
     """Applies one validated coordination tool to the open transaction.
 
@@ -3793,6 +4158,8 @@ def _serve(
             reservation forecast, or None when none was read.
         directory: Project state directory attachments live under, or None
             when the project has no registered manifest.
+        fold: Whether reservation paths are compared without regard to
+            case, as the manifest records for a case-insensitive checkout.
 
     Returns:
         The tool result.
@@ -3808,14 +4175,16 @@ def _serve(
     key = retries.validate(args.get("idempotency_key"))
     if not key or tool not in RETRIED:
         return _effect(
-            db, actor, tool, args, declared, claim, commits, directory
+            db, actor, tool, args, declared, claim, commits, directory, fold
         )
     fingerprint = retries.digest(
         tool, {name: args.get(name) for name in RETRIED[tool]}
     )
     if recorded := _recorded(db, actor, tool, key):
         return retries.replayed(recorded, tool, key, fingerprint)
-    result = _effect(db, actor, tool, args, declared, claim, commits, directory)
+    result = _effect(
+        db, actor, tool, args, declared, claim, commits, directory, fold
+    )
     _retain(db, actor, tool, key, fingerprint, retries.SERVED, result)
     return result
 
@@ -3829,6 +4198,7 @@ def _effect(
     claim: str,
     commits: list[list[str]] | None = None,
     directory: Path | None = None,
+    fold: bool = False,
 ) -> dict:
     """Performs the effect of one coordination tool without retry bookkeeping.
 
@@ -3845,6 +4215,8 @@ def _effect(
             reservation forecast, or None when none was read.
         directory: Project state directory attachments live under, or None
             when the project has no registered manifest.
+        fold: Whether reservation paths are compared without regard to
+            case, as the manifest records for a case-insensitive checkout.
 
     Returns:
         The tool result.
@@ -3878,13 +4250,13 @@ def _effect(
     if tool == "search_decisions":
         return _decisions(db, actor, args)
     if tool == "file_reservation_paths":
-        return _reserve(db, actor, args, declared, claim, commits)
+        return _reserve(db, actor, args, declared, claim, commits, fold)
     if tool == "request_reservation":
-        return _request(db, actor, args, declared, claim, commits)
+        return _request(db, actor, args, declared, claim, commits, fold)
     if tool == "cancel_reservation_request":
         return _cancel_request(db, actor, args)
     if tool == "release_file_reservations":
-        return _release(db, actor)
+        return _release(db, actor, fold)
     if tool in ("acknowledge_message", "mark_message_read"):
         message = _number(args.get("message_id"), "message_id", 1, 2**63 - 1)
         ack = tool == "acknowledge_message"
@@ -5561,7 +5933,7 @@ def active_reservations(home: Path, root: str) -> dict[str, list[str]]:
         and still reported as stale elsewhere, but the paths it names no
         longer read as reserved for the purpose of naming a collision.
     """
-    if not (home / DATABASE).exists():
+    if not present(home):
         return {}
     held: dict[str, list[str]] = {}
     with connect(home) as db:

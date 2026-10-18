@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -83,6 +84,47 @@ def test_two_polls_before_a_read_keep_both_batches(bridge, polled):
     assert not published.exists()
 
 
+def test_a_notice_only_batch_stays_until_the_lane_acts(
+    bridge, polled, monkeypatch
+):
+    directory = Path(polled["lanes"]["helper"]).parent
+    published = delivery.mail_file(directory, "helper")
+    delivery.deliver(bridge.home, directory, "helper")
+    mark(
+        bridge,
+        polled,
+        checkpoints.activity(directory, "helper")["batches"][0]["ids"],
+    )
+    offer = "Take over issue #7 from claude."
+    write_json(
+        directory / "helper-work.json", {"offer": {"id": "o7", "text": offer}}
+    )
+    monkeypatch.setattr(
+        delivery.supervision,
+        "readings",
+        lambda home, manifest: ({"helper": ["src/app.py"]}, {}),
+    )
+    assert delivery.deliver(bridge.home, directory, "helper") > 0
+    send(bridge, polled, "helper", "later", "Later mail")
+
+    assert delivery.deliver(bridge.home, directory, "helper") > 0
+
+    text = published.read_text()
+    assert offer in text and "Later mail" in text
+    assert "Operator edit on a path you reserved: src/app.py" in text
+
+    name = roster.read(directory)["participants"]["helper"]["display"]
+    with sqlite3.connect(bridge.home / store.DATABASE) as db:
+        db.execute(
+            "UPDATE agents SET last_active_ts=datetime('now', '+5 seconds') "
+            "WHERE name=?",
+            (name,),
+        )
+    delivery.deliver(bridge.home, directory, "helper")
+    text = published.read_text()
+    assert offer not in text and "Later mail" in text
+
+
 def test_polled_delivery_orders_mail_by_relevance(bridge, polled):
     directory = Path(polled["lanes"]["helper"]).parent
     send(bridge, polled, "helper", "ask", "Review needed", ack_required=True)
@@ -102,6 +144,28 @@ def test_polled_delivery_shows_the_project_feed_once(bridge, polled):
     text = delivery.mail_file(directory, "helper").read_text()
     assert "Project feed, newest first: " in text
     assert "Merged #12 into main" in text
+    assert delivery.deliver(bridge.home, directory, "helper") == 0
+
+
+def test_polled_delivery_pages_a_long_feed(bridge, polled):
+    directory = Path(polled["lanes"]["helper"]).parent
+    delivery.deliver(bridge.home, directory, "helper")
+    send(bridge, polled, "helper", "merge-seed", "Merged #0 into main")
+    assert delivery.deliver(bridge.home, directory, "helper") > 0
+    subjects = [f"Merged #{number} into main" for number in range(1, 6)]
+    for number, subject in enumerate(subjects):
+        send(bridge, polled, "helper", f"merge-{number}", subject)
+    with sqlite3.connect(bridge.home / store.DATABASE) as db:
+        db.execute("UPDATE messages SET topic=subject WHERE feed=1")
+
+    assert delivery.deliver(bridge.home, directory, "helper") > 0
+    first = checkpoints.activity(directory, "helper")["batches"][-1]["text"]
+    assert delivery.deliver(bridge.home, directory, "helper") > 0
+    second = checkpoints.activity(directory, "helper")["batches"][-1]["text"]
+
+    assert all(subject in first for subject in subjects[:3])
+    assert "Project feed, newest first, 2 newer pending: " in first
+    assert all(subject in second for subject in subjects[3:])
     assert delivery.deliver(bridge.home, directory, "helper") == 0
 
 
@@ -266,7 +330,7 @@ def test_provider_inspection_names_the_delivery_path(bridge, polled):
     assert "canonical project identifier is an identity" in prompt
     assert str(delivery.mail_file(directory, "helper")) in prompt
     assert "Reading it is\nnot acknowledgement" in prompt
-    command = shlex.join([sys.executable, "-m", "agent_parley.cli"])
+    command = shlex.join([sys.executable, "-P", "-m", "agent_parley.cli"])
     assert f"`{command} issue claim NUMBER`" in prompt
     assert f"`{command} issue release NUMBER`" in prompt
     assert "`agent-parley issue" not in prompt

@@ -8,10 +8,13 @@ recommended, and whether acting on it can be undone. Observing the same
 situation again refreshes its record rather than opening another, so every
 situation holds exactly one open decision however many processes see it.
 
-Delivery is durable. A decision is queued when it opens and is marked sent
-only after every transport accepted it; a refused or abandoned send is retried
-with a growing backoff on the next supervision poll, so a short-lived hook
-that records a decision and exits at once still reaches the operator. A
+Delivery is durable. A decision is queued when it opens, records each
+transport that accepted it, and is marked sent only after every transport
+did; a refused or abandoned send is retried with a growing backoff on the next
+supervision poll, on the transports still missing only, so a short-lived hook
+that records a decision and exits at once still reaches the operator and a
+healthy transport never repeats a decision while another one fails. Retries
+stop after `MAX_ATTEMPTS`, with one lane event saying so. A
 sender leases the decisions it is about to send, so two processes flushing at
 once do not both send them. The decisions one flush finds due go out
 together, as one digest message carrying one inline keyboard row per
@@ -25,6 +28,8 @@ stay in `notify`.
 
 import hashlib
 import json
+import os
+import secrets
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -44,11 +49,14 @@ STALE = "stale"
 DEFAULT_TTL = 86400.0
 BACKOFF_FIRST = 30.0
 BACKOFF_CEILING = 3600.0
+MAX_ATTEMPTS = 8
 LEASE_SECONDS = 60.0
 KEPT_SETTLED = 200
 CALLBACK_PREFIX = "d"
 CONFIRMED = "y"
 MAX_TEXT_BYTES = 1024
+NONCE_BYTES = 3
+OCCURRENCE = "."
 
 
 def identifier(project: str, lane: str, kind: str, key: str) -> str:
@@ -68,8 +76,11 @@ def identifier(project: str, lane: str, kind: str, key: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
-def _read(directory: Path) -> dict[str, dict]:
-    """Reads every decision record of one project.
+def _peek(directory: Path) -> dict[str, dict]:
+    """Reads every decision record of one project without changing it.
+
+    Readers that write nothing tolerate damage: the file stays in place for
+    the next writer to set aside.
 
     Args:
         directory: Private project state directory.
@@ -83,6 +94,63 @@ def _read(directory: Path) -> dict[str, dict]:
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _read(directory: Path) -> dict[str, dict]:
+    """Reads the records a writer is about to replace, keeping damage aside.
+
+    A writer replaces the whole file, so reading undecodable records as
+    empty would silently drop every open decision. A file that does not
+    decode to a mapping is instead moved to `decisions.json.corrupt-<unix
+    time>`, never over an earlier copy, one supervision note names the
+    copy, and the writer continues from no records. `doctor` reports every
+    such copy until the operator removes it. Call this under `LOCK_NAME`.
+
+    Args:
+        directory: Private project state directory.
+
+    Returns:
+        Records keyed by identifier, or an empty mapping when none is stored
+        or the stored file was set aside.
+
+    Raises:
+        OSError: The file exists but cannot be read or set aside, so it is
+            left in place rather than overwritten.
+    """
+    path = directory / RECORD_NAME
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        return value
+    stamp = int(time.time())
+    while (kept := path.with_name(f"{RECORD_NAME}.corrupt-{stamp}")).exists():
+        stamp += 1
+    os.replace(path, kept)
+    from agent_parley import issues
+
+    issues.note_supervision_error(
+        directory, f"Damaged decisions record kept as {kept}"
+    )
+    return {}
+
+
+def damaged(home: Path) -> list[str]:
+    """Lists the damaged decision records kept aside in every project.
+
+    Args:
+        home: Bridge home directory.
+
+    Returns:
+        Sorted paths of every `decisions.json.corrupt-*` copy.
+    """
+    return sorted(
+        str(path)
+        for path in (home / "projects").glob(f"*/{RECORD_NAME}.corrupt-*")
+    )
 
 
 def _write(directory: Path, records: dict[str, dict]) -> None:
@@ -148,7 +216,9 @@ def open_or_refresh(
     A repeat observation of an open situation extends its expiry and keeps
     its identifier, its delivery state and its text, so the operator is not
     asked twice. A situation whose previous decision was answered, closed or
-    expired opens a fresh one.
+    expired opens a fresh one under the same identifier with a new random
+    occurrence nonce, so a button or reply posted for the earlier occurrence
+    no longer answers it.
 
     Args:
         directory: Private project state directory.
@@ -194,6 +264,7 @@ def open_or_refresh(
         else:
             record = {
                 "id": name,
+                "nonce": secrets.token_hex(NONCE_BYTES),
                 "project": project,
                 "lane": lane,
                 "issue": str(issue),
@@ -212,6 +283,7 @@ def open_or_refresh(
                 "answered_by": "",
                 "settled": 0.0,
                 "sent": 0.0,
+                "delivered": {},
                 "attempts": 0,
                 "retry_at": stamp,
                 "error": "",
@@ -232,7 +304,7 @@ def get(directory: Path, name: str) -> dict:
     Returns:
         The record, or an empty mapping when no decision has the identifier.
     """
-    return dict(_read(directory).get(name) or {})
+    return dict(_peek(directory).get(name) or {})
 
 
 def find(home: Path, name: str) -> tuple[Path, dict]:
@@ -273,7 +345,7 @@ def list_open(directory: Path, now: float = 0.0) -> list[dict]:
     return sorted(
         (
             dict(record)
-            for record in _read(directory).values()
+            for record in _peek(directory).values()
             if record.get("state") == OPEN
             and record.get("expires", stamp) >= stamp
         ),
@@ -491,11 +563,26 @@ def options(record: Mapping[str, object]) -> list[str]:
     return [str(option) for option in offered]
 
 
+def occurrence(record: Mapping[str, object]) -> str:
+    """Names the one occurrence of a decision a button or digest is for.
+
+    Args:
+        record: Decision record.
+
+    Returns:
+        The identifier, `OCCURRENCE` and the record's nonce, or the bare
+        identifier for a record written before nonces existed.
+    """
+    nonce = str(record.get("nonce") or "")
+    name = str(record["id"])
+    return f"{name}{OCCURRENCE}{nonce}" if nonce else name
+
+
 def callback(name: str, index: int, confirmed: bool = False) -> str:
     """Encodes the Telegram callback payload for one option.
 
     Args:
-        name: Decision identifier.
+        name: Decision occurrence as `occurrence` names it.
         index: Position of the option in the record's options.
         confirmed: Whether this is the second tap an irreversible option
             asks for.
@@ -514,7 +601,7 @@ def tapped(data: str) -> tuple[str, int, bool]:
         data: The ``callback_data`` a button tap carried.
 
     Returns:
-        The decision identifier, the option index and whether the tap
+        The decision occurrence, the option index and whether the tap
         confirms an irreversible option.
 
     Raises:
@@ -551,7 +638,7 @@ def keyboard(records: Sequence[Mapping[str, object]]) -> dict:
                         if option == record.get("recommended")
                         else option
                     ),
-                    "callback_data": callback(str(record["id"]), index),
+                    "callback_data": callback(occurrence(record), index),
                 }
                 for index, option in enumerate(options(record))
             ]
@@ -572,7 +659,9 @@ def _block(record: Mapping[str, object]) -> str:
     lines = [str(record.get("question", ""))]
     if record.get("detail"):
         lines.append(str(record["detail"]))
-    lines.append(f"decision: {record['id']} ({record.get('reversibility')})")
+    lines.append(
+        f"decision: {occurrence(record)} ({record.get('reversibility')})"
+    )
     lines.append(
         "options: "
         + ", ".join(
@@ -618,7 +707,8 @@ def _lease(directory: Path, now: float) -> list[dict]:
     """Takes the open, unsent decisions whose delivery is due.
 
     Each one taken has its retry time pushed past the lease, so a second
-    process flushing before this one finishes finds nothing due.
+    process flushing before this one finishes finds nothing due. A decision
+    whose sends failed `MAX_ATTEMPTS` times is no longer due.
 
     Args:
         directory: Private project state directory.
@@ -637,6 +727,7 @@ def _lease(directory: Path, now: float) -> list[dict]:
                 if record.get("state") == OPEN
                 and not record.get("sent")
                 and record.get("retry_at", 0.0) <= now
+                and int(record.get("attempts", 0)) < MAX_ATTEMPTS
             ),
             key=lambda record: record.get("created", 0.0),
         )
@@ -647,12 +738,45 @@ def _lease(directory: Path, now: float) -> list[dict]:
     return [dict(record) for record in taken]
 
 
-def flush(directory: Path, config: dict, now: float = 0.0) -> dict:
-    """Delivers every due decision as one digest and records the outcome.
+def _abandon(directory: Path, record: Mapping[str, object]) -> None:
+    """Records once that a decision's delivery stopped at the attempt cap.
 
-    Decisions are marked sent only when every transport accepted the digest.
-    A refused digest leaves them queued with a retry time that doubles per
-    attempt up to an hour, and records the failure text on each.
+    Args:
+        directory: Private project state directory.
+        record: Decision whose last allowed send failed.
+    """
+    from agent_parley import checkpoints, issues
+
+    text = (
+        f"Decision {record.get('id')} gave up after {MAX_ATTEMPTS} "
+        f"attempts: {record.get('error')}"
+    )
+    if record.get("lane"):
+        checkpoints.record(
+            directory,
+            str(record["lane"]),
+            {"hook_event_name": "Notification"},
+            checkpoints.Reason.NOTIFICATION_FAILED,
+            None,
+            "notifying",
+            text,
+        )
+    else:
+        issues.note_supervision_error(directory, text)
+
+
+def flush(directory: Path, config: dict, now: float = 0.0) -> dict:
+    """Delivers every due decision as a digest and records the outcome.
+
+    Each decision records the transports that accepted it under
+    ``delivered``, and a retry goes out only on the transports still
+    missing, so decisions due together are sent as one digest per set of
+    missing transports. A decision is marked sent once every configured
+    transport accepted it. A refused send leaves it queued with a retry time
+    that doubles per attempt up to an hour and records the failure text; the
+    send that reaches `MAX_ATTEMPTS` is the last, and `_abandon` records it.
+    A record written before ``delivered`` existed reads as delivered on no
+    transport.
 
     Args:
         directory: Private project state directory.
@@ -660,32 +784,59 @@ def flush(directory: Path, config: dict, now: float = 0.0) -> dict:
         now: Unix time; the clock when zero.
 
     Returns:
-        The identifiers sent and one result per transport, both empty when
-        nothing was due or no transport is configured.
+        The identifiers sent and one result per transport attempted, both
+        empty when nothing was due or no transport is configured.
     """
     from agent_parley import notify
 
     stamp = now or time.time()
-    if not config.get("transports"):
+    transports = list(config.get("transports") or [])
+    if not transports:
         return {"sent": [], "results": []}
     pending = _lease(directory, stamp)
     if not pending:
         return {"sent": [], "results": []}
-    subject, body = compose(pending)
-    markup = {**config, "markup": keyboard(pending)}
-    results = notify.send(markup, subject, body)
-    failures = [
-        f"{result['transport']}: {result['error']}"
-        for result in results
-        if not result["ok"]
-    ]
-    names = [record["id"] for record in pending]
+    groups: dict[tuple[str, ...], list[dict]] = {}
+    for due in pending:
+        delivered = due.get("delivered") or {}
+        missing = tuple(name for name in transports if name not in delivered)
+        groups.setdefault(missing, []).append(due)
+    results: list[dict] = []
+    outcomes: dict[str, list[dict]] = {}
+    for missing, group in groups.items():
+        sent = []
+        if missing:
+            subject, body = compose(group)
+            sent = notify.send(
+                {
+                    **config,
+                    "transports": list(missing),
+                    "markup": keyboard(group),
+                },
+                subject,
+                body,
+            )
+        results.extend(sent)
+        outcomes.update((record["id"], sent) for record in group)
+    names = []
+    abandoned = []
     with lock(directory / LOCK_NAME, timeout=5):
         records = _read(directory)
-        for name in names:
-            record = records.get(name)
+        for taken in pending:
+            record = records.get(taken["id"])
             if not record:
                 continue
+            sent = outcomes[taken["id"]]
+            delivered = dict(record.get("delivered") or {})
+            delivered.update(
+                (result["transport"], stamp) for result in sent if result["ok"]
+            )
+            record["delivered"] = delivered
+            failures = [
+                f"{result['transport']}: {result['error']}"
+                for result in sent
+                if not result["ok"]
+            ]
             if failures:
                 attempts = int(record.get("attempts", 0)) + 1
                 delay = BACKOFF_FIRST * 2 ** (attempts - 1)
@@ -694,7 +845,12 @@ def flush(directory: Path, config: dict, now: float = 0.0) -> dict:
                     retry_at=stamp + min(delay, BACKOFF_CEILING),
                     error="; ".join(failures),
                 )
+                if attempts == MAX_ATTEMPTS:
+                    abandoned.append(dict(record))
             else:
                 record.update(sent=stamp, error="")
+                names.append(record["id"])
         _write(directory, records)
-    return {"sent": [] if failures else names, "results": results}
+    for record in abandoned:
+        _abandon(directory, record)
+    return {"sent": names, "results": results}

@@ -46,6 +46,18 @@ supervisor already named as another lane's next work ranks last, so claim
 before exploring or editing. Lanes read the same shortlist over the
 `next_issues` MCP tool.
 
+Work on the same files gathers on one lane. Each looked-up candidate's
+forecast paths, the paths its earlier pull requests touched plus the files
+the cached co-change history says change with them, are compared with the
+paths the live claims' own pull requests touched. A candidate that runs into
+a claim the reading lane holds ranks first with `same files as #N you hold`.
+One that runs into another lane's live claim ranks below everything else for
+every other lane with `held back: same files as #N LANE holds`, and returns
+once that claim completes or is released. The unattended work offer orders
+its candidates the same way. It is advice: nothing is claimed or blocked, no
+ledger field is written, and the forge and history readings stay within the
+bounds the shortlist already uses.
+
 ```sh
 agent-parley issue next --limit 3
 agent-parley issue claim 42
@@ -104,25 +116,47 @@ while status continues to show the drift.
 
 A lane keeps any extra worktree in its `<lane>-wt/` directory, because Git
 records no creator and the sweep attributes a worktree by where it sits. The
-lane hook, for every provider, denies a `git worktree add` whose target
-resolves outside that directory (`worktree_refused`), and the denial names the
-directory and the same command aimed inside it. The target is read past `git
--C DIR` and options such as `-b`, `-B`, `--detach`, `--lock` and `--reason`,
-and a relative one resolves against the call's working directory. `git
-worktree move`, `remove`, `list` and `prune` pass, and a session outside a
-lane carries no lane hook, so it is never gated. Like the branch guard, this is
-a guard on the agent's own tool calls, not an authority boundary.
+lane hook, for every provider, denies a `git worktree add`, or a `git worktree
+move` whose destination, resolves outside that directory (`worktree_refused`),
+and the denial names the directory and the same command aimed inside it. The
+target is read past `git -C DIR` and options such as `-b`, `-B`, `--detach`,
+`--lock` and `--reason`, and a relative one resolves against the directory an
+earlier `cd` in the same call selects, else the call's working directory. A
+target naming a variable is denied with a request for a literal path. `git
+worktree remove`, `list` and `prune` pass, and a session outside a lane
+carries no lane hook, so it is never gated. Both this gate and the branch
+guard read through subshells, brace groups, compound commands, wrappers such
+as `env`, `timeout`, `nice`, `exec`, `sudo` and `xargs`, `sh -c`, `eval`,
+command substitutions and `git -c alias.NAME=...`; code an interpreter runs,
+such as `python -c` or a script, and aliases in Git configuration are out of
+their reach. The branch guard allows a `git checkout` that only restores
+files. Like the branch guard, this is a guard on the agent's own tool calls,
+not an authority boundary.
 
-Pending mail and notices ride on the call as context and never refuse it. Only
-three hazards deny a tool call: a shell call that runs Agent Parley's CLI
-together with a variable, `cd`, `;`, `&&`, a pipe or a redirect
-(`chained_cli`, whose text asks for the command alone, the only form the
-launch pre-approves), a write to a path that overlaps an exclusive
-reservation a peer holds (`reserved_path`, whose text says reservations are
-advisory), and an offer to this lane that expires unanswered within 120
-seconds (`offer_expiring`, which names the accept and decline commands).
-Otherwise a call that only reads, and Agent Parley's own commands, are never
-refused for coordination.
+Pending mail and notices ride on the call as context and never refuse it. These
+causes deny a tool call:
+
+- `chained_cli`: a shell call that runs Agent Parley's CLI together with a
+  variable, `cd`, `;`, `&&`, a pipe or a redirect. The text asks for the
+  command alone, the only form the launch pre-approves.
+- `reserved_path`: a write to a path that overlaps an exclusive reservation a
+  peer holds. The text says reservations are advisory.
+- `offer_expiring`: an offer to this lane that expires unanswered within 120
+  seconds. The text names the accept and decline commands.
+- `worktree_refused`: a `git worktree add` whose target resolves outside the
+  lane's `<lane>-wt/` directory.
+- `branch_switch`: a command that would switch the lane off its assigned
+  branch.
+- `attribution_refused`: a command whose message carries assistant
+  attribution the repository policy forbids.
+- `budget_refused`: a lane running `agent-parley budget enforce` or `resume`,
+  which is the operator's decision.
+- `filing_overlap`: a `gh issue create` that overlaps a peer's files or live
+  claim, refused once.
+- `paused`: any tool call from a lane the operator has paused.
+
+Every other hazard is a notice. Otherwise a call that only reads, and Agent
+Parley's own commands, are never refused for coordination.
 
 Overlap is shown before the work, not found as a merge conflict after it.
 A write to a file a peer reserves, even shared, or that a peer's open pull
@@ -152,17 +186,57 @@ that was made before the default existed. Past its deadline a claim reads `overd
 with the seconds over, `top` marks the issue `#42!`, and a lane that reports
 `blocked` on work it still holds spends one attempt of the recorded budget.
 
+A holder that waits on a peer, a CI run or an operator decision files
+`agent-parley report --state waiting --until SECONDS --summary "what it waits
+on"`. `status` and `top` show the lane as waiting on that reason with its
+next-check time, and the supervisor defers waking it until then, capped by the
+project's `deadlines.wait` ceiling. Unread direct mail from a peer that names
+an issue the lane holds as `#N` ends that deferral: the lane is woken on the
+normal delivery interval, as if it had declared no wait. Feed posts and mail
+about other issues still wait for the next-check time.
+
+A report can also name the work still running for the lane with
+`--pid PID` and `--output-file PATH`. The process is recorded with its
+creation identity and the file with its modification time at the report.
+While that same process is alive, or the file was written after the report
+and within the last 600 seconds, the supervisor treats the holder as working
+on the claim that report was bound to and holds it as it does for a waiting
+report, even once the report's `--until` has passed. That hold ends at the
+project's `deadlines.wait` ceiling after the report, the same cap a declared
+wait has, and ends early when the claim is released or reclaimed, because the
+evidence records the claim's identity. Other claims of the lane are still
+judged on their own progress, and evidence needs a report bound to one claim:
+a report that resolves to no claim and names `--pid` or `--output-file` is
+refused, so evidence never holds every claim. The process must belong to the
+reporting user and cannot be PID 1, the lane's own session process, or the
+reporting process or one of its ancestors, such as the service. The output
+file must resolve inside the lane worktree or its `<lane>-wt` scratch
+directory; anything else, including the bridge's own state files beside the
+lane, is refused. A retried report whose idempotency key names a recorded
+report returns that result without checking the process again. Each report
+replaces the evidence the
+previous one named.
+
 An overdue claim whose holder is still working on it stays owned. Two cases get
 a terminating transition. The first is an overdue claim whose holder is
 silent, meaning its session process is gone or it has run no tool call for the
 project's inactivity window; a holder parked on a dialog only the operator can
 answer is not silent. The second is any claim with no progress of its own for
 `claim_idle_after` (3600 seconds), even while its holder works elsewhere.
-Progress is a report naming the claim, or any tool call when it is the lane's
-only claim. Both take the same steps:
+Progress is a report naming the claim, or any tool call when it is the only
+claim the lane can work on now; its ready, blocked or closed claims do not
+count. Some quiet is not the holder's to end, and such a claim is never moved:
+work its holder reported `blocked`, whose deadline notice says so instead of
+promising a takeover; a handoff the holder offered, until it is answered or
+expires; and a holder with an open denial decision, a lane recorded blocked,
+a `report --state waiting` still in force or running work its latest report
+named with `--pid` or `--output-file`. Both take the same steps:
 
 1. The supervisor wakes the holder once. For an idle claim, the notice also
-   goes to the lanes waiting on the issue.
+   goes to the lanes waiting on the issue. For a silent holder the next window
+   runs from the wake the dispatcher actually attempted, so a wake still
+   waiting its turn moves nothing, and the offer says whether it reached the
+   holder.
 2. If nothing changes one window later, the supervisor offers the claim to the
    fit, running, unpaused peer below `max_claims_per_lane` that holds the
    fewest claims, with the claim's recovery checkpoint named in the summary
@@ -240,8 +314,13 @@ advisory limits on a lane; the same flags on `provider budget NAME` and
 `budget set` give every lane of a provider or a project defaults to inherit,
 participant over provider over project, field by field, and any limit may stay
 unset. Consumption comes from what is already read: tokens as the `TOKENS`
-column counts them, calls from the served-call records, hours from the recorded
+column counts them, which covers `claude`, `codex`, `copilot`, `gemini` and
+`opencode` lanes but not `amp` lanes, whose client keeps no local usage
+record, so a token limit on an `amp` lane is flagged as not measured, calls from the served-call records, hours from the recorded
 session. No vendor is asked and no price is applied, so a token budget is a
+count and not spend; only `report usage` turns tokens into an estimate, and
+only for a provider the operator priced
+([Usage per issue](monitoring.md#usage-per-issue)). A token budget stays a
 count and not spend. Past a limit `top` and `status` mark the lane
 `over budget` with the share consumed, the lane receives one bounded notice
 naming the crossed limit, and `--over-budget` selects such lanes, so
@@ -265,7 +344,14 @@ other lanes read, not a filesystem lock.
 A reservation can name something that is not a file — `port:5432`, `db:local`,
 `suite:integration`, `device:android-1` — because a worktree isolates none of
 those; a named resource conflicts on an exact match, and
-`agent-parley resources set` declares which ones exist. A granted reservation
+`agent-parley resources set` declares which ones exist. Path keys compare
+case-sensitively unless the project manifest records `case_insensitive`, which
+a new project takes from Git's `core.ignorecase` (set when the repository is
+cloned or initialized on a case-insensitive file system, such as default macOS).
+Then `README.md` and `readme.md` overlap, `src/` covers `SRC/x.py`, and a write
+through a lane path spelled in another case is still checked against
+reservations; named resources stay exact. A manifest written before the field
+existed keeps exact comparison. A granted reservation
 also carries a `forecast`: the files that changed together with a reserved path
 in at least three of the base checkout's last 500 commits and that a peer holds
 right now, each with the peer and the count, so the lane can renegotiate or
@@ -454,7 +540,9 @@ lane's fitness first, and are revalidated before a wake delivers them; see
 [supervisor offers](operations.md#availability-reminders-and-waking). A ready
 lane whose issue is listed in the project's recorded unattended policy can be
 integrated with `unattended run`, an operator command, on the same gate and
-approval terms as `participant merge`; see
+approval terms as `participant merge`. When the operator also records
+`--auto`, the supervision service makes that attempt itself on its next poll
+and mails the lane the decision; see
 [Running unattended](lanes.md#running-unattended).
 
 ## The forge is selectable per project

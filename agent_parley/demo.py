@@ -20,8 +20,10 @@ Every child is started in a session of its own, so a Ctrl-C at the terminal
 reaches only the demo and never interrupts a command half way through. The
 demo then waits for the command in flight, stops the service and the lanes,
 removes the sandbox and, where ``/proc`` is available, ends any process still
-working inside it. Cleanup runs with interrupts ignored, on success, on
-``q``, on Ctrl-C and on an exception alike.
+working inside it. SIGTERM and SIGHUP, as from ``timeout``, ``kill`` or a
+closed terminal, stop the demo the same way and exit 143 and 129. Cleanup
+runs with interrupts ignored, on success, on ``q``, on Ctrl-C, on those
+signals and on an exception alike.
 
 The sandbox is created under ``/tmp`` when that directory exists, because the
 per-user temporary directory on macOS is long enough to push a lane's control
@@ -55,12 +57,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TextIO
 
-from agent_parley import demo_scenario
+from agent_parley import demo_scenario, plugins
 
 COLUMNS = 132
 ROWS = 30
 FRAME_LINES = 24
 DEFAULT_PORT = 8876
+SANDBOX_LOAD = {"max_load_ratio": 1000, "min_available_mib": 0}
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[=>]|\x1b\][^\x07]*\x07")
 INHERITED = ("AGENT_PARLEY_", "CLAUDE", "CODEX_")
 BOLD = "\x1b[1m"
@@ -153,6 +156,10 @@ def git(*arguments: str, cwd: Path | None = None) -> None:
 def fixtures(base: Path) -> tuple[Path, Path, Path]:
     """Builds the temporary state home, stub CLIs and demo repository.
 
+    The sandbox's stub lanes only sleep, so its home records
+    `SANDBOX_LOAD`, launch thresholds a busy host never crosses, and the
+    tour runs on a machine whose real lanes the load gate would hold back.
+
     Args:
         base: Directory every artefact of this run is created under.
 
@@ -166,6 +173,7 @@ def fixtures(base: Path) -> tuple[Path, Path, Path]:
     for path in (home, binaries, repository / "src" / "payments"):
         path.mkdir(parents=True)
     home.chmod(0o700)
+    (home / "supervision.json").write_text(json.dumps(SANDBOX_LOAD))
     for tool in ("claude", "codex"):
         stub = binaries / tool
         stub.write_text("#!/usr/bin/env bash\nexec sleep 900\n")
@@ -198,7 +206,10 @@ def environment(
         the stub executables and a free loopback port. Variables a native
         client or an enclosing lane set are dropped, so a run started from
         inside a lane has operator authority in the sandbox and carries none
-        of that lane's credentials.
+        of that lane's credentials. Plugin repair is off: the sandbox
+        service would otherwise find the operator's own installed plugin
+        under the default CLI home and run a stub CLI to refresh it, and
+        that child outlives the service it was started from.
     """
     values = {
         key: value
@@ -210,6 +221,7 @@ def environment(
     values["AGENT_PARLEY_PORT"] = str(free_port() if port is None else port)
     values["CLAUDE_CONFIG_DIR"] = str(base / "native" / "claude")
     values["CODEX_HOME"] = str(base / "native" / "codex")
+    values[plugins.REPAIR_ENV] = "off"
     values["COLUMNS"] = str(COLUMNS)
     values["LINES"] = str(ROWS)
     values["NO_COLOR"] = "1"
@@ -848,6 +860,40 @@ def narrator(stream: TextIO) -> Callable[[Step | Card], None]:
     return say
 
 
+STOPS = (signal.SIGTERM, signal.SIGHUP)
+"""Termination signals the demo stops on as it does on Ctrl-C."""
+
+
+class Stopped(KeyboardInterrupt):
+    """A termination signal routed through the demo's interrupt path.
+
+    Attributes:
+        number: Signal that stopped the demo.
+    """
+
+    def __init__(self, number: int) -> None:
+        """Records the signal.
+
+        Args:
+            number: Signal that stopped the demo.
+        """
+        super().__init__(number)
+        self.number = number
+
+
+def _stopped(number: int, frame: object) -> None:
+    """Raises `Stopped` so a termination signal unwinds like Ctrl-C.
+
+    Args:
+        number: Signal received.
+        frame: Interrupted stack frame, unused.
+
+    Raises:
+        Stopped: Always.
+    """
+    raise Stopped(number)
+
+
 def sandbox_directory() -> Path:
     """Creates the private sandbox directory.
 
@@ -871,9 +917,11 @@ def main(
         story: Chapters to run.
 
     Returns:
-        Zero when the story finished, 130 when it was interrupted.
+        Zero when the story finished, 130 when it was interrupted, and 128
+        plus the signal number when SIGTERM or SIGHUP stopped it.
     """
     out = sys.stdout if stream is None else stream
+    handlers = {number: signal.signal(number, _stopped) for number in STOPS}
     base = sandbox_directory().resolve()
     recorder: Recorder | None = None
     status = 0
@@ -895,11 +943,14 @@ def main(
                 narrator(out),
             )
             story(recorder)
-    except KeyboardInterrupt:
-        status = 130
-        print("\nStopped.", file=out, flush=True)
+    except KeyboardInterrupt as exc:
+        status = 128 + exc.number if isinstance(exc, Stopped) else 130
+        with contextlib.suppress(OSError):
+            print("\nStopped.", file=out, flush=True)
     finally:
         previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for number in STOPS:
+            signal.signal(number, signal.SIG_IGN)
         try:
             if recorder is not None:
                 recorder.close()
@@ -907,14 +958,17 @@ def main(
             shutil.rmtree(base, ignore_errors=True)
         finally:
             signal.signal(signal.SIGINT, previous)
+            for number, handler in handlers.items():
+                signal.signal(number, handler)
     if status == 0:
         print(
             f"\nDone in {time.monotonic() - started:.0f}s; the sandbox is "
             "removed. Try it on your repository: agent-parley setup . && "
-            "agent-parley run <lane>",
+            "agent-parley run claude",
             file=out,
             flush=True,
         )
     else:
-        print("The sandbox is removed.", file=out, flush=True)
+        with contextlib.suppress(OSError):
+            print("The sandbox is removed.", file=out, flush=True)
     return status
