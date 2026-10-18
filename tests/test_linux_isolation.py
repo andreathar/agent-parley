@@ -131,6 +131,18 @@ def test_preflight_saved_port_wins_over_invalid_environment(
     assert report["port"] == bridge.config["port"]
 
 
+def test_preflight_reports_opencode_default_configuration_path(
+    bridge, repo, monkeypatch
+):
+    monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
+
+    report = preflight.inspect(bridge.home, repo, "opencode")
+
+    assert Path(report["clients"][0]["config_home"]) == (
+        Path.home() / ".config" / "opencode"
+    )
+
+
 @pytest.mark.parametrize("command", ["preflight", "host-resources"])
 def test_read_only_cli_does_not_initialize_a_missing_home(
     tmp_path, repo, monkeypatch, capsys, command

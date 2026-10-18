@@ -89,7 +89,10 @@ def _client(home: Path, provider: str, profile: str | None, repo: Path) -> dict:
     selected = (
         selected or environment.get(variable) or os.environ.get(variable) or ""
     )
-    base = Path(selected or f"~/.{adapter}").expanduser().resolve()
+    default_home = (
+        "~/.config/opencode" if adapter == "opencode" else f"~/.{adapter}"
+    )
+    base = Path(selected or default_home).expanduser().resolve()
     filenames = (
         (
             base / "config.toml",

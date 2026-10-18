@@ -84,12 +84,16 @@ def test_install_adds_marketplace_and_plugin_to_each_cli(fake):
     lines, succeeded = plugins.install()
     assert succeeded
     assert (
-        "claude: marketplace /mnt/data/Projects_SSD/agent-parley added" in lines
+        "claude: marketplace andreathar/agent-parley added" in lines
     )
     assert "codex: plugin agent-parley@agent-parley installed" in lines
     assert (
-        "plugin marketplace add /mnt/data/Projects_SSD/agent-parley"
+        "plugin marketplace add andreathar/agent-parley"
         in calls(state, "claude")
+    )
+    assert (
+        "plugin marketplace add andreathar/agent-parley"
+        in calls(state, "codex")
     )
     assert "plugin add agent-parley@agent-parley" in calls(state, "codex")
     assert plugins.status() == [

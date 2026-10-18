@@ -92,6 +92,29 @@ def test_readmit_retained_branch_uses_sparse_before_checkout(
     assert not marker.exists()
 
 
+def test_readmit_refuses_a_missing_retained_workspace_profile(
+    bridge, repo, shared
+):
+    directory, marker = shared
+    data = bridge.add_participant(repo, "reader", "codex")
+    lane = data["participants"]["reader"]["lane"]
+    git(repo, "worktree", "remove", lane)
+    document = roster.read(directory)
+    document["participants"]["reader"]["retired"] = 1.0
+    document.pop("workspace")
+    write_json(directory / "project.json", document)
+
+    with pytest.raises(
+        BridgeError, match="restore the matching project profile"
+    ):
+        bridge.add_participant(repo, "reader", "codex")
+
+    assert not Path(lane).exists()
+    assert not marker.exists()
+    participant = roster.read(directory)["participants"]["reader"]
+    assert "workspace_profile" in participant
+
+
 def test_checkout_failure_preserves_partial_lane_without_full_fallback(
     bridge, repo, shared, monkeypatch
 ):

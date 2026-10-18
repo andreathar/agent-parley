@@ -757,11 +757,20 @@ class BridgeCore:
                     next_command=f"agent-parley participant restore {name}",
                 )
         else:
-            started = time.monotonic()
-            git(root, "worktree", "prune")
             from agent_parley import workspace
 
-            if selected := workspace.profile(data):
+            selected = workspace.profile(data)
+            if participant.get("workspace_profile") and (
+                participant["workspace_profile"] != selected
+            ):
+                raise BridgeError(
+                    "Retired lane retains a different shared-media profile; "
+                    "restore the matching project profile before readmission."
+                )
+            started = time.monotonic()
+            git(root, "worktree", "prune")
+
+            if selected:
                 workspace.add(
                     root,
                     lane,
