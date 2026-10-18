@@ -215,7 +215,6 @@ class MailMixin(BridgeCore):
         from agent_parley.cli import (
             attachments,
             git,
-            operator_only,
             roster,
             store,
         )
@@ -230,7 +229,7 @@ class MailMixin(BridgeCore):
         if action == "cancel":
             return store.cancel_schedule(self.home, data["root"], identifier)
         if participant == roster.OPERATOR:
-            operator_only("Read the operator mailbox")
+            roster.require_operator(self.home, "Read the operator mailbox")
             name = roster.OPERATOR
         elif participant:
             if participant not in data["participants"]:
@@ -322,9 +321,9 @@ class MailMixin(BridgeCore):
             BridgeError: If the caller is a launched lane, the repository has
                 no project, or the decision fails validation.
         """
-        from agent_parley.cli import operator_key, operator_only, roster, store
+        from agent_parley.cli import operator_key, roster, store
 
-        operator_only("Record an operator decision")
+        roster.require_operator(self.home, "Record an operator decision")
         _, directory = self.project(repo)
         data = roster.read(directory)
         heading = subject or "Operator decision"
