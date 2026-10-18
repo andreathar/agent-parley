@@ -27,6 +27,13 @@ exclude:
   - docs/video
 defaults:
   - scope:
+      path: docs/linux-development.md
+    values:
+      title: Linux development isolation
+      description: >-
+        Develop a private Agent Parley snapshot with separate state,
+        explicit checkout preservation and shared host resource coordination.
+  - scope:
       path: README.md
     values:
       title: Run coding agents in parallel Git worktrees
@@ -142,3 +149,9 @@ defaults:
     values:
       title: Terms of use
       description: Terms of use for the Agent Parley command line and plugin.
+  - scope:
+      path: docs/shared-media.md
+    values:
+      title: Shared media and lightweight workspaces
+      description: >-
+        Canonical media references, sparse lane preparation and per-task outputs.

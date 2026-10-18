@@ -114,3 +114,29 @@ def test_credentials_and_private_paths_are_refused(checkout, leak):
 def test_a_missing_manifest_fails(checkout):
     (checkout / "glama.json").unlink()
     assert manifests.manifest_errors(checkout) == ["glama.json is missing"]
+
+
+def test_registry_identity_follows_canonical_fork_metadata(checkout):
+    project = checkout / "pyproject.toml"
+    original = tomllib.loads(project.read_text())["project"]["urls"][
+        "Repository"
+    ]
+    project.write_text(
+        project.read_text().replace(
+            original, "https://github.com/local-owner/fork"
+        )
+    )
+    edit(
+        checkout,
+        "server.json",
+        lambda data: data.update(name="io.github.local-owner/fork"),
+    )
+    assert manifests.manifest_errors(checkout) == []
+    edit(
+        checkout,
+        "server.json",
+        lambda data: data.update(name="io.github.someone-else/fork"),
+    )
+    assert "server.json: name must be io.github.local-owner/fork" in (
+        manifests.manifest_errors(checkout)
+    )

@@ -18,9 +18,10 @@ all participants must use the same private state root.
 
 Start with `agent-parley status`, `agent-parley participant list`, and
 `agent-parley issue list` in the current repository. These show ownership separately from activity and reported outcomes.
-If installation is part of the task, use `uv tool install agent-parley`.
-Contributors can use `make install` from a checkout. Do not install software
-merely to answer a status question.
+If installation is part of the task, use `make install` from the fork
+checkout. Never run `uv tool install agent-parley` or `pipx install
+agent-parley`: they fetch the upstream release and replace the fork. Do not
+install software merely to answer a status question.
 
 ## Select the correct lane
 
@@ -57,6 +58,13 @@ sources moved under a running process; an inconsistent store means this build
 queries columns the store does not have. Neither is fixed by retrying the
 call.
 
+`agent-parley wiring --repo REPOSITORY` is a second read: it confirms the
+service answers on the saved port and refuses a tokenless request, and that
+each running lane client carries that URL and state home. Add
+`--require-env NAME` for each variable the project's hooks need. It reports
+any mismatch as a failure and proves no tool call, so a pass means the wiring
+is consistent, not that a peer replied.
+
 Example situation: "My reservation call just failed with something about a
 column, and my peer says theirs works. Find out whether my installation is the
 odd one out before I touch the code."
@@ -73,6 +81,29 @@ that it is the same work, and no match is a recorded reason to open one.
 
 Example situation: "Before I file anything, check whether the slow status
 command is already tracked, and tell me if someone is holding it."
+
+## Projects without a forge
+
+When the project's own instructions say no forge issue is required, or `issue
+list` shows none, do not invent issue numbers and do not open one to satisfy
+this workflow. Read the project's coordination protocol first; its roles,
+ownership table and close-out format take precedence over the issue steps
+below. Coordinate through `send_message` threads, advisory file reservations
+and handoff documents, and report with `agent-parley report`. The lane
+launcher exports `AGENT_PARLEY_PARTICIPANT` and `AGENT_PARLEY_PROJECT_ROOT`;
+a project may read them to identify the lane. Reservations remain advisory and
+an acknowledgement is not approval.
+
+## Roles and permissions
+
+`agent-parley role show` prints the rules the operator set for this project,
+and `agent-parley wiring` reports their hash. A refused tool call names its
+role; do not retry it by another route. If a task needs a refused capability,
+send the operator the reason and the exact command that would grant it, for
+example `agent-parley role enable <lane> shell`, and wait. The operator alone
+changes roles; running `role define`, `assign`, `apply`, `enable` or `disable`
+from a lane is refused. The templates are `review`, `research` and `edit-qc`.
+Rules are an operational barrier, not a sandbox.
 
 ## Claim, work, and hand off
 
@@ -211,6 +242,24 @@ clean worktree is removed. Retirement is not
 a way to drop work you were asked to finish, and only the operator returns a
 retired lane to service.
 
+## Shared media in lightweight workspaces
+
+When the launcher supplies `AGENT_PARLEY_MEDIA_ROOT`, inputs belong to that
+canonical root, not a second copy in the lane. `AGENT_PARLEY_ASSET_CATALOG`
+points to the project's existing registry. `AGENT_PARLEY_OUTPUT_ROOT` names
+this task's derivative directory; use a new version and deliver IDs, hashes
+and provenance for producer review. Never modify canonical originals or
+publish a derivative merely because its file exists.
+
+These variables are path references, not filesystem grants or read-only
+mounts. A refused native read is a blocker to report, not a reason to copy
+the media, change permissions, trust a hook or add a writable root. Do not
+use symlinks or hardlinks as a security boundary. Existing operational roles
+and paid-submission approvals still apply. The operator can inspect the
+profile with `agent-parley workspace status --json` and distinguish a host
+read from unknown native access with `agent-parley media doctor --json`.
+Use the launcher's exact CLI prefix and its plain-command rule as above.
+
 ## Read mail and inspect evidence
 
 Use `fetch_inbox` with `unread` or `unacknowledged` to find pending mail; rows
@@ -249,7 +298,7 @@ every recipient has read are released first, and `--full` then says the body
 was released.
 
 `file_reservation_paths` and `release_file_reservations` manage advisory path
-reservations. They are not filesystem locks. Reserve a named resource instead
+reservations within one project. They are not filesystem locks. Reserve a named resource instead
 of a path when the contested thing is not a file — `port:5432`, `db:local`,
 `suite:integration`, `device:android-1` — because a worktree isolates none of
 those and a named resource conflicts on an exact match. A granted reservation
@@ -257,6 +306,19 @@ may carry `forecast`: files that habitually change together with a reserved
 path and that a peer holds now, each with `path`, `peer` and `count`. It is
 advisory; message the peer to sequence the work rather than editing the
 forecast path.
+
+For resources shared across projects or Parley installations, use
+`reserve_host_resources` with a `resources` list of canonical names such as
+`gpu:0`, `port:5432` or `device:android-1`. The entire request succeeds or
+returns conflicts without acquiring anything new. `list_host_resources`
+reads the shared registry; `release_host_resources` takes the exact returned
+`lease_ids` and releases only your holdings. Host leases have no expiry and
+remain held across service restarts. Explicitly release after use; if the
+owner cannot do so, the operator can recover exact IDs with
+`agent-parley host-resources release ID`. These reservations remain advisory.
+All cooperating installations must share `AGENT_PARLEY_RESOURCE_HOME`
+(default `~/.local/state/agent-parley-host`) and resource names. Older builds
+and external programs do not participate automatically.
 
 `request_reservation` takes the same keys and is the call to use when you mean
 to take a contested one next. Free keys are granted exactly as

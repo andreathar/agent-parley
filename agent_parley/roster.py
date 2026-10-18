@@ -769,6 +769,7 @@ def _registry(home: Path, filename: str, presets: dict) -> dict:
 
 def _define(home: Path, filename: str, name: str, entry: dict) -> dict:
     """Publishes one registry entry under the shared registry lock."""
+    require_operator(home, "Changing shared provider or account settings")
     with lock(home / "registry.lock"):
         path = home / filename
         stored: dict = (
@@ -857,6 +858,7 @@ def remove(home: Path, kind: str, name: str) -> None:
     Raises:
         BridgeError: If the kind or local definition does not exist.
     """
+    require_operator(home, "Removing shared provider or account settings")
     filenames = {"provider": PROVIDERS, "credentials": CREDENTIALS}
     if kind not in filenames:
         raise BridgeError(f"Unknown registry: {kind}.")
@@ -1173,6 +1175,7 @@ def define_credential(
         BridgeError: If the name, directory, or variables are invalid, or
             the profile selects no account.
     """
+    require_operator(home, "Changing shared account settings")
     identifier(name, "Credential profile name")
     if not (config_home or env or require):
         raise BridgeError(EMPTY_CREDENTIAL)
@@ -1410,6 +1413,11 @@ def normalize(manifest: dict) -> dict:
             else {}
         ),
         "supervision": project,
+        **{
+            key: manifest[key]
+            for key in ("workspace", "workspace_history")
+            if key in manifest
+        },
         "participants": participants,
     }
 
@@ -1810,6 +1818,43 @@ def from_lane(manifest: dict) -> bool:
         holds a lane's coordination credential.
     """
     return caller_lane(manifest) is not None or bool(os.environ.get(LANE_TOKEN))
+
+
+def require_operator(home: Path, action: str) -> None:
+    """Refuses shared mutations from a lane environment or worktree.
+
+    Both the selected home and the inherited launch home are inspected so
+    selecting another home does not accidentally authorize a lane. This is
+    an operational guard, not an operating-system security boundary.
+
+    Args:
+        home: State root whose shared settings would change.
+        action: Human-readable operation for the refusal.
+
+    Raises:
+        BridgeError: If a lane token or registered lane directory is found,
+            or a manifest cannot be inspected safely.
+    """
+    message = (
+        f"{action} needs operator authority and is refused from a lane; "
+        "run it from the operator's own shell outside lane worktrees."
+    )
+    if os.environ.get(LANE_TOKEN):
+        raise BridgeError(message)
+    homes = {home.expanduser().resolve()}
+    if inherited := os.environ.get("AGENT_PARLEY_HOME"):
+        homes.add(Path(inherited).expanduser().resolve())
+    for directory in homes:
+        for path in (directory / "projects").glob("*/project.json"):
+            try:
+                manifest = read(path.parent)
+                if caller_lane(manifest) is not None:
+                    raise BridgeError(message)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise BridgeError(
+                    "Cannot verify operator scope: unreadable project "
+                    f"manifest at {path}."
+                ) from error
 
 
 def token_lane(home: Path, manifest: dict) -> str | None:

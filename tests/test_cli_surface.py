@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 from agent_parley import BridgeError, cli, protocol, roster, start, store, views
 from agent_parley.cli import git
@@ -193,7 +193,9 @@ def test_missing_argument_prints_the_command_usage(
 
 def test_every_subcommand_action_carries_help():
     parser, _ = cli.root_parser(None)
-    pending = [((), parser)]
+    pending: list[tuple[tuple[str, ...], argparse.ArgumentParser]] = [
+        ((), parser)
+    ]
     bare = []
     while pending:
         path, current = pending.pop()

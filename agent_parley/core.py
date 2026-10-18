@@ -369,11 +369,12 @@ class BridgeCore:
             directory.mkdir(parents=True, exist_ok=True)
         return root, directory
 
-    def setup(self, repo: Path) -> dict:
+    def setup(self, repo: Path, *, stash: bool = False) -> dict:
         """Creates or verifies the project manifest for a repository.
 
         Args:
             repo: Main checkout or linked worktree of the target repository.
+            stash: Explicit consent to stash pending base-checkout changes.
 
         Returns:
             Manifest containing the common root, base, and participants.
@@ -385,7 +386,9 @@ class BridgeCore:
 
         root, directory = self.project(repo)
         with lock(directory / "setup.lock"):
-            return roster.expand(self._project(root, directory, preserve=True))
+            return roster.expand(
+                self._project(root, directory, preserve=True, stash=stash)
+            )
 
     def _project(
         self,
@@ -393,6 +396,7 @@ class BridgeCore:
         directory: Path,
         verify: set[str] | None = None,
         preserve: bool = False,
+        stash: bool = False,
     ) -> dict:
         """Reads or creates the manifest while the setup lock is held.
 
@@ -401,7 +405,8 @@ class BridgeCore:
             directory: Private state directory for the repository.
             verify: Participants whose branch must match, or None for all.
             preserve: Whether creation is allowed, preserving pending work
-                in a stash first. False requires an existing manifest.
+                only with explicit consent. False requires a manifest.
+            stash: Whether to stash pending work during initial creation.
 
         Returns:
             Manifest using the participant roster layout.
@@ -473,7 +478,7 @@ class BridgeCore:
                 "Make a first commit, then retry.",
                 next_command='git commit --allow-empty -m "Initial commit"',
             ) from None
-        preserved = preserve_pending(root)
+        preserved = preserve_pending(root, stash=stash)
         if preserved:
             self.preserved = preserved
             print(preserved, file=sys.stderr, flush=True)
@@ -599,15 +604,20 @@ class BridgeCore:
             if spare is not None:
                 lane = spare
             else:
-                git(
-                    root,
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    str(lane),
-                    data["base"],
-                )
+                from agent_parley import workspace
+
+                if workspace.profile(data):
+                    workspace.add(root, lane, branch, data["base"])
+                else:
+                    git(
+                        root,
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch,
+                        str(lane),
+                        data["base"],
+                    )
             created = time.monotonic()
             if spare is None and data.get("initialize"):
                 initialize_lane(lane, data["initialize"], root)
@@ -622,6 +632,10 @@ class BridgeCore:
                     created - started, time.monotonic() - created
                 ),
             }
+            from agent_parley import workspace
+
+            if selected := workspace.profile(data):
+                participants[name]["workspace_profile"] = selected
             try:
                 write_json(directory / "project.json", data)
             except OSError:
@@ -656,10 +670,11 @@ class BridgeCore:
             The spare's worktree, now on the lane branch, or None when the
             project keeps no pool or none of its spares is usable.
         """
-        from agent_parley import pool
+        from agent_parley import pool, workspace
         from agent_parley.cli import git
         from agent_parley.state import LockBusy
 
+        workspace.profile(data)
         if not data.get("pool"):
             return None
         try:
@@ -742,9 +757,29 @@ class BridgeCore:
                     next_command=f"agent-parley participant restore {name}",
                 )
         else:
+            from agent_parley import workspace
+
+            selected = workspace.profile(data)
+            if participant.get("workspace_profile") and (
+                participant["workspace_profile"] != selected
+            ):
+                raise BridgeError(
+                    "Retired lane retains a different shared-media profile; "
+                    "restore the matching project profile before readmission."
+                )
             started = time.monotonic()
             git(root, "worktree", "prune")
-            if has_branch(root, branch):
+
+            if selected:
+                workspace.add(
+                    root,
+                    lane,
+                    branch,
+                    data["base"],
+                    new_branch=not has_branch(root, branch),
+                )
+                participant["workspace_profile"] = selected
+            elif has_branch(root, branch):
                 git(root, "worktree", "add", str(lane), branch)
             else:
                 git(

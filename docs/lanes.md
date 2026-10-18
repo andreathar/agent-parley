@@ -52,6 +52,13 @@ an operator shell in the base checkout: it refuses inside an assigned worktree
 and in any process holding a lane's `AGENT_PARLEY_TOKEN`, so a lane cannot plant
 a command every later lane runs. `init show` stays readable from a lane.
 
+A launched lane process also receives `AGENT_PARLEY_PARTICIPANT`, its
+participant name, and `AGENT_PARLEY_PROJECT_ROOT`, the registered base
+checkout. They identify the lane to project hooks; they are not credentials and
+grant no authority. Check what running lanes carry with `agent-parley wiring
+--repo PATH --require-env NAME`, which needs lanes launched after the
+variable was introduced.
+
 Each launch records how long `run` took to reach the native CLI, split into
 worktree creation, `init` and CLI start (registration, the service and the
 native configuration). `participant show` prints it as `Last launch:`, and
@@ -297,6 +304,45 @@ Groups whose every member is reported ready are marked by `plan show` and
 `status`, and counted in the `top` header, so you learn a set is integrable
 without asking each lane. A reported state is a lane's own account, never review
 or independent verification.
+
+## Limiting what a lane may do
+
+A project can give a lane a role that refuses some tool calls. Rules live in
+`roles.json` beside the project's other coordination state, never in the
+repository, and only the operator changes them:
+
+```sh
+agent-parley role apply review --to copilot
+agent-parley role define scribe --write-path 'notes/*' --deny-command 'curl'
+agent-parley role assign copilot scribe
+agent-parley role disable copilot shell
+agent-parley role enable copilot shell
+agent-parley role import docs/examples/movies-roles.json
+agent-parley role show
+agent-parley role unassign copilot
+```
+
+The built-in templates are `review` (writes only under `reviews/`),
+`research` (writes only under `research/` and `notes/`) and `edit-qc` (no file
+edits). A lane with no assignment is not restricted, and a project with no
+file is unchanged. Patterns for paths are globs relative to the lane's
+worktree where `*` also crosses directories. Command patterns are regular
+expressions searched in the shell command. Each refusal is recorded as
+`role_refused` in the lane's event log, and `agent-parley wiring` reports the
+rules hash and the lanes it restricts.
+
+`docs/examples/movies-roles.json` ports the film project's canonical-record,
+destructive-command and paid-submission guards as one `movies-lane` role; its
+shell patterns agree with the project's `media-guard` hook on the sampled
+commands. The stateful `no-retry` check cannot be a static rule, so the role
+instead refuses every paid submission from a lane.
+
+This is an operational barrier, not a sandbox: a quoted or scripted command can
+slip past a pattern, and a refusal depends on the native client honoring a
+denied `PreToolUse` decision. Copilot CLI 1.0.96 and OpenCode 1.18.35 were
+each observed refusing a file write that way in a throwaway repository; shell
+and MCP tools, and Codex and Claude here, are verified only against stubs or
+their own hook contract. Reservations stay advisory.
 
 ## Running unattended
 

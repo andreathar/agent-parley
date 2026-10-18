@@ -82,7 +82,9 @@ uv tool install agent-parley
 
 From a checkout, `make install` installs a package snapshot in uv's user
 executable directory. If needed, run `uv tool update-shell` and open a new
-terminal. `make install-dev` installs an editable checkout.
+terminal. In this fork, `make install-dev` installs a fixed snapshot as
+`agent-parley-dev`, with separate state and port. See
+[Linux development isolation](linux-development.md) for scope and rollback.
 `sudo env "PATH=$PATH" make install-system` installs into `/usr/local/bin`, with
 its environment under `/opt/agent-parley`. Each user's runtime state remains
 private.
@@ -422,10 +424,9 @@ top level, where the client directories read it. Both layouts therefore report
 the same protocol.
 
 The launcher version reported here is the version of the code that is running.
-An editable install, which `make install-dev` creates, records its version once
-at install time and keeps reporting it after the checkout has moved on, so the
-project file beside the package is read wherever it exists and installation
-metadata is used only for a package installed without one.
+The development installer records a wheel hash and installed source revision
+alongside each fixed snapshot. Its `agent-parley-dev preflight` output identifies
+the module directory in use; it does not load later checkout edits.
 
 `doctor` prints the launcher version and protocol, the protocol each shipped
 plugin manifest declares, the store's schema against the schema this build
@@ -2628,8 +2629,9 @@ retire-and-add-again route for a binding that is already wrong.
 
 `run` creates a participant's lane on first use, so `participant add` is only
 needed to prepare a roster in advance. Worktrees start at committed HEAD, so the
-first registration of a repository stashes any pending work in the base checkout
-instead of refusing to start. It names the stash entry and prints the
+first registration refuses pending work without moving it. Commit the work or
+explicitly run `setup PATH --stash` to authorize stashing tracked and untracked
+files. That opt-in names the stash entry and prints the
 `git stash apply` that brings that specific entry back, because every worktree
 of a repository shares one stash stack. Only that first registration touches the
 base checkout; `merge`, `restore` and `retire` still refuse on a dirty tree. The participant name is what peers
@@ -4045,9 +4047,9 @@ policy recorded with `--auto` lists, on that command's terms. A reported
 Install the CLI first, then add the repository marketplace:
 
 ```sh
-claude plugin marketplace add suneel944/agent-parley
+claude plugin marketplace add andreathar/agent-parley
 claude plugin install agent-parley@agent-parley
-codex plugin marketplace add suneel944/agent-parley
+codex plugin marketplace add andreathar/agent-parley
 codex plugin add agent-parley@agent-parley
 ```
 

@@ -1,0 +1,37 @@
+{
+  "resources": {
+    "first_project_grants": [
+      "device:android-1",
+      "gpu:0",
+      "port:5432"
+    ],
+    "same_project_peer_conflicts": [
+      "device:android-1",
+      "gpu:0",
+      "port:5432"
+    ],
+    "second_project_grants": [
+      "device:android-1",
+      "gpu:0",
+      "port:5432"
+    ],
+    "second_project_conflicts": []
+  },
+  "setup": {
+    "dirty_before": true,
+    "clean_after": true,
+    "tracked_after": "original",
+    "untracked_remains": false,
+    "stash_preserved": true
+  },
+  "shared_copilot_profile": {
+    "hooks_before_retirement": 2,
+    "hooks_after_retiring_one_project_lane": 0,
+    "mcp_entry_remains": false
+  },
+  "lane_registry_mutation": {
+    "lane_token_present": true,
+    "provider_add_exit_code": 0,
+    "provider_registry_written": true
+  }
+}

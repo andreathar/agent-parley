@@ -101,6 +101,14 @@ def test_repository_without_commits_leads_with_the_first_commit(
     assert "Make the first commit" in printed
 
 
+def test_empty_git_marker_parent_does_not_make_a_checkout(path, tmp_path):
+    path("git")
+    (tmp_path / ".git").mkdir()
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert start.checkout(outside) == (False, False)
+
+
 def test_dirty_repository_points_at_its_uncommitted_work(
     path, repo, tmp_path, capsys
 ):

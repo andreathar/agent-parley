@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "roles": {
+    "movies-lane": {
+      "description": "Non-producer lane: no canonical records, no destructive media commands, no paid Kling calls.",
+      "deny_paths": [
+        "workspace.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "projects/*/manifest.json",
+        "projects/*/tasks/board.json",
+        "projects/*/00_brief/approvals.json",
+        "projects/*/00_brief/decisions/*",
+        "projects/*/credit-ledger.csv",
+        "projects/*/asset-registry.csv",
+        "projects/*/memory/STATE.md",
+        "projects/*/memory/session-log.json",
+        "projects/*/memory/mistakes.jsonl"
+      ],
+      "deny_commands": [
+        "\\bgit\\s+clean\\b",
+        "\\bgit\\s+reset\\s+--hard\\b",
+        "\\bgit\\s+lfs\\s+prune\\b",
+        "(?:^|[;&|])(?=[^;&|]*\\bgit\\s+restore\\b)(?=[^;&|]*(?:projects/|02_references|04_audio|05_storyboard|06_pilot|07_generations|08_edit|09_delivery|inbox|00_brief|credit-ledger\\.csv|asset-registry\\.csv))(?:(?![^;&|]*--staged)|(?=[^;&|]*--worktree))",
+        "(?:^|[;&|])(?=[^;&|]*(?:projects/|02_references|04_audio|05_storyboard|06_pilot|07_generations|08_edit|09_delivery|inbox|00_brief|credit-ledger\\.csv|asset-registry\\.csv))[^;&|]*(?:(?:^|[\\s/;&|])(?:rm|mv|shred|truncate)\\s|\\bgit\\s+checkout\\s+--|\\bgit\\s+rm\\b|\\bfind\\b[^;&|]*\\s-delete\\b|\\brsync\\b[^;&|]*--delete\\b)",
+        "\\bkling_batch\\.py\\b(?![^;&|]*--resume)",
+        "(?:^|[\\s/;&|])kling\\w*\\s[^;&|]*\\b(?:text_to_image|image_to_image|text_to_video|image_to_video|motion_control|omni_ref_video|element_create)\\b"
+      ]
+    }
+  },
+  "assign": {}
+}

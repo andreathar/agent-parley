@@ -38,6 +38,7 @@ def test_every_tracked_path_falls_into_a_category():
     "paths",
     [
         ["README.md"],
+        ["flowchart TB.mmd"],
         ["CHANGELOG.md", "docs/operations.md", "docs/assets/demo.svg"],
         [".github/ISSUE_TEMPLATE/bug.yml", ".github/PULL_REQUEST_TEMPLATE.md"],
         [".github/DISCUSSION_TEMPLATE/q-a.yml"],
@@ -50,7 +51,12 @@ def test_docs_and_other_workflows_run_one_ubuntu_leg(paths):
 
 @pytest.mark.parametrize(
     "path",
-    ["scripts/check_policy.py", "tests/test_bridge.py", "Makefile", "uv.lock"],
+    [
+        "scripts/check_policy.py",
+        "tests/test_bridge.py",
+        "Makefile",
+        "uv.lock",
+    ],
 )
 def test_tooling_runs_every_python_leg_without_wsl(path):
     assert legs(["README.md", path]) == {**EVERY_LEG, "wsl": False}
@@ -59,6 +65,8 @@ def test_tooling_runs_every_python_leg_without_wsl(path):
 @pytest.mark.parametrize(
     "path",
     [
+        ".claude/hook-audit-2026-10-11.md",
+        ".claude/hook-chain-auditor.skill",
         "agent_parley/launch.py",
         "tests/test_wsl.py",
         "pyproject.toml",

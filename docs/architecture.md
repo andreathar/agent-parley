@@ -9,6 +9,22 @@ when that policy records `auto`, and never on an agent's own authority.
 
 ## Responsibilities
 
+The agent management views share one read/configuration boundary:
+
+```mermaid
+flowchart LR
+    CLI[agents CLI] --> Inventory[agents service]
+    UI[Console Agents tab] --> Inventory
+    Inventory --> Roster[Existing roster and role catalog]
+    Inventory --> Evidence[Lane state and mail evidence]
+    Inventory --> Config[Preview and revision validation]
+    Config --> Audit[Atomic manifest preferences and audit]
+```
+
+Preferences do not change routing identities or operational role grants.
+Mail evidence preserves review/expiration separately from dispatch and task
+completion; missing correlated protocol receipts remain unknown.
+
 | Module | Responsibility |
 | --- | --- |
 | `entry` | Installed command's startup: answers a bare version flag, refuses native Windows with a pointer to WSL2, prints the start-here screen for a bare invocation, and hands every other invocation to `cli` unchanged |
@@ -27,7 +43,17 @@ when that policy records `auto`, and never on an agent's own authority.
 | `launch` | Native launch of a lane: registration, the coordination protocol, the lane hooks and the supervised native client; with `run --issue`, the claim and the opening digest of that issue, its quoted text held to `ISSUE_BUDGET` (6000 bytes) from `forge.issue_details` |
 | `terminal` | The launcher-owned native pseudo-terminal, its private wake control socket, removal of wake sockets no launcher listens on, and the lane-first tab title |
 | `dialogs` | Recognition of the native dialogs held on that terminal, the answer the operator configured, capacity records and escalation, and the opt-in that carries approval of this bridge's own tools |
-| `worktrees` | Git in the base checkout, stashing its pending work before registration, lane initialization and the base verification gate |
+| `worktrees` | Git in the base checkout, explicit opt-in stashing before registration, lane initialization and the base verification gate |
+| `preflight` | Read-only launch scope, configuration observations, native plugin records and effective supervision; never creates state or starts a client |
+| `wiring` | Read-only check that registered lanes' running clients use the service port and state home, that the service rejects tokenless requests, and that required environment variables are present; no tool call is exercised |
+| `roles` | Operator-defined role rules in the project's `roles.json` (outside every repository): capabilities, write and deny paths, shell patterns and tool globs, lane assignments and the built-in templates. The checkpoint refuses a matching `PreToolUse` call and records `role_refused`; an unreadable file refuses writes and shell calls. An operational barrier, not a sandbox |
+| `console` | Loopback operator console: token sign-in, per-session request tokens, fixed CLI action allowlist and the shared agent inventory/configuration service |
+| `agents` | Read-only participant inventory joining the existing roster, roles, lane states, task history and adapter capabilities; preview/CAS updates of display names and function preferences, atomically audited in the existing manifest without changing routing or grants |
+| `agents_cli` | Command declarations and rendering for the same inventory/configuration contract used by the console |
+| `mail_evidence` | Bounded SQLite read-only message metadata; explicit ACK review, persistent expiration and cancellation, without inferring native dispatch or task completion |
+| `adapter_evidence` | Sanitized prepared-launch declarations and generation correlation, kept separate from native loading and event evidence |
+| `opencode_context` | Private bounded durable context journal: atomic holding and attempt transitions, metadata-only inventory, correlated native part observations and no automatic retry of uncertain attachments |
+| `host_resources` | Cross-project and cross-home advisory host leases in a separate private atomic registry; explicit generation-bound release with no expiry |
 | `merges` | Merge refusals, preview and the merge itself, plus the readiness, dependency and group ordering that integration follows, and the durable record of an integration the base has not verified |
 | `server` | Authenticated MCP transport and bounded tool contracts |
 | `store` | SQLite schema, migration, scoped mail, atomic leases, the queue waiting on a held key, and tool events |
@@ -93,6 +119,13 @@ store loses the record rather than delaying the call. This telemetry write
 does acquire a write lock when available. Retention is bounded to the most
 recent 2000 events per project, and
 telemetry never decides an outcome.
+
+Host resource tools are an explicit exception to the shared project transaction:
+they commit under the separate user-wide resource registry lock, allowing two
+services with different state homes to coordinate. Local event telemetry is a
+best-effort write after that commit. Its failure never reverses a resource grant.
+The host registry retains ownership until generation-bound explicit release;
+project reservation expiry, retirement and reclamation do not release it.
 
 The notifier sits downstream of both, and decides nothing. A checkpoint records
 its decision in the participant event log first and only then offers it to
@@ -716,9 +749,10 @@ credential value enters bridge state. Sign-in inside each config home remains th
 native CLI's own action.
 
 Registering a project reads committed HEAD, so pending base-checkout work would
-never reach a lane. Rather than refusing, `setup`, `participant add` and `run`
-stash that work with `git stash push --include-untracked` when they create the
-project manifest, then report the entry on standard error. One stash stack is
+never reach a lane. Initial `setup`, `participant add` and `run` refuse a dirty
+base without moving any work. Only explicit `setup PATH --stash` authorizes
+`git stash push --include-untracked` before manifest creation and reports its
+entry on standard error. One stash stack is
 shared by every worktree of a repository, so the entry carries a unique message
 and is restored by name with `git stash apply <entry>` rather than by position.
 Nothing is reset, cleaned or force-switched, and a checkout Git cannot fully
@@ -1678,3 +1712,8 @@ instead of being treated as absent FTS5 support.
 CI covers temporary Git repositories, independent MCP clients, concurrent calls,
 authorization failures, persistence, resource budgets and isolated wheel installs.
 It does not demonstrate compliance by a paid live model session.
+
+## Lightweight workspaces and shared media
+
+See [Shared media](shared-media.md) for the opt-in profile, preview/CAS CLI,
+per-task outputs, sparse-before-LFS preparation and native access limits.

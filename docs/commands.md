@@ -52,6 +52,60 @@ on standard output and export to a file.
 
 ## Command reference
 
+`agents list` and `agents status` share the console's Agents tab reading.
+Use `--json` for the versioned envelope, per-agent tasks, message receipts,
+adapter gaps and evidence of hooks, skills and plugin files. `--repo ROOT`
+selects a registered project. An empty roster is a valid empty reading.
+
+`agents configure ID --repo ROOT --display-name "Reviewer" --role review`
+previews a display name and a function preference selected from the existing
+project roles. Omit `--role` to retain the preference, or pass an empty value
+to clear it. The immutable participant ID and routing name remain unchanged.
+Apply the reviewed result with `--apply --expected-revision REVISION`, using
+the revision returned by the preview. A concurrent change requires a new
+preview; an identical repeated apply records no second audit entry.
+Function preferences do not assign operational permissions. Existing `role`
+commands remain the authority for operational assignments and grants.
+
+The Agents tab provides the same preview, apply, back and cancel steps.
+Its source includes existing project/lane skill directories and known private
+adapter artifact names. Detected files do not prove native loading;
+`configured`, `detected`, `available` and `verified` remain separate fields.
+Unknown configuration is reported when inspecting it would require reading
+native credential-bearing files. Historical hook evidence remains labelled
+as historical. Stale telemetry does not prove current activity or connection.
+
+Message ACK means explicit review of coordination mail, not task acceptance.
+Expiration stays visible after an expectation is retired, including a later
+ACK. Native dispatch and terminal completion are unknown when the protocol
+holds no correlated receipt. A read timestamp or zero pending ACKs cannot
+prove either. No inventory operation retries messages.
+
+CLI exit codes are `0` for a successful reading/operation, `1` for an
+operational error or partial inventory warning and `2` for malformed command
+arguments. Partial inventory retains readable projects and warnings in its
+normal envelope. `--json` runtime
+errors retain the existing `agent-parley/read/v1` error envelope; stderr gives
+an actionable explanation. Use `doctor --json` for compatibility and service
+health and `wiring --json --repo ROOT` for native binding evidence.
+
+`plugins status --json` reports all existing adapters, native plugin
+installation observations, unsupported hooks and required guard gaps. It
+retains activation as unknown until there is native evidence. Marketplace
+listing reads are bounded to five seconds per invocation. `plugins install
+--preview --json` prints conditional install/refresh commands without running
+them; applying an installation remains an operator action. Native plugin
+installation changes do not hot reload existing sessions.
+
+New launches expose sanitized configuration receipts in the Agents tab.
+`configured` refers to the prepared declarations for the matching launch
+generation. Hook verification means a correlated native event was observed;
+the observation's time and freshness remain visible. It never establishes
+continuous activation, connectivity, task acceptance or completion. OpenCode
+context journal summaries expose held, attempted, uncertain and part-update
+observations without context bodies or native session text. Reconnection
+never automatically replays an attempted or uncertain entry.
+
 | Command | Purpose |
 | --- | --- |
 | `--version`, `-V` | Print the installed version and exit. |
@@ -98,7 +152,8 @@ on standard output and export to a file.
 | `notify setup --chat ID` | Store the Telegram chat id, owner-only; `--inbound` also answers status queries from that chat. The bot token, and with `--inbound` the passcode, are read from a prompt or standard input. |
 | `notify test` | Send one test message on each configured transport. |
 | `doctor` | Report the launcher, store and service components and their fit, one plugin row per supported CLI and config home naming the installed version against the launcher's, a `service` row naming the running service's version against the launcher's (`--json` adds `plugins` and `server`), plus `projects` (registered roots that no longer exist), `notify` (whether outbound and inbound notification are active), `approvals` (lanes lacking the resume opt-in), `tokens` (providers whose token usage is read and those not measured), `hooks` (hook deadline expiries the service log still holds from the last 7 days and the slowest stage of the latest) and the host platform; non-zero exit on a version mismatch, a missing project root, or a notification transport configured but unable to send. A setup gap under `approvals`, any `hooks` count and notification that is simply off leave the exit at zero. |
-| `plugins install` | For each of `claude` and `codex` found on PATH, add the `suneel944/agent-parley` marketplace and install `agent-parley@agent-parley` through the CLI's own plugin commands, only where its listing lacks them; a re-run refreshes the marketplace and updates the plugin instead, never adding a second entry. Non-zero exit when a detected CLI's command fails. |
+| `doctor` | Report the launcher, store and service components and their fit, one plugin row per supported CLI and config home naming the installed version against the launcher's, a `service` row naming the running service's version against the launcher's (`--json` adds `plugins` and `server`), plus `projects` (registered roots that no longer exist), `notify` (whether outbound and inbound notification are active), `approvals` (lanes lacking the resume opt-in), `tokens` (providers whose token usage is read and those not measured), `hooks` (hook deadline expiries the service log still holds from the last 7 days and the slowest stage of the latest) and the host platform; non-zero exit on a version mismatch, a missing project root, or a notification transport configured but unable to send. A setup gap under `approvals`, any `hooks` count and notification that is simply off leave the exit at zero. |
+| `plugins install` | For each of `claude` and `codex` found on PATH, add the `andreathar/agent-parley` marketplace and install `agent-parley@agent-parley` through the CLI's own plugin commands, only where its listing lacks them; a re-run refreshes the marketplace and updates the plugin instead, never adding a second entry. Non-zero exit when a detected CLI's command fails. |
 | `plugins status` | Report, per supported CLI, whether it is on PATH, has the marketplace and has the plugin installed; writes nothing. |
 | `problems` | List every lane, claim and store condition that needs attention, oldest first, one row per lane per cause with its count and the remedy the lane's state allows, except that two or more lanes of one project lacking the resume opt-in share one project row naming them; rows the supervision service is handling say so, `--ack-after` sets the acknowledgement age, `--json` prints it for scripts, exit 1 when any listed row exists. A row older than `fold_after` that belongs to a lane `status` folds out as long dead is left out and counted on one closing line such as `5 dead-lane problems older than 24h hidden; --all shows them`, and the JSON document counts it as `folded`; a live lane's problem is always listed, and `--all` lists every row. |
 | `problems ack ID` | Record your own acknowledgement of one message a lane left unanswered. It clears that condition and nothing else: no ownership moves, no reservation is released and no lane is woken. |
@@ -340,3 +395,8 @@ attachment is removed when its record is pruned or its offer is declined,
 cancelled, released, completed or resolved. A full allowance releases the
 lane's oldest message attachments that every recipient has read; `--full`
 then says the body was released and the message keeps its first slice.
+
+## Lightweight workspaces and shared media
+
+See [Shared media](shared-media.md) for the opt-in profile, preview/CAS CLI,
+per-task outputs, sparse-before-LFS preparation and native access limits.

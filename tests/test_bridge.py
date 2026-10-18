@@ -109,7 +109,7 @@ def test_setup_refuses_a_repository_without_commits(bridge, tmp_path):
 def test_dirty_source_is_preserved_as_a_stash_entry(bridge, repo, capsys):
     (repo / "shared.txt").write_text("uncommitted work\n")
     (repo / "untracked.txt").write_text("untracked work\n")
-    data = bridge.setup(repo)
+    data = bridge.setup(repo, stash=True)
     assert data["base"] == git(repo, "rev-parse", "--verify", "HEAD")
     assert not git(repo, "status", "--porcelain")
     assert (repo / "shared.txt").read_text() == "original\n"
@@ -1117,7 +1117,9 @@ def test_native_launch_preserves_task_and_passes_shared_configuration(
         " sys.exit(print('9.9.9 (fake client)'))\n"
         "with open(os.environ['CAPTURE'], 'w') as f:\n"
         " json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(), "
-        "'has_token': bool(os.environ.get('AGENT_PARLEY_TOKEN'))}, f)\n"
+        "'has_token': bool(os.environ.get('AGENT_PARLEY_TOKEN')), "
+        "'participant': os.environ.get('AGENT_PARLEY_PARTICIPANT'), "
+        "'root': os.environ.get('AGENT_PARLEY_PROJECT_ROOT')}, f)\n"
     )
     executable.chmod(0o755)
     capture = tmp_path / "capture.json"
@@ -1139,6 +1141,8 @@ def test_native_launch_preserves_task_and_passes_shared_configuration(
     assert state["client"] == agent
     assert state["client_version"] == "9.9.9 (fake client)"
     assert result["has_token"]
+    assert result["participant"] == agent
+    assert result["root"] == str(bridge.setup(repo)["root"])
     assert task in result["argv"][-1]
     assert bridge.config["token"] not in json.dumps(result)
     assert str(repo) in " ".join(result["argv"])
@@ -2775,7 +2779,7 @@ def test_many_accounts_of_one_provider_run_side_by_side(
 
 
 def test_a_copilot_lane_configures_only_its_own_client_home(
-    bridge, repo, monkeypatch, tmp_path
+    bridge, repo, monkeypatch, tmp_path, capsys
 ):
     """Exercises the file-configured adapter without a model call."""
     binary = tmp_path / "bin"
@@ -2797,8 +2801,23 @@ def test_a_copilot_lane_configures_only_its_own_client_home(
     with pytest.raises(BridgeError, match="credential profile") as refusal:
         bridge.launch("solo", repo, "Work on issue 42", "copilot")
 
+    assert refusal.value.next_command == (
+        "agent-parley credentials list --json"
+    )
+    inspection = shlex.split(refusal.value.next_command)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [inspection[0], "--home", str(bridge.home), *inspection[1:]],
+    )
+    assert main() == 0
+    assert json.loads(capsys.readouterr().out)["credentials"] == []
     account = tmp_path / "copilot-account"
-    suggested = shlex.split(str(refusal.value).split("`")[1])
+    suggested = next(
+        shlex.split(command)
+        for command in re.findall(r"`([^`]+)`", str(refusal.value))
+        if command.startswith("agent-parley credentials add ")
+    )
     placeholders = {"NAME": "work", "DIR": str(account)}
     monkeypatch.setattr(
         sys,

@@ -22,6 +22,49 @@ from agent_parley.core import BridgeCore
 if TYPE_CHECKING:
     from agent_parley.cli import Bridge
 
+
+def launch_receipt(
+    directory: Path,
+    participant: str,
+    adapter: str,
+    hooks: dict,
+    session: str | None,
+) -> dict:
+    """Records the hook declarations actually prepared by this adapter.
+
+    No command, credential, environment value or native configuration is
+    copied into the receipt. Prepared declarations do not prove a successful
+    spawn, runtime loading or task acceptance.
+
+    Args:
+        directory: Existing private project state directory.
+        participant: Stable participant ID.
+        adapter: Native adapter that prepared the command.
+        hooks: Shared hook definitions used by the launch.
+        session: Existing native session ID during an explicit resume.
+
+    Returns:
+        Sanitized declaration with a new launch generation.
+    """
+    from agent_parley import adapter_evidence, amp, gemini, opencode, roster
+    from agent_parley.cli import COPILOT_EVENTS
+
+    supported = {
+        "gemini": set(gemini.EVENTS.values()),
+        "opencode": set(opencode.EVENTS.values()),
+        "amp": set(amp.EVENTS.values()),
+        "copilot": set(COPILOT_EVENTS),
+    }.get(adapter, set(roster.HOOK_EVENTS))
+    return adapter_evidence.record_launch(
+        directory,
+        participant,
+        adapter,
+        configured_hooks=[event for event in hooks if event in supported],
+        configured_skills=[],
+        session_generation=session,
+    )
+
+
 ISSUE_BUDGET = 6000
 ISSUE_COMMENTS = 3
 ISSUE_COMMENT_BYTES = 600
@@ -345,6 +388,12 @@ extra worktree only as {reclaim.extras(data["lanes"][agent])}/NAME;
 the supervisor moves one made elsewhere there. Remove it with
 `git worktree remove` once its pull request merges. Shared
 ports/databases need coordination; worktrees do not isolate those resources.
+For resources shared across repositories or installations, use
+reserve_host_resources with canonical keys such as gpu:0 or port:5432.
+These host leases are advisory and never expire; release their exact IDs
+through release_host_resources after use. File reservations and their named
+resource keys coordinate only within this project. Older installations and
+programs that do not use the host registry do not participate.
 Follow repository commit rules. Attribution of any kind is refused: a commit,
 merge, tag or pull request that credits an assistant, names a vendor or model in
 an authorship position, or carries a generator signature is denied before it
@@ -427,6 +476,7 @@ reported.
         resume: bool = False,
         issue: str = "",
         blueprint: str = "",
+        output_task: str = "",
     ) -> int:
         """Runs one participant's native CLI in its persistent lane.
 
@@ -515,6 +565,7 @@ reported.
             issue: Issue number to claim and hydrate before the first turn.
             blueprint: Recorded blueprint the claim runs through; needs
                 ``issue``.
+            output_task: Stable output task ID for a shared-media workspace.
 
         Returns:
             The native process exit code.
@@ -571,8 +622,33 @@ reported.
             )
         process.check_repository_host(repo)
         directory = self.project(repo, create=False)[1]
-        recorded = (
+        from agent_parley import checkpoints, workspace
+
+        current_manifest = (
             roster.read(directory)
+            if (directory / "project.json").exists()
+            else {}
+        )
+        if workspace.profile(current_manifest):
+            existing = current_manifest["participants"].get(agent, {})
+            chosen_provider = provider or existing.get("provider") or agent
+            chosen_adapter = roster.provider(self.home, chosen_provider)[
+                "adapter"
+            ]
+            if not workspace.capability(chosen_adapter)["supported"]:
+                raise BridgeError(
+                    f"{chosen_adapter} cannot use shared media; "
+                    "no lane created."
+                )
+            if not output_task and number:
+                output_task = f"issue-{number}"
+            if not output_task and resume:
+                output_task = checkpoints.activity(directory, agent).get(
+                    "output_task", ""
+                )
+            roster.identifier(output_task, "output task (--output-task)")
+        recorded = (
+            current_manifest
             if (directory / "project.json").exists()
             else {}
         )
@@ -617,6 +693,9 @@ reported.
             )
         participant = data["participants"][agent]
         entry = roster.provider(self.home, participant["provider"])
+        shared_roots = workspace.launch_roots(
+            data, participant, entry["adapter"], output_task
+        )
         account = roster.launch_environment(
             self.home, entry, participant["credential"]
         )
@@ -727,6 +806,21 @@ reported.
                 with contextlib.suppress(BridgeError, OSError):
                     supervision.forget_delivered(lane.parent, agent)
             prompt = self.protocol(agent, data)
+            if shared_roots:
+                prompt += (
+                    "\nShared-media inputs: "
+                    + shared_roots["AGENT_PARLEY_MEDIA_ROOT"]
+                    + "\nAsset catalog: "
+                    + shared_roots["AGENT_PARLEY_ASSET_CATALOG"]
+                    + "\nWrite task derivatives only to: "
+                    + shared_roots["AGENT_PARLEY_OUTPUT_ROOT"]
+                    + "\nPaths do not grant access or enforce read-only media. "
+                    "If native access is refused, report it; never copy or "
+                    "modify canonical inputs to bypass the refusal."
+                )
+                Path(shared_roots["AGENT_PARLEY_OUTPUT_ROOT"]).mkdir(
+                    parents=True, exist_ok=True, mode=0o700
+                )
             hooks = self.hooks(agent, lane.parent)
             inherited = dict(os.environ)
             inherited.pop(entry.get("home_env") or "", None)
@@ -736,6 +830,8 @@ reported.
                 "AGENT_PARLEY_TOKEN": identity["registration_token"],
                 "AGENT_PARLEY_HOME": str(self.home),
                 PARTICIPANT_ENV: agent,
+                "AGENT_PARLEY_PROJECT_ROOT": str(data["root"]),
+                **shared_roots,
             }
             client_version = dialogs.version_of(executable)
             if limit := supervision.opt_in_unsupported(
@@ -848,10 +944,13 @@ reported.
                         "a lane needs a credential profile that gives it one "
                         "of its own. Without that, this lane's hooks would "
                         "run in every session started from your own "
-                        "configuration directory. Define a profile with "
+                        "configuration directory. Inspect existing profiles "
+                        "with `agent-parley credentials list --json` first. "
+                        "If none has an isolated config home, define one with "
                         "`agent-parley credentials add NAME --config-home "
                         "DIR`, sign in to it once, and launch with "
-                        "--credentials NAME."
+                        "--credentials NAME.",
+                        next_command="agent-parley credentials list --json",
                     )
                 sharing = occupants(
                     self.home, Path(config_home), lane.parent, agent
@@ -983,6 +1082,15 @@ reported.
                     else:
                         command[1:1] = ["--resume", session]
                 previous.update(
+                    launch_generation=launch_receipt(
+                        lane.parent,
+                        agent,
+                        entry["adapter"],
+                        hooks,
+                        previous["resumable_session"]
+                        if resume and not rotating
+                        else None,
+                    )["generation"],
                     activity=supervision.STARTING,
                     launcher_managed=True,
                     task=task,
@@ -1001,6 +1109,11 @@ reported.
                     plugin_version=plugin_version,
                     degraded=degraded,
                 )
+                if shared_roots:
+                    previous.update(
+                        output_task=output_task,
+                        output_root=shared_roots["AGENT_PARLEY_OUTPUT_ROOT"],
+                    )
                 previous.pop("plugin_notified", None)
                 previous.pop("last_prompt", None)
                 previous.pop("operator_stopped", None)

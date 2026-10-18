@@ -404,7 +404,7 @@ await hooks["tool.execute.before"](
 );
 const result = { title: "", output: "done", metadata: {} };
 await hooks["tool.execute.after"]({ sessionID: "s1", tool: "bash" }, result);
-const message = { parts: [] };
+const message = { message: { id: "msg_1", sessionID: "s1" }, parts: [] };
 await hooks["chat.message"]({ sessionID: "s1" }, message);
 console.log(JSON.stringify({ result: result.output, parts: message.parts }));
 """
@@ -423,6 +423,17 @@ def test_context_from_every_event_reaches_the_session(tmp_path):
     plugin.write_text(
         opencode.PLUGIN.replace(
             "__COMMAND__", json.dumps([sys.executable, "-c", reply])
+        ).replace(
+            "__JOURNAL_COMMAND__",
+            json.dumps(
+                [
+                    sys.executable,
+                    "-m",
+                    "agent_parley.opencode_context",
+                    str(tmp_path / "context.json"),
+                    "test-generation",
+                ]
+            ),
         )
     )
     result = subprocess.run(
@@ -433,7 +444,13 @@ def test_context_from_every_event_reaches_the_session(tmp_path):
     )
     shown = json.loads(result.stdout)
     assert shown["result"] == "done\n\nMessage 1\n\nMessage 2\n\nMessage 3"
-    assert shown["parts"] == [{"type": "text", "text": "Message 4"}]
+    assert len(shown["parts"]) == 1
+    part = shown["parts"][0]
+    assert part["id"].startswith("prt_")
+    assert part["messageID"] == "msg_1"
+    assert part["sessionID"] == "s1"
+    assert part["synthetic"] is True
+    assert part["text"] == "Message 4"
 
 
 def test_plugin_events_and_tool_names_reach_the_shared_parser():

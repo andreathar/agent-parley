@@ -1,0 +1,89 @@
+uv sync --locked
+Resolved 58 packages in 0.79ms
+Checked 55 packages in 0.65ms
+uv run --locked ruff check .
+All checks passed!
+uv run --locked ruff format --check .
+250 files already formatted
+uv run --locked mypy
+Success: no issues found in 87 source files
+uv run --locked python scripts/check_policy.py
+Policy: documented code, no inline comments, stdlib runtime, aligned versions, directory-ready manifests, portable README links
+make build
+make[1]: Entering directory '/mnt/data/Projects_SSD/agent-parley'
+uv build --no-sources
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/agent_parley-0.18.0.tar.gz
+Successfully built dist/agent_parley-0.18.0-py3-none-any.whl
+make[1]: Leaving directory '/mnt/data/Projects_SSD/agent-parley'
+uv run --locked pytest -q -n auto
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 20%]
+........................................................................ [ 22%]
+........................................................................ [ 25%]
+........................................................................ [ 28%]
+........................................................................ [ 30%]
+........................................................................ [ 33%]
+........................................................................ [ 35%]
+........................................................................ [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 43%]
+........................................................................ [ 45%]
+........................................................................ [ 48%]
+........................................................................ [ 50%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 61%]
+........................................................................ [ 63%]
+........................................................................ [ 66%]
+........................................................................ [ 68%]
+........................................................................ [ 71%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+ss...................................................................... [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 94%]
+........................................................................ [ 96%]
+........................................................................ [ 99%]
+...................                                                      [100%]
+=============================== warnings summary ===============================
+tests/test_dialogs.py::test_an_attached_answer_waits_for_the_operator_to_finish_a_line
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[O]
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[<35;12;7M]
+tests/test_dialogs.py::test_a_mouse_or_cursor_report_does_not_answer_a_held_dialog[\x1b[24;80R]
+tests/test_dialogs.py::test_an_operator_digit_still_answers_a_held_dialog
+  /home/athar/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/pty.py:66: DeprecationWarning: This process (pid=3631977) is multi-threaded, use of forkpty() may lead to deadlocks in the child.
+    pid, fd = os.forkpty()
+
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_cursor_report
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[\x1b[200~fix the bug\n\x1b[201~]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\x1b\r]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\\r]
+tests/test_terminal.py::test_attached_launcher_refuses_a_wake_into_a_multi_line_draft[draft line\n]
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line[\x1b]
+tests/test_terminal.py::test_attached_launcher_admits_a_wake_after_a_lone_esc_or_erased_line[x\x7f]
+  /home/athar/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/pty.py:66: DeprecationWarning: This process (pid=3631955) is multi-threaded, use of forkpty() may lead to deadlocks in the child.
+    pid, fd = os.forkpty()
+
+tests/test_terminal.py::test_attached_launcher_relays_the_lane_title[True]
+tests/test_terminal.py::test_attached_launcher_relays_the_lane_title[False]
+  /home/athar/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/pty.py:66: DeprecationWarning: This process (pid=3631966) is multi-threaded, use of forkpty() may lead to deadlocks in the child.
+    pid, fd = os.forkpty()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2825 passed, 2 skipped, 14 warnings in 403.24s (0:06:43)

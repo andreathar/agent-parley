@@ -4,8 +4,10 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import Iterator
+from pathlib import Path
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from agent_parley import forge, process, records, server
 from agent_parley.cli import Bridge, git
@@ -49,7 +51,11 @@ def git_config(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
-def native_config_homes(tmp_path, monkeypatch, git_config):
+def native_config_homes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    git_config: Path,
+) -> None:
     """Keeps every state read inside each test's own directory.
 
     The command line falls back to ``AGENT_PARLEY_HOME`` when a test drives
@@ -71,7 +77,12 @@ def native_config_homes(tmp_path, monkeypatch, git_config):
     Each test starts with no recorded forge failure, so a refusal one test
     records never puts a later test's poll into the forge backoff.
     """
-    for variable in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "AGENT_PARLEY_HOME"):
+    for variable in (
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "AGENT_PARLEY_HOME",
+        "AGENT_PARLEY_RESOURCE_HOME",
+    ):
         monkeypatch.setenv(variable, str(tmp_path / variable.lower()))
     for adapter, variable in (
         ("claude", "CLAUDE_CONFIG_DIR"),
@@ -110,7 +121,7 @@ def calm_host(monkeypatch):
 
 
 @pytest.fixture
-def bridge(tmp_path):
+def bridge(tmp_path: Path) -> Iterator[Bridge]:
     """Allocates private coordination state and tears down its own service."""
     instance = Bridge(tmp_path / "state")
     with socket.socket() as sock:
@@ -152,14 +163,14 @@ def service(threaded_service):
 
 
 @pytest.fixture
-def paired(bridge, repo):
+def paired(bridge: Bridge, repo: Path) -> dict[str, object]:
     """Registers the two-participant roster most coordination tests assume."""
     bridge.add_participant(repo, "claude", "claude")
     return bridge.add_participant(repo, "codex", "codex")
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path: Path) -> Path:
     """Creates a committed repository whose path exercises spaces."""
     path = tmp_path / "project with spaces"
     path.mkdir()

@@ -6581,9 +6581,12 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
                     continue
                 if landings is None:
                     landings = _landing_reading(root, base)
-                if number not in landings:
+                landing = landings.get(number)
+                if landing is None:
                     continue
-                reading = landings[number]
+                reading = landing
+            if reading is None:
+                continue
             execution = lifecycle.state(record)
             ready = (
                 execution["state"] == lifecycle.READY
@@ -6593,6 +6596,7 @@ def completed_claims(manifest: dict, ledger: dict) -> dict[str, dict]:
             before = reading["closed_at"] < since
             if before and not ready:
                 continue
+            assert reading is not None
             seen = {
                 "branch": reading["branch"] or f"issue #{number}",
                 "state": reading["state"],

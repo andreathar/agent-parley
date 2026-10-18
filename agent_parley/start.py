@@ -77,7 +77,8 @@ class Found(NamedTuple):
 def checkout(directory: Path) -> tuple[bool, bool | None, bool]:
     """Says whether a directory is in a Git checkout and what state it is in.
 
-    Membership is read from a ``.git`` entry in the directory or a parent,
+    Membership is read from a Git directory holding HEAD or a worktree's
+    ``.git`` file in the directory or a parent. An empty marker is ignored,
     so a slow or missing Git never makes a plain directory read as a
     checkout; Git runs only to learn whether a found checkout is dirty and
     whether it has a first commit. It runs with ``--no-optional-locks`` so
@@ -95,7 +96,8 @@ def checkout(directory: Path) -> tuple[bool, bool | None, bool]:
     """
     resolved = directory.resolve()
     if not any(
-        (place / ".git").exists() for place in (resolved, *resolved.parents)
+        (place / ".git").is_file() or (place / ".git" / "HEAD").is_file()
+        for place in (resolved, *resolved.parents)
     ):
         return False, False, False
     try:

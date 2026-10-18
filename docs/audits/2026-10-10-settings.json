@@ -1,0 +1,6891 @@
+{
+  "source_commit": "6a4d0572c2544023fe6a50e439b953b2915187e2",
+  "scope": "Configuration surface inventory; CLI options are extracted from the local parser without dispatching commands. Constants are code limits, not necessarily operator settings. No runtime tokens or user configuration values are included.",
+  "project_normalized_defaults": {
+    "version": 2,
+    "root": "<base checkout>",
+    "base": "<commit>",
+    "branch_prefix": "parley",
+    "verify": [],
+    "initialize": [],
+    "resources": [],
+    "deadlines": {},
+    "budget": {},
+    "forge": null,
+    "approval": [],
+    "pull_request": {},
+    "integration": {},
+    "supervision": {},
+    "participants": {}
+  },
+  "supervision_defaults": {
+    "interval": 30,
+    "inactive_after": 300,
+    "stalled_after": 600,
+    "start_deadline": 30,
+    "completion_reminders": 3,
+    "orphan_retire_after": 3600,
+    "claim_idle_after": 3600,
+    "takeover_grace": 300,
+    "max_claims_per_lane": 2,
+    "convergence_repeats": 3,
+    "convergence_after": 14400,
+    "prompts": true,
+    "wake": true,
+    "reclaim": true,
+    "titles": true,
+    "rerun_cancelled": true,
+    "rotate": true,
+    "ci_rounds": 2,
+    "fold_after": 86400
+  },
+  "provider_presets": {
+    "claude": {
+      "adapter": "claude",
+      "command": "claude",
+      "home_env": "CLAUDE_CONFIG_DIR",
+      "env": {},
+      "require_env": []
+    },
+    "codex": {
+      "adapter": "codex",
+      "command": "codex",
+      "home_env": "CODEX_HOME",
+      "env": {},
+      "require_env": []
+    },
+    "deepseek": {
+      "adapter": "claude",
+      "command": "claude",
+      "home_env": "CLAUDE_CONFIG_DIR",
+      "env": {},
+      "require_env": [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN"
+      ]
+    },
+    "kimi": {
+      "adapter": "claude",
+      "command": "claude",
+      "home_env": "CLAUDE_CONFIG_DIR",
+      "env": {},
+      "require_env": [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN"
+      ]
+    },
+    "grok": {
+      "adapter": "codex",
+      "command": "codex",
+      "home_env": "CODEX_HOME",
+      "env": {},
+      "require_env": [
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY"
+      ]
+    },
+    "copilot": {
+      "adapter": "copilot",
+      "command": "copilot",
+      "home_env": "COPILOT_HOME",
+      "env": {},
+      "require_env": []
+    },
+    "gemini": {
+      "adapter": "gemini",
+      "command": "gemini",
+      "home_env": "GEMINI_CLI_HOME",
+      "env": {},
+      "require_env": []
+    },
+    "opencode": {
+      "adapter": "opencode",
+      "command": "opencode",
+      "home_env": "OPENCODE_CONFIG_DIR",
+      "env": {},
+      "require_env": []
+    },
+    "amp": {
+      "adapter": "amp",
+      "command": "amp",
+      "home_env": "AMP_SETTINGS_FILE",
+      "env": {},
+      "require_env": []
+    }
+  },
+  "native_hook_gaps": {
+    "claude": [],
+    "codex": [],
+    "copilot": [],
+    "gemini": [
+      "PermissionRequest"
+    ],
+    "opencode": [
+      "SessionEnd"
+    ],
+    "amp": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PermissionRequest",
+      "Stop",
+      "SessionEnd"
+    ]
+  },
+  "timeout_kinds": {
+    "orphan_claim": {
+      "reversibility": "reversible",
+      "recommended": "reassign",
+      "undo": "agent-parley issue assign {issue} {lane}",
+      "summary": "reassign a dead lane's orphaned claim"
+    },
+    "closed_claim": {
+      "reversibility": "reversible",
+      "recommended": "resolve",
+      "undo": "agent-parley issue assign {issue} {lane}",
+      "summary": "end a claim whose issue a merged pull request closed"
+    },
+    "idle_key": {
+      "reversibility": "reversible",
+      "recommended": "release",
+      "undo": "agent-parley say {lane} {key} --subject 'Reserve this key again'",
+      "summary": "release a key its idle holder never uses"
+    },
+    "failed_ci": {
+      "reversibility": "reversible",
+      "recommended": "rerun once",
+      "undo": "gh run cancel {run}",
+      "summary": "re-run a failed CI job once"
+    },
+    "merge_default": {
+      "reversibility": "irreversible",
+      "recommended": "wait for the operator",
+      "undo": "",
+      "summary": "merge to the default branch"
+    },
+    "release_tag": {
+      "reversibility": "irreversible",
+      "recommended": "wait for the operator",
+      "undo": "",
+      "summary": "publish a release or tag"
+    },
+    "discard_work": {
+      "reversibility": "irreversible",
+      "recommended": "wait for the operator",
+      "undo": "",
+      "summary": "discard uncommitted work"
+    },
+    "delete_branch": {
+      "reversibility": "irreversible",
+      "recommended": "wait for the operator",
+      "undo": "",
+      "summary": "delete a branch"
+    },
+    "native_permission": {
+      "reversibility": "irreversible",
+      "recommended": "wait for the operator",
+      "undo": "",
+      "summary": "answer a native permission prompt"
+    }
+  },
+  "blueprint_node_fields": {
+    "run": [
+      "command",
+      "timeout"
+    ],
+    "push": [
+      "timeout"
+    ],
+    "pull-request": [],
+    "wait-ci": [],
+    "agent": [
+      "prompt"
+    ],
+    "report": [
+      "message",
+      "outcome"
+    ]
+  },
+  "environment_names": {
+    "AGENT_PARLEY_BASE": [
+      "agent_parley/blueprints.py:834",
+      "agent_parley/worktrees.py:307"
+    ],
+    "AGENT_PARLEY_DELIVERY_SECONDS": [
+      "agent_parley/delivery.py:40"
+    ],
+    "AGENT_PARLEY_HOME": [
+      "agent_parley/cli.py:5393",
+      "agent_parley/cli.py:5417",
+      "agent_parley/demo.py:209",
+      "agent_parley/launch.py:602",
+      "agent_parley/start.py:338",
+      "scripts/acceptance.py:1177",
+      "scripts/acceptance.py:1189",
+      "scripts/benchmark.py:50",
+      "scripts/record_live.py:660",
+      "scripts/record_live.py:667"
+    ],
+    "AGENT_PARLEY_HOOK_PID": [
+      "agent_parley/checkpoints.py:93",
+      "agent_parley/hook.py:56"
+    ],
+    "AGENT_PARLEY_INBOUND": [
+      "agent_parley/cli.py:1112",
+      "agent_parley/cli.py:3662",
+      "agent_parley/inbound.py:309",
+      "agent_parley/inbound.py:330",
+      "agent_parley/notify.py:43"
+    ],
+    "AGENT_PARLEY_INBOUND_PASSCODE": [
+      "agent_parley/cli.py:3663",
+      "agent_parley/inbound.py:336",
+      "agent_parley/inbound.py:882",
+      "agent_parley/notify.py:44"
+    ],
+    "AGENT_PARLEY_NOTIFY": [
+      "agent_parley/checkpoints.py:720",
+      "agent_parley/cli.py:3651",
+      "agent_parley/notify.py:248",
+      "agent_parley/notify.py:285",
+      "agent_parley/notify.py:328",
+      "agent_parley/notify.py:40",
+      "agent_parley/notify.py:791",
+      "agent_parley/notify.py:875"
+    ],
+    "AGENT_PARLEY_PORT": [
+      "agent_parley/core.py:54",
+      "agent_parley/demo.py:210",
+      "scripts/record_live.py:661",
+      "scripts/record_live.py:668"
+    ],
+    "AGENT_PARLEY_SERVICE_ANSWERED": [
+      "agent_parley/hook.py:57"
+    ],
+    "AGENT_PARLEY_SMTP_FROM": [
+      "agent_parley/notify.py:362"
+    ],
+    "AGENT_PARLEY_SMTP_HOST": [
+      "agent_parley/notify.py:358"
+    ],
+    "AGENT_PARLEY_SMTP_PASSWORD": [
+      "agent_parley/notify.py:361"
+    ],
+    "AGENT_PARLEY_SMTP_PORT": [
+      "agent_parley/notify.py:302"
+    ],
+    "AGENT_PARLEY_SMTP_TLS": [
+      "agent_parley/notify.py:340"
+    ],
+    "AGENT_PARLEY_SMTP_TO": [
+      "agent_parley/notify.py:347"
+    ],
+    "AGENT_PARLEY_SMTP_USER": [
+      "agent_parley/notify.py:360"
+    ],
+    "AGENT_PARLEY_SPEC": [
+      "scripts/install.sh:10",
+      "scripts/install.sh:68"
+    ],
+    "AGENT_PARLEY_TELEGRAM_API": [
+      "agent_parley/notify.py:355"
+    ],
+    "AGENT_PARLEY_TELEGRAM_CHAT": [
+      "agent_parley/cli.py:3652",
+      "agent_parley/notify.py:354",
+      "agent_parley/notify.py:41"
+    ],
+    "AGENT_PARLEY_TELEGRAM_TOKEN": [
+      "agent_parley/cli.py:3653",
+      "agent_parley/notify.py:353",
+      "agent_parley/notify.py:42"
+    ],
+    "AGENT_PARLEY_TOKEN": [
+      "agent_parley/cli.py:1375",
+      "agent_parley/launch.py:601",
+      "agent_parley/pool.py:334",
+      "agent_parley/roster.py:56",
+      "agent_parley/unattended.py:65"
+    ]
+  },
+  "commands": [
+    {
+      "command": "agent-parley",
+      "options": [
+        {
+          "names": [
+            "-V",
+            "--version"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print the installed version and exit."
+        },
+        {
+          "names": [
+            "--home"
+          ],
+          "required": false,
+          "default": "~/.local/state/agent-parley",
+          "choices": null,
+          "help": "Private state directory (or AGENT_PARLEY_HOME)."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley __complete",
+      "options": [
+        {
+          "names": [
+            "kind"
+          ],
+          "required": true,
+          "default": null,
+          "choices": [
+            "participants",
+            "providers",
+            "credentials",
+            "projects",
+            "issues"
+          ],
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley approval",
+      "options": []
+    },
+    {
+      "command": "agent-parley approval resume",
+      "options": [
+        {
+          "names": [
+            "--bridge-tools"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "on",
+            "off"
+          ],
+          "help": "Record approve_bridge_tools: allow this bridge's own tools."
+        },
+        {
+          "names": [
+            "--auto-mode"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "on",
+            "off"
+          ],
+          "help": "Record auto_mode: start in the client's auto permission mode."
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Lane to record on; the project default when omitted."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley approval set",
+      "options": [
+        {
+          "names": [
+            "steps"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Steps refused without a recorded operator approval of the lane's current ready report, from merge, pr; pass none to require no approval."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley approval show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley approve",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Participant whose ready report you approve."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint",
+      "options": []
+    },
+    {
+      "command": "agent-parley blueprint advance",
+      "options": [
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint default",
+      "options": [
+        {
+          "names": [
+            "label"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "blueprint"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint list",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint progress",
+      "options": [
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint remove",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint run",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "blueprint"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint set",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "file"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley blueprint show",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley branch",
+      "options": []
+    },
+    {
+      "command": "agent-parley branch integration",
+      "options": [
+        {
+          "names": [
+            "integration"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Integration branch, such as integration/1.0.0; a pull request merged into it that closes a claimed issue lands the claim. An empty string removes it."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley branch set",
+      "options": [
+        {
+          "names": [
+            "prefix"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Prefix for new lane branches, such as parley. Existing lanes keep the branch they were created with."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley branch show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley budget",
+      "options": []
+    },
+    {
+      "command": "agent-parley budget enforce",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--tokens"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Enforced limit on the tokens every lane of the run consumes together; 0 removes it."
+        },
+        {
+          "names": [
+            "--calls"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Enforced limit on the calls every lane of the run consumes together; 0 removes it."
+        },
+        {
+          "names": [
+            "--hours"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Enforced limit on the hours every lane of the run consumes together; 0 removes it."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley budget resume",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reset"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Start a new accounting period; use so far stops counting."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley budget set",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--tokens"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the tokens the lane's own client may record; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--calls"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the coordination calls the lane may be served; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--hours"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the hours the lane's session may stay alive; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley budget show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley completion",
+      "options": [
+        {
+          "names": [
+            "shell"
+          ],
+          "required": true,
+          "default": null,
+          "choices": [
+            "bash",
+            "zsh",
+            "fish"
+          ],
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley credentials",
+      "options": []
+    },
+    {
+      "command": "agent-parley credentials add",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--config-home"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--env"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--require-env"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley credentials list",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley credentials remove",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley credentials show",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley deadlines",
+      "options": []
+    },
+    {
+      "command": "agent-parley deadlines set",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--claim"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Default window for a claim, such as 45m, 6h or 7d. An overdue record is reported, never transferred."
+        },
+        {
+          "names": [
+            "--offer"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Default window for a handoff offer, such as 45m, 6h or 7d. An overdue record is reported, never transferred."
+        },
+        {
+          "names": [
+            "--request"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Default window for a takeover request, such as 45m, 6h or 7d. An overdue record is reported, never transferred."
+        },
+        {
+          "names": [
+            "--ack"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Default window for an acknowledgement, such as 45m, 6h or 7d. An overdue record is reported, never transferred."
+        },
+        {
+          "names": [
+            "--wait"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Default window for a lane's self-declared wait, such as 45m, 6h or 7d. An overdue record is reported, never transferred."
+        },
+        {
+          "names": [
+            "--attempts"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Attempts a claim may report blocked before the budget reads as exceeded. Exceeding it releases nothing."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley deadlines show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley decide",
+      "options": [
+        {
+          "names": [
+            "text"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Decision text participants read."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--subject"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Subject the decision is found under."
+        },
+        {
+          "names": [
+            "--key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Without one the key follows the text, so recording the same decision again records nothing further."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley decision",
+      "options": []
+    },
+    {
+      "command": "agent-parley decision list",
+      "options": [
+        {
+          "names": [
+            "query"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Text to match; without it the newest decisions are listed."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--limit"
+          ],
+          "required": false,
+          "default": 5,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Age a reported decision may reach, such as 45m, 6h or 7d. The whole log is read by default."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley demo",
+      "options": []
+    },
+    {
+      "command": "agent-parley doctor",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley down",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley events",
+      "options": []
+    },
+    {
+      "command": "agent-parley events export",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export only this participant. Repeat the flag to export several; every participant is exported by default."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Export only records inside this window, such as 45m, 6h or 7d. Everything still retained is exported by default."
+        },
+        {
+          "names": [
+            "--output"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Destination file; JSON Lines go to standard output otherwise."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley events show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export only this participant. Repeat the flag to export several; every participant is exported by default."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Export only records inside this window, such as 45m, 6h or 7d. Everything still retained is exported by default."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley forge",
+      "options": []
+    },
+    {
+      "command": "agent-parley forge set",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": [
+            "github",
+            "beads",
+            "null"
+          ],
+          "help": "github speaks through gh, beads through bd when the repository carries a .beads/ ledger, and null keeps issue numbers bare."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley forge show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley gc",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--apply"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Remove the reclaimable lanes; without it the sweep only reports what it would remove and what it would keep."
+        },
+        {
+          "names": [
+            "--dry-run"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Only report what would be removed and what would be kept, with each worktree's size on disk; the default."
+        },
+        {
+          "names": [
+            "--force"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "With --apply, also remove worktrees a lane made itself that are kept only for uncommitted changes, unpushed commits or a recent change, after writing a recovery checkpoint of each."
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Instead of sweeping lanes, remove the private state of the project whose root checkout ROOT is gone, once the service retired its lanes and no session of it runs; its recovery checkpoints move to the state root's recovered folder."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "With --project, delete the recovery checkpoints too."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley history",
+      "options": []
+    },
+    {
+      "command": "agent-parley history claim",
+      "options": [
+        {
+          "names": [
+            "claim_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--kind"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "claim",
+            "handoff",
+            "report",
+            "approval",
+            "reservation",
+            "message"
+          ],
+          "help": "Report only this kind of record: claim, handoff, report, approval, reservation, message. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--output"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export the reading to this file as one JSON document instead of printing it, as `events` and `state` export."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Report only records inside this window, such as 45m, 6h or 7d. Everything recorded is reported by default."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley history issue",
+      "options": [
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--kind"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "claim",
+            "handoff",
+            "report",
+            "approval",
+            "reservation",
+            "message"
+          ],
+          "help": "Report only this kind of record: claim, handoff, report, approval, reservation, message. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--output"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export the reading to this file as one JSON document instead of printing it, as `events` and `state` export."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Report only records inside this window, such as 45m, 6h or 7d. Everything recorded is reported by default."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley history participant",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--kind"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "claim",
+            "handoff",
+            "report",
+            "approval",
+            "reservation",
+            "message"
+          ],
+          "help": "Report only this kind of record: claim, handoff, report, approval, reservation, message. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--output"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export the reading to this file as one JSON document instead of printing it, as `events` and `state` export."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Report only records inside this window, such as 45m, 6h or 7d. Everything recorded is reported by default."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley init",
+      "options": []
+    },
+    {
+      "command": "agent-parley init set",
+      "options": [
+        {
+          "names": [
+            "command_line"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Command run in every new lane before its agent starts; pass an empty string to remove it. AGENT_PARLEY_BASE names the base checkout while it runs. No flag skips it."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley init show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue",
+      "options": []
+    },
+    {
+      "command": "agent-parley issue accept",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for this work, such as 45m, 6h or 7d. Past it the record reads overdue and states the seconds over; ownership never moves on a deadline."
+        },
+        {
+          "names": [
+            "--offer-id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue assign",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Lane the issue is offered to."
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Why the work is moving. It travels with the offer and is kept on the record."
+        },
+        {
+          "names": [
+            "--unassign"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Withdraw an operator offer no lane has accepted. An offer that was accepted is refused, naming the lane that holds the issue."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue block",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--on"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue cancel",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue claim",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for this work, such as 45m, 6h or 7d. Past it the record reads overdue and states the seconds over; ownership never moves on a deadline."
+        },
+        {
+          "names": [
+            "--take-orphaned"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Take an issue whose owner the supervisor marked orphaned, recording that owner and the reason. It moves that claim's reservations to the new owner; a lane that is merely idle is never orphaned."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue decline",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--offer-id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue list",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue match",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "goal"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "What this lane intends to do, in your own words."
+        },
+        {
+          "names": [
+            "--limit"
+          ],
+          "required": false,
+          "default": 5,
+          "choices": null,
+          "help": "Most matches to list; five when omitted."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue next",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--limit"
+          ],
+          "required": false,
+          "default": 5,
+          "choices": null,
+          "help": "Most candidates to list; five when omitted."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue offer",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for this work, such as 45m, 6h or 7d. Past it the record reads overdue and states the seconds over; ownership never moves on a deadline."
+        },
+        {
+          "names": [
+            "--to"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--summary"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--remaining"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": "One item of work still to do, repeatable. It is recorded beside the head commit, the reservations this lane holds and the diff against the project base, so the receiver reads the transfer instead of re-deriving it."
+        },
+        {
+          "names": [
+            "--when-released"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Record the offer and apply it once this issue is explicitly released or its pull request is recorded as ended."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue recover",
+      "options": [
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Operator rationale persisted with this exact claim approval."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue release",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue request",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for this work, such as 45m, 6h or 7d. Past it the record reads overdue and states the seconds over; ownership never moves on a deadline."
+        },
+        {
+          "names": [
+            "--summary"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Why this lane asks to take the issue over. The holder answers with issue accept or decline; a holder that neither answers nor records progress within the project's takeover_grace has the request granted as an offer to this lane."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue resolve",
+      "options": [
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Operator rationale kept beside the forge evidence."
+        },
+        {
+          "names": [
+            "--release"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Return the work to the queue instead of recording it complete. It is required when the pull request was closed without merging, because nothing was integrated."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue show",
+      "options": [
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley issue unblock",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "number"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        },
+        {
+          "names": [
+            "--on"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail",
+      "options": []
+    },
+    {
+      "command": "agent-parley mail cancel",
+      "options": [
+        {
+          "names": [
+            "item_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail list",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--limit"
+          ],
+          "required": false,
+          "default": 5,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--as"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Read this lane's mail from the main checkout instead of its worktree. It reads only: nothing is sent, acknowledged or marked read for that lane."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail pending",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail search",
+      "options": [
+        {
+          "names": [
+            "query"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--limit"
+          ],
+          "required": false,
+          "default": 5,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--as"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Read this lane's mail from the main checkout instead of its worktree. It reads only: nothing is sent, acknowledged or marked read for that lane."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail send",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Participant whose inbox receives the message. A lane selector replaces it, and the message text is then the only positional."
+        },
+        {
+          "names": [
+            "text"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Message body the participant reads."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--subject"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Subject line shown in the lane's inbox."
+        },
+        {
+          "names": [
+            "--key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Without one the key follows the message text, so repeating the same message delivers nothing further."
+        },
+        {
+          "names": [
+            "--ack"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Require the participant to acknowledge the message."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for the acknowledgement, such as 15m. Past it the acknowledgement reads overdue; nothing is resent, escalated or acknowledged for the lane."
+        },
+        {
+          "names": [
+            "--after"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Hold the message until this much time has passed, such as 30m. The supervision poll delivers it; nothing delivers while the service is stopped and nothing is lost."
+        },
+        {
+          "names": [
+            "--at"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Hold the message until this time of day in the local timezone, today while it is still ahead and tomorrow once it has passed."
+        },
+        {
+          "names": [
+            "--when-released"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Hold the message until this issue is explicitly released or its pull request is recorded as ended."
+        },
+        {
+          "names": [
+            "--unless-reported"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Drop a delayed message if the lane files a report of its own before its time arrives."
+        },
+        {
+          "names": [
+            "--every"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Repeat the message on this interval, such as 1h. A repeat must be bounded by --until and is capped at 24 deliveries."
+        },
+        {
+          "names": [
+            "--until"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Stop a repeat at this time of day in the local timezone."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail show",
+      "options": [
+        {
+          "names": [
+            "message_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--full"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print the whole attachment after the stored body."
+        },
+        {
+          "names": [
+            "--as"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Read this lane's mail from the main checkout instead of its worktree. It reads only: nothing is sent, acknowledged or marked read for that lane."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley mail thread",
+      "options": [
+        {
+          "names": [
+            "thread_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--after-id"
+          ],
+          "required": false,
+          "default": 0,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--as"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Read this lane's mail from the main checkout instead of its worktree. It reads only: nothing is sent, acknowledged or marked read for that lane."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley metrics",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print the same values as one JSON document instead of the Prometheus text exposition format."
+        },
+        {
+          "names": [
+            "--output"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Write the frame to this file, replaced atomically, instead of printing it."
+        },
+        {
+          "names": [
+            "--every"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Rewrite the file on this interval until interrupted."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Report only participants driven by this provider. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Count only enforcement history inside this window, such as 45m, 6h or 7d. The whole retained log is counted by default."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley notify",
+      "options": []
+    },
+    {
+      "command": "agent-parley notify setup",
+      "options": [
+        {
+          "names": [
+            "--chat"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Telegram chat id."
+        },
+        {
+          "names": [
+            "--inbound"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Also answer status queries from the chat; the passcode is read after the token."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley notify test",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant",
+      "options": []
+    },
+    {
+      "command": "agent-parley participant add",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--credentials"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant budget",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--tokens"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the tokens the lane's own client may record; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--calls"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the coordination calls the lane may be served; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--hours"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the hours the lane's session may stay alive; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant list",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant merge",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--preview"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--renew-recovery"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Grant the named lane's recorded unverified integration a fresh set of attempts, then retry it. Accepted only from the base checkout."
+        },
+        {
+          "names": [
+            "--verify-recovery"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Run the recorded gate on the base checkout as it stands and clear the unverified-integration record only if it passes and leaves the tree clean. Merges nothing; accepted only from the base checkout."
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Claimed issue whose work the named lane merges when it holds several; defaults to its only ready claim."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Integrate every lane reported ready, ordered by the recorded dependency edges, stopping at the first refusal or failure."
+        },
+        {
+          "names": [
+            "--group"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Integrate one group of the applied plan. Preflight admits every member or none; execution is ordered, not atomic, and stops at the first refusal or failure."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant pause",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant pr",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant restart",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--task"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant restore",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant resume",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant retire",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Delete the ignored files the lane's worktree holds without asking first."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant show",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley participant stop",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan",
+      "options": []
+    },
+    {
+      "command": "agent-parley plan apply",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "path"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "TOML plan file to read."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan approve",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "proposal_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan diff",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "path"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "TOML plan file to read."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan proposals",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan propose",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--base"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Plan version read from `plan proposals`."
+        },
+        {
+          "names": [
+            "--add"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--remove"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--evidence"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan reject",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "proposal_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--reason"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plan show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley plugins",
+      "options": []
+    },
+    {
+      "command": "agent-parley plugins install",
+      "options": []
+    },
+    {
+      "command": "agent-parley plugins status",
+      "options": []
+    },
+    {
+      "command": "agent-parley pool",
+      "options": []
+    },
+    {
+      "command": "agent-parley pool fill",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley pool set",
+      "options": [
+        {
+          "names": [
+            "size"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Spare worktrees kept on fresh branches from the current base with init already run; 0 keeps none."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley pool show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley problems",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--ack-after"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Seconds a message may await acknowledgement before it is listed; the project's stalled_after when omitted."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Also list the rows of lanes dead past the project's fold_after that are older than it, which one line otherwise counts."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley problems ack",
+      "options": [
+        {
+          "names": [
+            "message_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley provider",
+      "options": []
+    },
+    {
+      "command": "agent-parley provider add",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--adapter"
+          ],
+          "required": true,
+          "default": null,
+          "choices": [
+            "claude",
+            "codex",
+            "copilot",
+            "gemini",
+            "opencode",
+            "amp"
+          ],
+          "help": null
+        },
+        {
+          "names": [
+            "--executable"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--home-env"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--env"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--require-env"
+          ],
+          "required": false,
+          "default": [],
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley provider budget",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--tokens"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the tokens the lane's own client may record; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--calls"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the coordination calls the lane may be served; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        },
+        {
+          "names": [
+            "--hours"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Advisory limit on the hours the lane's session may stay alive; 0 removes it. Crossing it marks the lane and sends one notice, and stops nothing."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley provider list",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley provider remove",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley provider show",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley reclaim",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--apply"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Remove the reclaimable lanes; without it the sweep only reports what it would remove and what it would keep."
+        },
+        {
+          "names": [
+            "--dry-run"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Only report what would be removed and what would be kept, with each worktree's size on disk; the default."
+        },
+        {
+          "names": [
+            "--force"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "With --apply, also remove worktrees a lane made itself that are kept only for uncommitted changes, unpushed commits or a recent change, after writing a recovery checkpoint of each."
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Instead of sweeping lanes, remove the private state of the project whose root checkout ROOT is gone, once the service retired its lanes and no session of it runs; its recovery checkpoints move to the state root's recovered folder."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "With --project, delete the recovery checkpoints too."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley reject",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Participant whose ready report you reject."
+        },
+        {
+          "names": [
+            "reason"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Explanation delivered to the lane as operator mail."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley report",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--state"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "partial",
+            "blocked",
+            "ready",
+            "waiting"
+          ],
+          "help": null
+        },
+        {
+          "names": [
+            "--summary"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--remaining"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--evidence"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Bind this report to one exact owned issue."
+        },
+        {
+          "names": [
+            "--resume-on"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "For a blocked report, resume automatically after this existing authorized issue completes."
+        },
+        {
+          "names": [
+            "--backlog"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Work units still remaining on this claim, in whatever it counts: issue families, files, subtasks. Recording the count lets the supervisor offer a split once this lane goes idle on the claim."
+        },
+        {
+          "names": [
+            "--until"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Seconds until this lane's next check, required for --state waiting. Capped by the project's wait deadline."
+        },
+        {
+          "names": [
+            "--idempotency-key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Retry a failed command with the key it first used and the repeat returns the first result without applying the change again. The same key with different arguments is refused."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley report review",
+      "options": [
+        {
+          "names": [
+            "report_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--verdict"
+          ],
+          "required": true,
+          "default": null,
+          "choices": [
+            "pass",
+            "fail"
+          ],
+          "help": "What this lane found. The verdict is this lane's own claim about work it did not do, not independent verification."
+        },
+        {
+          "names": [
+            "--evidence"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "What was checked; longer evidence is attached as a report's is."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley report show",
+      "options": [
+        {
+          "names": [
+            "report_id"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--full"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print the whole attached evidence after the record."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley resources",
+      "options": []
+    },
+    {
+      "command": "agent-parley resources set",
+      "options": [
+        {
+          "names": [
+            "names"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Space-separated resource names such as 'port:5432 db:local'; pass an empty string to accept any well-formed name again."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley resources show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley run",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Participant name; a new name creates its own worktree lane."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Provider definition; defaults to the participant name."
+        },
+        {
+          "names": [
+            "--credentials"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Credential profile selecting one account."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--resume"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--task"
+          ],
+          "required": false,
+          "default": "Check shared coordination state and await my task.",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Claim this issue for the lane and open with a bounded digest of it fetched from the forge; replaces --task."
+        },
+        {
+          "names": [
+            "--blueprint"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Run the --issue claim through this recorded blueprint; without it, a default mapped to one of the issue's labels applies. Base checkout only."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley say",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Participant whose inbox receives the message. A lane selector replaces it, and the message text is then the only positional."
+        },
+        {
+          "names": [
+            "text"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Message body the participant reads."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--subject"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Subject line shown in the lane's inbox."
+        },
+        {
+          "names": [
+            "--key"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Idempotency key. Without one the key follows the message text, so repeating the same message delivers nothing further."
+        },
+        {
+          "names": [
+            "--ack"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Require the participant to acknowledge the message."
+        },
+        {
+          "names": [
+            "--within"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Record a deadline for the acknowledgement, such as 15m. Past it the acknowledgement reads overdue; nothing is resent, escalated or acknowledged for the lane."
+        },
+        {
+          "names": [
+            "--after"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Hold the message until this much time has passed, such as 30m. The supervision poll delivers it; nothing delivers while the service is stopped and nothing is lost."
+        },
+        {
+          "names": [
+            "--at"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Hold the message until this time of day in the local timezone, today while it is still ahead and tomorrow once it has passed."
+        },
+        {
+          "names": [
+            "--when-released"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Hold the message until this issue is explicitly released or its pull request is recorded as ended."
+        },
+        {
+          "names": [
+            "--unless-reported"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Drop a delayed message if the lane files a report of its own before its time arrives."
+        },
+        {
+          "names": [
+            "--every"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Repeat the message on this interval, such as 1h. A repeat must be bounded by --until and is capped at 24 deliveries."
+        },
+        {
+          "names": [
+            "--until"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Stop a repeat at this time of day in the local timezone."
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select every lane the other filters leave."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes a named provider drives."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Select only the lanes whose own latest report is this state. A reported state is the lane's account, never a review."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes sitting off the branch they were given."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes supervision currently reads as stalled."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Select only the lanes over any of their advisory token, call or hour limits."
+        },
+        {
+          "names": [
+            "--yes"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip the single confirmation covering the whole selected set."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley setup",
+      "options": [
+        {
+          "names": [
+            "repo"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley state",
+      "options": []
+    },
+    {
+      "command": "agent-parley state export",
+      "options": [
+        {
+          "names": [
+            "--output"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Archive path to create."
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Export only the project registered for this checkout."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley state import",
+      "options": [
+        {
+          "names": [
+            "archive"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Restore only the archived project registered for this root."
+        },
+        {
+          "names": [
+            "--merge"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Add archived projects beside existing state."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley state show",
+      "options": [
+        {
+          "names": [
+            "archive"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley status",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        },
+        {
+          "names": [
+            "participant"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Report this participant alone, as the whole reading rather than one table row."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Report only the project at this repository root."
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "==SUPPRESS=="
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Report only participants driven by this provider. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--outcome"
+          ],
+          "required": false,
+          "default": "",
+          "choices": [
+            "ready",
+            "blocked",
+            "unknown"
+          ],
+          "help": "Report only lanes that reported this outcome."
+        },
+        {
+          "names": [
+            "--drifted"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Report only lanes away from their assigned branch. The command exits non-zero when one matches."
+        },
+        {
+          "names": [
+            "--pending"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Report only lanes holding unread mail, unanswered acknowledgements, an offer, or a reservation past its declared time to live. The command exits non-zero when one matches."
+        },
+        {
+          "names": [
+            "--idle"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Report only live lanes that served no coordination call inside the window. This measures coordination inactivity, not what a native client was doing inside a turn."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Inactivity an idle lane must show, such as 45m, 6h or 7d. The project's configured interval decides by default."
+        },
+        {
+          "names": [
+            "--over-budget"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Report only lanes over any of their advisory token, call or hour limits. A budget informs and does not gate; the command exits non-zero when one matches."
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": 0,
+          "choices": null,
+          "help": "Report only lanes holding or offered this issue."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Also list claims whose issue or pull request ended on the forge, and lanes dead past the project's fold_after with no claim."
+        },
+        {
+          "names": [
+            "--all-projects"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Report every project, not only the one the working directory belongs to, with dormant projects listed last."
+        },
+        {
+          "names": [
+            "--table"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print the full per-lane table instead of the open-work view. Any lane filter or a named participant prints it too."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley timeout",
+      "options": []
+    },
+    {
+      "command": "agent-parley timeout set",
+      "options": [
+        {
+          "names": [
+            "kind"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Decision kind the entry governs."
+        },
+        {
+          "names": [
+            "--ask"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Always ask; never apply the default."
+        },
+        {
+          "names": [
+            "--after"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Longer wait than the default, such as 2h. Without --ask or --after the kind returns to its default."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley timeout show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley title",
+      "options": []
+    },
+    {
+      "command": "agent-parley top",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON frame and exit instead of drawing a live view."
+        },
+        {
+          "names": [
+            "--once"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one plain snapshot instead of drawing a live view."
+        },
+        {
+          "names": [
+            "--interval"
+          ],
+          "required": false,
+          "default": 1.0,
+          "choices": null,
+          "help": "Seconds between redraws of the live view."
+        },
+        {
+          "names": [
+            "--provider"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Report only participants driven by this provider. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Count only enforcement history inside this window, such as 45m, 6h or 7d. The whole retained log is counted by default."
+        },
+        {
+          "names": [
+            "--sort"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Order rows by a column, such as IDLE or DENIALS. Counted columns order from the largest value down."
+        },
+        {
+          "names": [
+            "--reverse"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Reverse the reported order."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Report only this repository, by path or by directory name. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--project"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "==SUPPRESS=="
+        },
+        {
+          "names": [
+            "--participant"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Report only this participant. Repeat the flag to report several."
+        },
+        {
+          "names": [
+            "--columns"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Show only these columns, comma separated, such as PARTICIPANT,STATE,IDLE, or all for every column. The default leaves out PROVIDER, EVENT, REVIEW, CONTEXT, CALLS, UNUSED and FIT."
+        },
+        {
+          "names": [
+            "--no-operator-edits"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Skip reading the base checkout for operator edits on reserved paths, for a repository whose base checkout is always dirty."
+        },
+        {
+          "names": [
+            "--all"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Also show stopped lanes that hold nothing and projects whose root is gone. The view counts them in its header otherwise."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley unattended",
+      "options": []
+    },
+    {
+      "command": "agent-parley unattended run",
+      "options": [
+        {
+          "names": [
+            "name"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Participant whose ready work is integrated."
+        },
+        {
+          "names": [
+            "--issue"
+          ],
+          "required": false,
+          "default": "",
+          "choices": null,
+          "help": "Claimed issue to integrate when the lane holds several; defaults to its only ready claim."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley unattended set",
+      "options": [
+        {
+          "names": [
+            "issues"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Issues whose ready work may be integrated without an operator; pass none to remove the policy and stay operator-only."
+        },
+        {
+          "names": [
+            "--target"
+          ],
+          "required": false,
+          "default": null,
+          "choices": null,
+          "help": "Branch the base checkout must have checked out."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley unattended show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley up",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley verify",
+      "options": []
+    },
+    {
+      "command": "agent-parley verify set",
+      "options": [
+        {
+          "names": [
+            "command_line"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Command run in the base checkout before every merge; pass an empty string to remove the gate. No flag skips it."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        }
+      ]
+    },
+    {
+      "command": "agent-parley verify show",
+      "options": [
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley version",
+      "options": [
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print one JSON document on standard output instead of the table. Field names are documented in docs/operations.md."
+        }
+      ]
+    },
+    {
+      "command": "agent-parley watch",
+      "options": [
+        {
+          "names": [
+            "participant"
+          ],
+          "required": true,
+          "default": null,
+          "choices": null,
+          "help": "Participant name to follow."
+        },
+        {
+          "names": [
+            "--repo"
+          ],
+          "required": false,
+          "default": "/mnt/data/Projects_SSD/agent-parley",
+          "choices": null,
+          "help": null
+        },
+        {
+          "names": [
+            "--json"
+          ],
+          "required": false,
+          "default": false,
+          "choices": null,
+          "help": "Print JSON Lines, one event object per line."
+        },
+        {
+          "names": [
+            "--kind"
+          ],
+          "required": false,
+          "default": null,
+          "choices": [
+            "claim",
+            "handoff",
+            "report",
+            "approval",
+            "reservation",
+            "message",
+            "call",
+            "denied",
+            "session",
+            "blueprint"
+          ],
+          "help": "Print only this kind of event: claim, handoff, report, approval, reservation, message, call, denied, session, blueprint. Repeat the flag to print several."
+        },
+        {
+          "names": [
+            "--since"
+          ],
+          "required": false,
+          "default": 0.0,
+          "choices": null,
+          "help": "Start from every event inside this window, such as 45m or 1h, instead of the most recent twenty."
+        },
+        {
+          "names": [
+            "--interval"
+          ],
+          "required": false,
+          "default": 0.5,
+          "choices": null,
+          "help": "Seconds between reads of the store and the event log."
+        }
+      ]
+    }
+  ],
+  "code_limits": [
+    {
+      "name": "TOOL_FIELDS",
+      "expression": "(\"tool_name\", \"tool\", \"toolName\")",
+      "source": "agent_parley/amp.py:30"
+    },
+    {
+      "name": "INPUT_FIELDS",
+      "expression": "(\"tool_input\", \"input\", \"arguments\")",
+      "source": "agent_parley/amp.py:31"
+    },
+    {
+      "name": "RESULT_FIELDS",
+      "expression": "(\"tool_response\", \"output\", \"result\")",
+      "source": "agent_parley/amp.py:32"
+    },
+    {
+      "name": "SESSION_FIELDS",
+      "expression": "(\"session_id\", \"threadId\", \"threadID\", \"thread_id\")",
+      "source": "agent_parley/amp.py:33"
+    },
+    {
+      "name": "LOCK_TIMEOUT",
+      "expression": "2.0",
+      "source": "agent_parley/archive.py:38"
+    },
+    {
+      "name": "MAX_ATTACHMENT_BYTES",
+      "expression": "65536",
+      "source": "agent_parley/attachments.py:11"
+    },
+    {
+      "name": "MAX_LANE_BYTES",
+      "expression": "1048576",
+      "source": "agent_parley/attachments.py:12"
+    },
+    {
+      "name": "FIELDS",
+      "expression": "{\n    \"run\": {\"command\", \"timeout\"},\n    \"push\": {\"timeout\"},\n    \"pull-request\": set(),\n    \"wait-ci\": set(),\n    \"agent\": {\"prompt\"},\n    \"report\": {\"outcome\", \"message\"},\n}",
+      "source": "agent_parley/blueprints.py:64"
+    },
+    {
+      "name": "MAX_NODES",
+      "expression": "50",
+      "source": "agent_parley/blueprints.py:76"
+    },
+    {
+      "name": "MAX_RETRIES",
+      "expression": "20",
+      "source": "agent_parley/blueprints.py:77"
+    },
+    {
+      "name": "MAX_TEXT",
+      "expression": "4000",
+      "source": "agent_parley/blueprints.py:78"
+    },
+    {
+      "name": "MAX_VISITS",
+      "expression": "200",
+      "source": "agent_parley/blueprints.py:79"
+    },
+    {
+      "name": "MAX_LOGS",
+      "expression": "3",
+      "source": "agent_parley/blueprints.py:84"
+    },
+    {
+      "name": "LOCK_SECONDS",
+      "expression": "10.0",
+      "source": "agent_parley/budgets.py:55"
+    },
+    {
+      "name": "MAX_CONTEXT_BYTES",
+      "expression": "1536",
+      "source": "agent_parley/checkpoints.py:35"
+    },
+    {
+      "name": "MAX_CAUSE_BYTES",
+      "expression": "200",
+      "source": "agent_parley/checkpoints.py:36"
+    },
+    {
+      "name": "MAX_NOTICE_REPEATS",
+      "expression": "3",
+      "source": "agent_parley/checkpoints.py:37"
+    },
+    {
+      "name": "MAX_NOTICE_BYTES",
+      "expression": "1024",
+      "source": "agent_parley/checkpoints.py:38"
+    },
+    {
+      "name": "MAX_ITEM_BYTES",
+      "expression": "400",
+      "source": "agent_parley/checkpoints.py:39"
+    },
+    {
+      "name": "MAX_EVENT_LOG_BYTES",
+      "expression": "262144",
+      "source": "agent_parley/checkpoints.py:44"
+    },
+    {
+      "name": "MAX_EVENT_LOG_AGE",
+      "expression": "1209600",
+      "source": "agent_parley/checkpoints.py:45"
+    },
+    {
+      "name": "EVENT_LOCK_TIMEOUT",
+      "expression": "2.0",
+      "source": "agent_parley/checkpoints.py:46"
+    },
+    {
+      "name": "LOCK_SECONDS",
+      "expression": "1.0",
+      "source": "agent_parley/checkpoints.py:48"
+    },
+    {
+      "name": "SETTLE_SECONDS",
+      "expression": "30.0",
+      "source": "agent_parley/checkpoints.py:49"
+    },
+    {
+      "name": "SETTLING",
+      "expression": "frozenset(\n    {\"Stop\", \"SessionEnd\", \"PermissionRequest\", \"Notification\"}\n)",
+      "source": "agent_parley/checkpoints.py:50"
+    },
+    {
+      "name": "HOOK_TIMEOUT",
+      "expression": "3",
+      "source": "agent_parley/checkpoints.py:60"
+    },
+    {
+      "name": "PATH_FIELDS",
+      "expression": "(\"file_path\", \"notebook_path\", \"path\")",
+      "source": "agent_parley/checkpoints.py:82"
+    },
+    {
+      "name": "OFFER_REPLY_SECONDS",
+      "expression": "120.0",
+      "source": "agent_parley/checkpoints.py:83"
+    },
+    {
+      "name": "HOOK_PID_ENV",
+      "expression": "\"AGENT_PARLEY_HOOK_PID\"",
+      "source": "agent_parley/checkpoints.py:93"
+    },
+    {
+      "name": "MAX_OVERLAPS",
+      "expression": "6",
+      "source": "agent_parley/checkpoints.py:96"
+    },
+    {
+      "name": "MAX_FILED_PATHS",
+      "expression": "20",
+      "source": "agent_parley/checkpoints.py:97"
+    },
+    {
+      "name": "MESSAGE_FILE_LIMIT",
+      "expression": "65536",
+      "source": "agent_parley/checkpoints.py:1276"
+    },
+    {
+      "name": "MAX_OVERLAPS",
+      "expression": "5",
+      "source": "agent_parley/cli.py:339"
+    },
+    {
+      "name": "MAX_HEALTH_BYTES",
+      "expression": "65536",
+      "source": "agent_parley/cli.py:374"
+    },
+    {
+      "name": "START_SECONDS",
+      "expression": "25.0",
+      "source": "agent_parley/cli.py:375"
+    },
+    {
+      "name": "LAUNCH_LOCK_SECONDS",
+      "expression": "10.0",
+      "source": "agent_parley/cli.py:376"
+    },
+    {
+      "name": "MAX_ENTRIES",
+      "expression": "256",
+      "source": "agent_parley/convergence.py:59"
+    },
+    {
+      "name": "MAX_SEEN",
+      "expression": "16",
+      "source": "agent_parley/convergence.py:60"
+    },
+    {
+      "name": "MAX_IDS",
+      "expression": "64",
+      "source": "agent_parley/convergence.py:61"
+    },
+    {
+      "name": "MAX_RESPONSES",
+      "expression": "6",
+      "source": "agent_parley/convergence.py:62"
+    },
+    {
+      "name": "MAX_LINE",
+      "expression": "200",
+      "source": "agent_parley/convergence.py:63"
+    },
+    {
+      "name": "TIMING_LOCK_SECONDS",
+      "expression": "5",
+      "source": "agent_parley/core.py:27"
+    },
+    {
+      "name": "BRANCH_TTL",
+      "expression": "5.0",
+      "source": "agent_parley/dashboard.py:42"
+    },
+    {
+      "name": "MAX_PROMPT",
+      "expression": "120",
+      "source": "agent_parley/dashboard.py:43"
+    },
+    {
+      "name": "DEFAULT_COLUMNS",
+      "expression": "(\n    \"PARTICIPANT\",\n    \"STATE\",\n    \"BRANCH\",\n    \"ISSUES\",\n    \"MAIL\",\n    \"LEASES\",\n    \"DENIALS\",\n    \"TOKENS\",\n    \"IDLE\",\n    \"TASK\",\n)",
+      "source": "agent_parley/dashboard.py:63"
+    },
+    {
+      "name": "DEFAULT_TTL",
+      "expression": "86400.0",
+      "source": "agent_parley/decisions.py:44"
+    },
+    {
+      "name": "LEASE_SECONDS",
+      "expression": "60.0",
+      "source": "agent_parley/decisions.py:47"
+    },
+    {
+      "name": "KEPT_SETTLED",
+      "expression": "200",
+      "source": "agent_parley/decisions.py:48"
+    },
+    {
+      "name": "MAX_TEXT_BYTES",
+      "expression": "1024",
+      "source": "agent_parley/decisions.py:51"
+    },
+    {
+      "name": "DEFAULT_SECONDS",
+      "expression": "20.0",
+      "source": "agent_parley/delivery.py:36"
+    },
+    {
+      "name": "MIN_SECONDS",
+      "expression": "0.05",
+      "source": "agent_parley/delivery.py:37"
+    },
+    {
+      "name": "MAX_SECONDS",
+      "expression": "600.0",
+      "source": "agent_parley/delivery.py:38"
+    },
+    {
+      "name": "JOIN_SECONDS",
+      "expression": "5.0",
+      "source": "agent_parley/delivery.py:39"
+    },
+    {
+      "name": "INTERVAL_VARIABLE",
+      "expression": "\"AGENT_PARLEY_DELIVERY_SECONDS\"",
+      "source": "agent_parley/delivery.py:40"
+    },
+    {
+      "name": "MAX_BATCHES",
+      "expression": "8",
+      "source": "agent_parley/delivery.py:52"
+    },
+    {
+      "name": "DEFAULT_PORT",
+      "expression": "8876",
+      "source": "agent_parley/demo.py:63"
+    },
+    {
+      "name": "MAX_COMMAND_BYTES",
+      "expression": "512",
+      "source": "agent_parley/denials.py:42"
+    },
+    {
+      "name": "MAX_REASON_BYTES",
+      "expression": "200",
+      "source": "agent_parley/denials.py:43"
+    },
+    {
+      "name": "TARGET_FIELDS",
+      "expression": "(\n    \"command\",\n    \"file_path\",\n    \"notebook_path\",\n    \"path\",\n    \"url\",\n    \"pattern\",\n)",
+      "source": "agent_parley/denials.py:45"
+    },
+    {
+      "name": "REPEAT_LIMIT",
+      "expression": "2",
+      "source": "agent_parley/dialogs.py:80"
+    },
+    {
+      "name": "TERMINAL_ONLY",
+      "expression": "\"terminal-only: answer it in the lane's terminal\"",
+      "source": "agent_parley/dialogs.py:99"
+    },
+    {
+      "name": "VERSION_FLAGS",
+      "expression": "frozenset({\"-V\", \"--version\"})",
+      "source": "agent_parley/entry.py:29"
+    },
+    {
+      "name": "TIMEOUT",
+      "expression": "10",
+      "source": "agent_parley/forecast.py:19"
+    },
+    {
+      "name": "MAX_FORECAST",
+      "expression": "16",
+      "source": "agent_parley/forecast.py:21"
+    },
+    {
+      "name": "MAX_TITLE",
+      "expression": "200",
+      "source": "agent_parley/forge.py:25"
+    },
+    {
+      "name": "MAX_PATHS",
+      "expression": "200",
+      "source": "agent_parley/forge.py:26"
+    },
+    {
+      "name": "MAX_OPEN_ISSUES",
+      "expression": "100",
+      "source": "agent_parley/forge.py:27"
+    },
+    {
+      "name": "MAX_PULL_REQUESTS",
+      "expression": "30",
+      "source": "agent_parley/forge.py:28"
+    },
+    {
+      "name": "PULL_REQUEST_FIELDS",
+      "expression": "\"number,url,headRefName,headRefOid,mergeable,statusCheckRollup,\"\n    \"latestReviews,closingIssuesReferences,files\"",
+      "source": "agent_parley/forge.py:29"
+    },
+    {
+      "name": "MAX_LANDINGS",
+      "expression": "100",
+      "source": "agent_parley/forge.py:33"
+    },
+    {
+      "name": "DEFAULT_FORGE",
+      "expression": "\"github\"",
+      "source": "agent_parley/forge.py:57"
+    },
+    {
+      "name": "JOB_TIMEOUT",
+      "expression": "re.compile(r\"^\\s*timeout-minutes:\\s*(\\d+)\\s*$\", re.MULTILINE)",
+      "source": "agent_parley/forge.py:850"
+    },
+    {
+      "name": "MAX_LINKED",
+      "expression": "5",
+      "source": "agent_parley/forge.py:951"
+    },
+    {
+      "name": "MAX_RECORDS",
+      "expression": "500",
+      "source": "agent_parley/history.py:47"
+    },
+    {
+      "name": "CONNECT_TIMEOUT",
+      "expression": "0.25",
+      "source": "agent_parley/hook.py:42"
+    },
+    {
+      "name": "REPLY_TIMEOUT",
+      "expression": "2.0",
+      "source": "agent_parley/hook.py:43"
+    },
+    {
+      "name": "SHELL_TIMEOUT",
+      "expression": "int(REPLY_TIMEOUT) + (REPLY_TIMEOUT % 1 > 0)",
+      "source": "agent_parley/hook.py:44"
+    },
+    {
+      "name": "MAX_INPUT_BYTES",
+      "expression": "1_000_000",
+      "source": "agent_parley/hook.py:45"
+    },
+    {
+      "name": "RELAUNCH_INTERVAL",
+      "expression": "60.0",
+      "source": "agent_parley/hook.py:55"
+    },
+    {
+      "name": "HOOK_PID_ENV",
+      "expression": "\"AGENT_PARLEY_HOOK_PID\"",
+      "source": "agent_parley/hook.py:56"
+    },
+    {
+      "name": "ANSWERED_ENV",
+      "expression": "\"AGENT_PARLEY_SERVICE_ANSWERED\"",
+      "source": "agent_parley/hook.py:57"
+    },
+    {
+      "name": "MINIMUM_PASSCODE",
+      "expression": "12",
+      "source": "agent_parley/inbound.py:54"
+    },
+    {
+      "name": "FAILURE_LIMIT",
+      "expression": "5",
+      "source": "agent_parley/inbound.py:55"
+    },
+    {
+      "name": "LOCK_SECONDS",
+      "expression": "3600.0",
+      "source": "agent_parley/inbound.py:57"
+    },
+    {
+      "name": "POLL_SECONDS",
+      "expression": "25",
+      "source": "agent_parley/inbound.py:58"
+    },
+    {
+      "name": "RETRY_SECONDS",
+      "expression": "5.0",
+      "source": "agent_parley/inbound.py:59"
+    },
+    {
+      "name": "MAX_REPLY_CHARS",
+      "expression": "4096",
+      "source": "agent_parley/inbound.py:60"
+    },
+    {
+      "name": "CONFIRMING",
+      "expression": "\"confirming\"",
+      "source": "agent_parley/inbound.py:68"
+    },
+    {
+      "name": "MAX_BLOCKERS",
+      "expression": "10",
+      "source": "agent_parley/issues.py:14"
+    },
+    {
+      "name": "MAX_REASON",
+      "expression": "2000",
+      "source": "agent_parley/issues.py:18"
+    },
+    {
+      "name": "MAX_SUMMARY_BYTES",
+      "expression": "2048",
+      "source": "agent_parley/issues.py:19"
+    },
+    {
+      "name": "MAX_REMAINING",
+      "expression": "12",
+      "source": "agent_parley/issues.py:20"
+    },
+    {
+      "name": "MAX_REMAINING_BYTES",
+      "expression": "200",
+      "source": "agent_parley/issues.py:21"
+    },
+    {
+      "name": "MAX_RESERVATIONS",
+      "expression": "32",
+      "source": "agent_parley/issues.py:22"
+    },
+    {
+      "name": "MAX_RESERVATION_BYTES",
+      "expression": "240",
+      "source": "agent_parley/issues.py:23"
+    },
+    {
+      "name": "MAX_EVIDENCE",
+      "expression": "200",
+      "source": "agent_parley/lanes.py:78"
+    },
+    {
+      "name": "MAX_EVENTS",
+      "expression": "2000",
+      "source": "agent_parley/lanes.py:79"
+    },
+    {
+      "name": "WAKE_FIELDS",
+      "expression": "(\n    \"at\",\n    \"attempts\",\n    \"backlog\",\n    \"superseded\",\n    \"result\",\n    \"activity\",\n    \"blocked\",\n    \"next_at\",\n    \"exhausted_at\",\n    \"escalated_at\",\n)",
+      "source": "agent_parley/lanes.py:112"
+    },
+    {
+      "name": "FIELDS",
+      "expression": "(\"state\", \"cause\", \"evidence\", \"session\", \"since\", \"updated\")",
+      "source": "agent_parley/lanes.py:125"
+    },
+    {
+      "name": "ACCOUNT_FIELDS",
+      "expression": "(\n    \"observed\",\n    \"idle\",\n    \"unaccountable\",\n    \"idle_causes\",\n    \"unaccountable_causes\",\n    \"state\",\n    \"has_work\",\n    \"owns\",\n    \"accounted\",\n)",
+      "source": "agent_parley/lanes.py:127"
+    },
+    {
+      "name": "MAX_HISTORY",
+      "expression": "50",
+      "source": "agent_parley/lifecycle.py:28"
+    },
+    {
+      "name": "MAX_DIAGNOSTIC",
+      "expression": "400",
+      "source": "agent_parley/merges.py:26"
+    },
+    {
+      "name": "MAX_REPORT_RECORDS",
+      "expression": "MAX_LOG_RECORDS",
+      "source": "agent_parley/metrics.py:41"
+    },
+    {
+      "name": "MAX_REPORT_LOG_BYTES",
+      "expression": "MAX_LOG_BYTES",
+      "source": "agent_parley/metrics.py:42"
+    },
+    {
+      "name": "MAX_REPORT_BYTES",
+      "expression": "4096",
+      "source": "agent_parley/metrics.py:43"
+    },
+    {
+      "name": "MAX_WAITS",
+      "expression": "64",
+      "source": "agent_parley/metrics.py:44"
+    },
+    {
+      "name": "MAX_MESSAGE_BYTES",
+      "expression": "1536",
+      "source": "agent_parley/notify.py:30"
+    },
+    {
+      "name": "MAX_SUBJECT_BYTES",
+      "expression": "200",
+      "source": "agent_parley/notify.py:31"
+    },
+    {
+      "name": "TIMEOUT",
+      "expression": "10.0",
+      "source": "agent_parley/notify.py:32"
+    },
+    {
+      "name": "JOIN_SECONDS",
+      "expression": "5.0",
+      "source": "agent_parley/notify.py:33"
+    },
+    {
+      "name": "STORED_NAME",
+      "expression": "\"notify.json\"",
+      "source": "agent_parley/notify.py:38"
+    },
+    {
+      "name": "STORED_KEYS",
+      "expression": "(\n    \"AGENT_PARLEY_NOTIFY\",\n    \"AGENT_PARLEY_TELEGRAM_CHAT\",\n    \"AGENT_PARLEY_TELEGRAM_TOKEN\",\n    \"AGENT_PARLEY_INBOUND\",\n    \"AGENT_PARLEY_INBOUND_PASSCODE\",\n)",
+      "source": "agent_parley/notify.py:39"
+    },
+    {
+      "name": "KEY_FIELDS",
+      "expression": "{\n    Event.HANDOFF_OFFERED: (\"offer\",),\n    Event.PERMISSION_PROMPT: (\"session\", \"tool\"),\n    Event.PERMISSION_DENIED: (\"issue\", \"tool\", \"command\"),\n    Event.LANE_IDLE: (\"since\",),\n    Event.RUN_FINISHED: (\"session\",),\n    Event.HOOK_REFUSAL: (\"session\", \"reason\"),\n    Event.INBOUND_LOCKED: (\"detail\",),\n    Event.NATIVE_DIALOG: (\"dialog\", \"detail\"),\n    Event.IDLE_BLOCKER: (\"issue\", \"claim\"),\n    Event.NON_CONVERGENCE: (\"issue\", \"claim\", \"milestone\"),\n    Event.RUN_BUDGET_EXHAUSTED: (\"since\",),\n    Event.LANE_BLOCKED: (\"since\",),\n    Event.ORPHAN_DECISION: (\"since\", \"issue\"),\n    Event.KEY_HOLD: (\"since\",),\n}",
+      "source": "agent_parley/notify.py:88"
+    },
+    {
+      "name": "BODY_FIELDS",
+      "expression": "(\n    \"repo\",\n    \"lane\",\n    \"provider\",\n    \"event\",\n    \"issue\",\n    \"offer\",\n    \"dialog\",\n    \"detail\",\n)",
+      "source": "agent_parley/notify.py:131"
+    },
+    {
+      "name": "PROBLEM_INTERVAL",
+      "expression": "60.0",
+      "source": "agent_parley/notify.py:147"
+    },
+    {
+      "name": "MAX_ISSUES",
+      "expression": "200",
+      "source": "agent_parley/plan.py:25"
+    },
+    {
+      "name": "MAX_GROUPS",
+      "expression": "32",
+      "source": "agent_parley/plan.py:26"
+    },
+    {
+      "name": "MAX_GROUP_MEMBERS",
+      "expression": "32",
+      "source": "agent_parley/plan.py:27"
+    },
+    {
+      "name": "MAX_VERSIONS",
+      "expression": "20",
+      "source": "agent_parley/plan.py:28"
+    },
+    {
+      "name": "MAX_NAME",
+      "expression": "80",
+      "source": "agent_parley/plan.py:29"
+    },
+    {
+      "name": "MAX_CHANGES",
+      "expression": "10",
+      "source": "agent_parley/plan.py:30"
+    },
+    {
+      "name": "MAX_AUTOMATIC",
+      "expression": "100",
+      "source": "agent_parley/plan.py:31"
+    },
+    {
+      "name": "MAX_PENDING",
+      "expression": "20",
+      "source": "agent_parley/plan.py:32"
+    },
+    {
+      "name": "MAX_PROPOSALS",
+      "expression": "50",
+      "source": "agent_parley/plan.py:33"
+    },
+    {
+      "name": "MAX_REASON",
+      "expression": "2000",
+      "source": "agent_parley/plan.py:34"
+    },
+    {
+      "name": "MAX_EVIDENCE",
+      "expression": "5",
+      "source": "agent_parley/plan.py:35"
+    },
+    {
+      "name": "MAX_EVIDENCE_TEXT",
+      "expression": "500",
+      "source": "agent_parley/plan.py:36"
+    },
+    {
+      "name": "MAX_FLIPS",
+      "expression": "2",
+      "source": "agent_parley/plan.py:37"
+    },
+    {
+      "name": "MAX_APPLIED_IDS",
+      "expression": "100",
+      "source": "agent_parley/plan.py:38"
+    },
+    {
+      "name": "TIMEOUT",
+      "expression": "300.0",
+      "source": "agent_parley/plugins.py:33"
+    },
+    {
+      "name": "LOCK_SECONDS",
+      "expression": "10",
+      "source": "agent_parley/pool.py:36"
+    },
+    {
+      "name": "STOP_TIMEOUT",
+      "expression": "10",
+      "source": "agent_parley/process.py:29"
+    },
+    {
+      "name": "KILL_TIMEOUT",
+      "expression": "5",
+      "source": "agent_parley/process.py:30"
+    },
+    {
+      "name": "POLL_INTERVAL",
+      "expression": "0.05",
+      "source": "agent_parley/process.py:31"
+    },
+    {
+      "name": "PS_TIMEOUT",
+      "expression": "5",
+      "source": "agent_parley/process.py:32"
+    },
+    {
+      "name": "ANCESTRY_LIMIT",
+      "expression": "8",
+      "source": "agent_parley/process.py:33"
+    },
+    {
+      "name": "PROTOCOL",
+      "expression": "1",
+      "source": "agent_parley/protocol.py:49"
+    },
+    {
+      "name": "GIT_SECONDS",
+      "expression": "5",
+      "source": "agent_parley/reclaim.py:54"
+    },
+    {
+      "name": "MAX_REPORTED_PATHS",
+      "expression": "10",
+      "source": "agent_parley/reclaim.py:55"
+    },
+    {
+      "name": "MAX_SHORTLIST",
+      "expression": "5",
+      "source": "agent_parley/recommend.py:24"
+    },
+    {
+      "name": "MAX_LOOKUPS",
+      "expression": "3",
+      "source": "agent_parley/recommend.py:25"
+    },
+    {
+      "name": "MAX_REASONS",
+      "expression": "6",
+      "source": "agent_parley/recommend.py:26"
+    },
+    {
+      "name": "MINIMUM_TERM",
+      "expression": "3",
+      "source": "agent_parley/recommend.py:27"
+    },
+    {
+      "name": "MAX_READ",
+      "expression": "1 << 20",
+      "source": "agent_parley/records.py:30"
+    },
+    {
+      "name": "MAX_META",
+      "expression": "1 << 16",
+      "source": "agent_parley/records.py:32"
+    },
+    {
+      "name": "CLAUDE_FIELDS",
+      "expression": "(\n    \"input_tokens\",\n    \"cache_creation_input_tokens\",\n    \"cache_read_input_tokens\",\n    \"output_tokens\",\n)",
+      "source": "agent_parley/records.py:35"
+    },
+    {
+      "name": "DEFAULT_HOMES",
+      "expression": "{\"claude\": \"~/.claude\", \"codex\": \"~/.codex\"}",
+      "source": "agent_parley/records.py:41"
+    },
+    {
+      "name": "MAX_TAIL",
+      "expression": "1 << 16",
+      "source": "agent_parley/records.py:43"
+    },
+    {
+      "name": "THROTTLED",
+      "expression": "re.compile(\n    r\"overloaded\"\n    r\"|\\b(?:api|http|status)\\b[\\W_]{0,3}(?:error|code)?[\\W_]{0,3}\"\n    r\"(?:429|5\\d\\d)\\b\",\n    re.IGNORECASE,\n)",
+      "source": "agent_parley/records.py:57"
+    },
+    {
+      "name": "ADAPTERS",
+      "expression": "{\n    \"claude\": (_claude_records, _fold_claude),\n    \"codex\": (_codex_records, _fold_codex),\n}",
+      "source": "agent_parley/records.py:227"
+    },
+    {
+      "name": "CAPTURE_INTERVAL",
+      "expression": "30",
+      "source": "agent_parley/recovery.py:18"
+    },
+    {
+      "name": "GIT_SECONDS",
+      "expression": "30",
+      "source": "agent_parley/recovery.py:19"
+    },
+    {
+      "name": "MAX_STEP_BYTES",
+      "expression": "400",
+      "source": "agent_parley/recovery.py:20"
+    },
+    {
+      "name": "TEMPORARY_MAX_AGE",
+      "expression": "3600",
+      "source": "agent_parley/recovery.py:672"
+    },
+    {
+      "name": "GIT_SECONDS",
+      "expression": "30",
+      "source": "agent_parley/retirement.py:39"
+    },
+    {
+      "name": "LOCK_SECONDS",
+      "expression": "1.0",
+      "source": "agent_parley/retirement.py:40"
+    },
+    {
+      "name": "ADAPTERS",
+      "expression": "(\"claude\", \"codex\", \"copilot\", \"gemini\", \"opencode\", \"amp\")",
+      "source": "agent_parley/roster.py:15"
+    },
+    {
+      "name": "DEFAULT_PREFIX",
+      "expression": "\"parley\"",
+      "source": "agent_parley/roster.py:51"
+    },
+    {
+      "name": "MAX_PARTICIPANTS",
+      "expression": "32",
+      "source": "agent_parley/roster.py:71"
+    },
+    {
+      "name": "MAX_POOL",
+      "expression": "8",
+      "source": "agent_parley/roster.py:72"
+    },
+    {
+      "name": "MAX_VERIFY_ARGUMENTS",
+      "expression": "64",
+      "source": "agent_parley/roster.py:73"
+    },
+    {
+      "name": "MAX_STANDING_REPLY",
+      "expression": "500",
+      "source": "agent_parley/roster.py:74"
+    },
+    {
+      "name": "MAX_UNATTENDED_ISSUES",
+      "expression": "100",
+      "source": "agent_parley/roster.py:75"
+    },
+    {
+      "name": "MANIFEST_VERSION",
+      "expression": "2",
+      "source": "agent_parley/roster.py:78"
+    },
+    {
+      "name": "DEADLINE_FIELDS",
+      "expression": "(\"claim\", \"offer\", \"request\", \"ack\", \"wait\")",
+      "source": "agent_parley/roster.py:380"
+    },
+    {
+      "name": "MAX_DEADLINE",
+      "expression": "86400 * 30",
+      "source": "agent_parley/roster.py:381"
+    },
+    {
+      "name": "MAX_ATTEMPTS",
+      "expression": "1000",
+      "source": "agent_parley/roster.py:382"
+    },
+    {
+      "name": "BUDGET_FIELDS",
+      "expression": "(\"tokens\", \"calls\", \"hours\")",
+      "source": "agent_parley/roster.py:442"
+    },
+    {
+      "name": "MAX_BUDGET",
+      "expression": "10**12",
+      "source": "agent_parley/roster.py:443"
+    },
+    {
+      "name": "MAX_RESOURCES",
+      "expression": "64",
+      "source": "agent_parley/roster.py:511"
+    },
+    {
+      "name": "VERSIONS",
+      "expression": "(\"2025-03-26\", \"2025-06-18\", \"2025-11-25\")",
+      "source": "agent_parley/server.py:35"
+    },
+    {
+      "name": "MAX_REQUEST_BYTES",
+      "expression": "16384",
+      "source": "agent_parley/server.py:36"
+    },
+    {
+      "name": "MAX_HOOK_BYTES",
+      "expression": "1_048_576",
+      "source": "agent_parley/server.py:37"
+    },
+    {
+      "name": "REVISION_SECONDS",
+      "expression": "2.0",
+      "source": "agent_parley/server.py:39"
+    },
+    {
+      "name": "DECISION_SECONDS",
+      "expression": "hook.REPLY_TIMEOUT - 0.5",
+      "source": "agent_parley/server.py:42"
+    },
+    {
+      "name": "DELIVERY_SECONDS",
+      "expression": "0.25",
+      "source": "agent_parley/server.py:44"
+    },
+    {
+      "name": "RECEIPT_SECONDS",
+      "expression": "0.5",
+      "source": "agent_parley/server.py:45"
+    },
+    {
+      "name": "TEMPORARY_SECONDS",
+      "expression": "60.0",
+      "source": "agent_parley/server.py:46"
+    },
+    {
+      "name": "UNDECIDED_LIMIT",
+      "expression": "1",
+      "source": "agent_parley/server.py:47"
+    },
+    {
+      "name": "REFUSAL_SECONDS",
+      "expression": "5.0",
+      "source": "agent_parley/server.py:48"
+    },
+    {
+      "name": "REPEAT_SECONDS",
+      "expression": "60.0",
+      "source": "agent_parley/server.py:49"
+    },
+    {
+      "name": "GIT_SECONDS",
+      "expression": "2.0",
+      "source": "agent_parley/start.py:33"
+    },
+    {
+      "name": "DEFAULT_HOME",
+      "expression": "\"~/.local/state/agent-parley\"",
+      "source": "agent_parley/start.py:34"
+    },
+    {
+      "name": "MAX_LOG_BYTES",
+      "expression": "262144",
+      "source": "agent_parley/state.py:14"
+    },
+    {
+      "name": "MAX_LOG_RECORDS",
+      "expression": "2000",
+      "source": "agent_parley/state.py:15"
+    },
+    {
+      "name": "DORMANT_SECONDS",
+      "expression": "86400.0",
+      "source": "agent_parley/status.py:26"
+    },
+    {
+      "name": "FORGE_TTL",
+      "expression": "300.0",
+      "source": "agent_parley/status.py:31"
+    },
+    {
+      "name": "FORGE_TIMEOUT",
+      "expression": "5",
+      "source": "agent_parley/status.py:34"
+    },
+    {
+      "name": "FORGE_LIMIT",
+      "expression": "1000",
+      "source": "agent_parley/status.py:35"
+    },
+    {
+      "name": "SCHEMA_VERSION",
+      "expression": "12",
+      "source": "agent_parley/store.py:30"
+    },
+    {
+      "name": "SCHEMA_ABSENT",
+      "expression": "\"absent\"",
+      "source": "agent_parley/store.py:31"
+    },
+    {
+      "name": "SCHEMA_BEHIND",
+      "expression": "\"needs migration\"",
+      "source": "agent_parley/store.py:32"
+    },
+    {
+      "name": "SCHEMA_CURRENT",
+      "expression": "\"ok\"",
+      "source": "agent_parley/store.py:33"
+    },
+    {
+      "name": "SCHEMA_UNSUPPORTED",
+      "expression": "\"unsupported\"",
+      "source": "agent_parley/store.py:34"
+    },
+    {
+      "name": "SCHEMA_USABLE",
+      "expression": "frozenset({SCHEMA_ABSENT, SCHEMA_CURRENT})",
+      "source": "agent_parley/store.py:35"
+    },
+    {
+      "name": "BUSY_TIMEOUT",
+      "expression": "5.0",
+      "source": "agent_parley/store.py:36"
+    },
+    {
+      "name": "MAX_BODY_BYTES",
+      "expression": "4096",
+      "source": "agent_parley/store.py:37"
+    },
+    {
+      "name": "MAX_RESULT_BYTES",
+      "expression": "8192",
+      "source": "agent_parley/store.py:38"
+    },
+    {
+      "name": "MAX_RECIPIENTS",
+      "expression": "16",
+      "source": "agent_parley/store.py:39"
+    },
+    {
+      "name": "MAX_ROSTER",
+      "expression": "32",
+      "source": "agent_parley/store.py:40"
+    },
+    {
+      "name": "MAX_EVENT_ROWS",
+      "expression": "2000",
+      "source": "agent_parley/store.py:41"
+    },
+    {
+      "name": "REFUSAL_SECONDS",
+      "expression": "86400.0",
+      "source": "agent_parley/store.py:42"
+    },
+    {
+      "name": "MAX_THREAD_PAGE",
+      "expression": "10",
+      "source": "agent_parley/store.py:43"
+    },
+    {
+      "name": "MAX_SEARCH_HITS",
+      "expression": "5",
+      "source": "agent_parley/store.py:44"
+    },
+    {
+      "name": "MAX_QUERY_BYTES",
+      "expression": "160",
+      "source": "agent_parley/store.py:45"
+    },
+    {
+      "name": "MAX_SUPERSEDE_REASON",
+      "expression": "200",
+      "source": "agent_parley/store.py:46"
+    },
+    {
+      "name": "MAX_REPEATS",
+      "expression": "24",
+      "source": "agent_parley/store.py:47"
+    },
+    {
+      "name": "MAX_QUEUED_REQUESTS",
+      "expression": "32",
+      "source": "agent_parley/store.py:48"
+    },
+    {
+      "name": "MAX_NOTICE_CHARACTERS",
+      "expression": "1000",
+      "source": "agent_parley/store.py:49"
+    },
+    {
+      "name": "DEFAULT_ACK_SECONDS",
+      "expression": "240",
+      "source": "agent_parley/store.py:50"
+    },
+    {
+      "name": "RESERVATION_GRACE",
+      "expression": "1800",
+      "source": "agent_parley/store.py:51"
+    },
+    {
+      "name": "MAX_TOPIC",
+      "expression": "80",
+      "source": "agent_parley/store.py:54"
+    },
+    {
+      "name": "MIN_STEM",
+      "expression": "3",
+      "source": "agent_parley/store.py:55"
+    },
+    {
+      "name": "BROADCAST_MIN",
+      "expression": "3",
+      "source": "agent_parley/store.py:56"
+    },
+    {
+      "name": "MARK_READ_TIMEOUT",
+      "expression": "0.5",
+      "source": "agent_parley/store.py:57"
+    },
+    {
+      "name": "SCHEDULE_FIELDS",
+      "expression": "(\n    \"id\",\n    \"kind\",\n    \"recipient\",\n    \"actor\",\n    \"subject\",\n    \"body_md\",\n    \"issue\",\n    \"dedup_key\",\n    \"sequence\",\n    \"ack_required\",\n    \"ack_within\",\n    \"not_before\",\n    \"condition\",\n    \"unless_reported\",\n    \"every_seconds\",\n    \"repeats_left\",\n    \"created_ts\",\n    \"delivered_ts\",\n)",
+      "source": "agent_parley/store.py:71"
+    },
+    {
+      "name": "SEARCH_SCHEMA",
+      "expression": "\"\"\"\nCREATE VIRTUAL TABLE IF NOT EXISTS message_search USING fts5(\n subject, body_md, content='messages', content_rowid='id');\nCREATE TRIGGER IF NOT EXISTS message_indexed AFTER INSERT ON messages BEGIN\n INSERT INTO message_search(rowid,subject,body_md)\n VALUES (new.id,new.subject,new.body_md);\nEND;\nCREATE TRIGGER IF NOT EXISTS message_unindexed AFTER DELETE ON messages BEGIN\n INSERT INTO message_search(message_search,rowid,subject,body_md)\n VALUES ('delete',old.id,old.subject,old.body_md);\nEND;\n\"\"\"",
+      "source": "agent_parley/store.py:205"
+    },
+    {
+      "name": "DEFAULT_WAIT_CEILING",
+      "expression": "3600",
+      "source": "agent_parley/supervision.py:52"
+    },
+    {
+      "name": "DEFAULTS",
+      "expression": "{\n    \"interval\": 30,\n    \"inactive_after\": 300,\n    \"stalled_after\": 600,\n    \"start_deadline\": 30,\n    \"completion_reminders\": 3,\n    \"orphan_retire_after\": 3600,\n    \"claim_idle_after\": 3600,\n    \"takeover_grace\": 300,\n    \"max_claims_per_lane\": 2,\n    \"convergence_repeats\": 3,\n    \"convergence_after\": 14400,\n    \"prompts\": True,\n    \"wake\": True,\n    \"reclaim\": True,\n    \"titles\": True,\n    \"rerun_cancelled\": True,\n    \"rotate\": True,\n    \"ci_rounds\": 2,\n    \"fold_after\": 86400,\n}",
+      "source": "agent_parley/supervision.py:54"
+    },
+    {
+      "name": "MAX_COMPLETION_REMINDERS",
+      "expression": "100",
+      "source": "agent_parley/supervision.py:76"
+    },
+    {
+      "name": "MAX_CI_ROUNDS",
+      "expression": "100",
+      "source": "agent_parley/supervision.py:77"
+    },
+    {
+      "name": "MAX_CLAIMS_PER_LANE",
+      "expression": "100",
+      "source": "agent_parley/supervision.py:78"
+    },
+    {
+      "name": "MAX_CONVERGENCE_REPEATS",
+      "expression": "100",
+      "source": "agent_parley/supervision.py:79"
+    },
+    {
+      "name": "RECLAIM_INTERVAL",
+      "expression": "900.0",
+      "source": "agent_parley/supervision.py:81"
+    },
+    {
+      "name": "COMPLETION_TTL",
+      "expression": "60.0",
+      "source": "agent_parley/supervision.py:89"
+    },
+    {
+      "name": "TOOL_TIMEOUT",
+      "expression": "600",
+      "source": "agent_parley/supervision.py:138"
+    },
+    {
+      "name": "ISSUE_READING_SECONDS",
+      "expression": "300.0",
+      "source": "agent_parley/supervision.py:5554"
+    },
+    {
+      "name": "PULL_REQUEST_SECONDS",
+      "expression": "60.0",
+      "source": "agent_parley/supervision.py:5856"
+    },
+    {
+      "name": "PULL_REQUEST_HISTORY_SECONDS",
+      "expression": "30 * 86400.0",
+      "source": "agent_parley/supervision.py:5858"
+    },
+    {
+      "name": "CHECKS_STALLED_SECONDS",
+      "expression": "3600.0",
+      "source": "agent_parley/supervision.py:5859"
+    },
+    {
+      "name": "MAX_REVIEW_COMMENTS",
+      "expression": "20",
+      "source": "agent_parley/supervision.py:5866"
+    },
+    {
+      "name": "TERMINAL_ESCAPE",
+      "expression": "re.compile(r\"\\x1b\\[[0-9;?]*[ -/]*[@-~]\")",
+      "source": "agent_parley/supervision.py:5871"
+    },
+    {
+      "name": "MINIMUM_TASK",
+      "expression": "12",
+      "source": "agent_parley/tables.py:22"
+    },
+    {
+      "name": "MAX_WORK_PROMPT",
+      "expression": "2_000",
+      "source": "agent_parley/terminal.py:27"
+    },
+    {
+      "name": "ESCAPE_TIMEOUT",
+      "expression": "0.5",
+      "source": "agent_parley/terminal.py:29"
+    },
+    {
+      "name": "LOG_LIMIT",
+      "expression": "1 << 20",
+      "source": "agent_parley/terminal.py:38"
+    },
+    {
+      "name": "TITLE_LIMIT",
+      "expression": "96",
+      "source": "agent_parley/terminal.py:39"
+    },
+    {
+      "name": "SOCKET_GRACE",
+      "expression": "60",
+      "source": "agent_parley/terminal.py:42"
+    },
+    {
+      "name": "_DETACHED_TERMINAL_QUERIES",
+      "expression": "(\n    (b\"\\x1b[6n\", b\"\\x1b[1;1R\"),\n    (b\"\\x1b]10;?\\x07\", b\"\\x1b]10;rgb:ffff/ffff/ffff\\x07\"),\n    (b\"\\x1b]10;?\\x1b\\\\\", b\"\\x1b]10;rgb:ffff/ffff/ffff\\x1b\\\\\"),\n    (b\"\\x1b]11;?\\x07\", b\"\\x1b]11;rgb:0000/0000/0000\\x07\"),\n    (b\"\\x1b]11;?\\x1b\\\\\", b\"\\x1b]11;rgb:0000/0000/0000\\x1b\\\\\"),\n    (b\"\\x1b[c\", b\"\\x1b[?1;2c\"),\n)",
+      "source": "agent_parley/terminal.py:49"
+    },
+    {
+      "name": "TIMEOUT_SECONDS",
+      "expression": "30 * 60.0",
+      "source": "agent_parley/timeouts.py:53"
+    },
+    {
+      "name": "MAX_TIMEOUT_SECONDS",
+      "expression": "7 * 24 * 3600.0",
+      "source": "agent_parley/timeouts.py:54"
+    },
+    {
+      "name": "SECONDS",
+      "expression": "\"seconds\"",
+      "source": "agent_parley/timeouts.py:57"
+    },
+    {
+      "name": "MAX_REASON",
+      "expression": "2000",
+      "source": "agent_parley/unattended.py:62"
+    },
+    {
+      "name": "SCHEMA",
+      "expression": "\"agent-parley/read/v1\"",
+      "source": "agent_parley/views.py:22"
+    },
+    {
+      "name": "DEFAULT_SECONDS",
+      "expression": "30.0",
+      "source": "agent_parley/waits.py:11"
+    },
+    {
+      "name": "MAX_SECONDS",
+      "expression": "120.0",
+      "source": "agent_parley/waits.py:12"
+    },
+    {
+      "name": "POLL_SECONDS",
+      "expression": "0.25",
+      "source": "agent_parley/waits.py:13"
+    },
+    {
+      "name": "MAX_WAITERS",
+      "expression": "64",
+      "source": "agent_parley/waits.py:14"
+    },
+    {
+      "name": "INTERVAL",
+      "expression": "0.5",
+      "source": "agent_parley/watch.py:41"
+    },
+    {
+      "name": "MAX_CALLS",
+      "expression": "500",
+      "source": "agent_parley/watch.py:43"
+    },
+    {
+      "name": "KEY_FIELDS",
+      "expression": "(\n    \"kind\",\n    \"action\",\n    \"at\",\n    \"issue\",\n    \"claim_id\",\n    \"detail\",\n    \"message_id\",\n    \"report_id\",\n    \"path\",\n)",
+      "source": "agent_parley/watch.py:48"
+    },
+    {
+      "name": "VERIFY_TIMEOUT",
+      "expression": "1800",
+      "source": "agent_parley/worktrees.py:13"
+    },
+    {
+      "name": "GIT_SECONDS",
+      "expression": "30",
+      "source": "agent_parley/worktrees.py:15"
+    }
+  ]
+}

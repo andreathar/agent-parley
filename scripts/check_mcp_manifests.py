@@ -77,12 +77,15 @@ def text_errors(
     return []
 
 
-def registry_errors(data: dict[str, Any], version: str) -> list[str]:
+def registry_errors(
+    data: dict[str, Any], version: str, *, server_name: str = SERVER_NAME
+) -> list[str]:
     """Checks `server.json` against the MCP registry schema rules.
 
     Args:
         data: Parsed `server.json` object.
         version: Release version from `pyproject.toml`.
+        server_name: Registry identity derived from project repository metadata.
 
     Returns:
         Every rule the manifest breaks.
@@ -97,8 +100,8 @@ def registry_errors(data: dict[str, Any], version: str) -> list[str]:
     errors += text_errors(name, data, "name", (3, 200))
     if not NAME_PATTERN.match(str(data.get("name", ""))):
         errors.append(f"{name}: name must match {NAME_PATTERN.pattern}")
-    if data.get("name") != SERVER_NAME:
-        errors.append(f"{name}: name must be {SERVER_NAME}")
+    if data.get("name") != server_name:
+        errors.append(f"{name}: name must be {server_name}")
     errors += text_errors(name, data, "description", (1, 100))
     if "title" in data:
         errors += text_errors(name, data, "title", (1, 100))
@@ -166,9 +169,18 @@ def manifest_errors(root: Path) -> list[str]:
     Returns:
         Every schema, version, notice and privacy rule a manifest breaks.
     """
-    version = tomllib.loads((root / "pyproject.toml").read_text())["project"][
-        "version"
-    ]
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    version = project["version"]
+    repository = project.get("urls", {}).get("Repository", "")
+    identity = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+)/?",
+        repository,
+    )
+    if identity is None:
+        return [
+            "pyproject.toml: Repository must name its canonical GitHub repo"
+        ]
+    server_name = f"io.github.{identity[1]}/{identity[2]}"
     errors: list[str] = []
     for name in ("server.json", "glama.json"):
         path = root / name
@@ -187,7 +199,7 @@ def manifest_errors(root: Path) -> list[str]:
             errors.append(f"{name}: must be a JSON object")
             continue
         errors += (
-            registry_errors(data, version)
+            registry_errors(data, version, server_name=server_name)
             if name == "server.json"
             else glama_errors(data)
         )

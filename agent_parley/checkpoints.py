@@ -26,6 +26,7 @@ from agent_parley import (
     policy,
     process,
     protocol,
+    roles,
     roster,
     store,
 )
@@ -80,7 +81,7 @@ DIAGNOSTIC_TOOLS = frozenset(
     {"Glob", "Grep", "NotebookRead", "Read", "ToolSearch"}
 )
 READ_ONLY_TOOLS = DIAGNOSTIC_TOOLS | {"WebFetch", "WebSearch"}
-PATH_FIELDS = ("file_path", "notebook_path", "path")
+PATH_FIELDS = ("file_path", "filePath", "notebook_path", "path")
 COMMAND_FIELDS = ("command", "cmd")
 KEPT_FIELDS = ("hook_event_name", "event", "tool_name", "cwd", "session_id")
 OFFER_REPLY_SECONDS = 120.0
@@ -288,6 +289,7 @@ class Reason(StrEnum):
     WAKE_REQUESTED = "wake_requested"
     ATTRIBUTION_REFUSED = "attribution_refused"
     BUDGET_REFUSED = "budget_refused"
+    ROLE_REFUSED = "role_refused"
     WORKTREE_REFUSED = "worktree_refused"
     OPERATOR_PAUSED = "operator_paused"
     OPERATOR_RESUMED = "operator_resumed"
@@ -2710,6 +2712,30 @@ def unscanned_hazard(
     return (mail, danger) if danger else None
 
 
+def role_refusal(
+    directory: Path, agent: str, payload: dict, lane: Path
+) -> str | None:
+    """Applies the operator's role rules to one tool call.
+
+    A project without ``roles.json`` and a lane without an assignment are not
+    restricted. An unreadable rules file refuses writes and shell calls.
+
+    Args:
+        directory: Common project state directory.
+        agent: Assigned native lane name.
+        payload: Native ``PreToolUse`` hook payload.
+        lane: Resolved lane worktree the call runs in.
+
+    Returns:
+        The refusal reason, or None when the call may proceed.
+    """
+    try:
+        spec = roles.load(directory)
+    except BridgeError as exc:
+        return roles.broken(exc, payload)
+    return roles.decide(spec, agent, payload, lane) if spec else None
+
+
 def outage(home: Path, cause: str) -> str:
     """Describes a coordination outage in terms the operator can act on.
 
@@ -3964,6 +3990,18 @@ def checkpoint(
             }
         }
         record(directory, agent, payload, Reason.BUDGET_REFUSED, refused)
+        return refused
+    if event == "PreToolUse" and (
+        why := role_refusal(directory, agent, payload, lane)
+    ):
+        refused = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": why,
+            }
+        }
+        record(directory, agent, payload, Reason.ROLE_REFUSED, refused)
         return refused
     if event == "PreToolUse" and (stray := stray_worktree(payload, lane)):
         allowed = lanes.extras(lane)

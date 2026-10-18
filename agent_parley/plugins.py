@@ -31,12 +31,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
 
-from agent_parley import protocol
+from agent_parley import protocol, roster
 
 MARKETPLACE = "agent-parley"
-SOURCE = "suneel944/agent-parley"
+SOURCE = "andreathar/agent-parley"
 PLUGIN = "agent-parley@agent-parley"
 TIMEOUT = 300.0
+READ_TIMEOUT = 5.0
 HOME_ENV = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 CODEX_CACHE = Path("plugins/cache/agent-parley/agent-parley")
 SHELL = "shell"
@@ -110,12 +111,15 @@ def run(
     executable: str,
     arguments: Sequence[str],
     env: dict[str, str] | None = None,
+    *,
+    timeout: float = TIMEOUT,
 ) -> str:
     """Runs one native plugin command and returns its standard output.
 
     Args:
         executable: Resolved path of the native CLI.
         arguments: Arguments after the executable.
+        timeout: Maximum elapsed seconds for this native invocation.
         env: Environment selecting the configuration directory, or None for
             the operator's own.
 
@@ -132,7 +136,7 @@ def run(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT,
+            timeout=timeout,
             check=False,
             env=env,
         )
@@ -415,11 +419,25 @@ def status(home: Path | None = None) -> list[str]:
             env = environment(client.name, label, directory)
             try:
                 if not names(
-                    run(executable, client.marketplaces, env), MARKETPLACE
+                    run(
+                        executable,
+                        client.marketplaces,
+                        env=env,
+                        timeout=READ_TIMEOUT,
+                    ),
+                    MARKETPLACE,
                 ):
                     lines.append(f"{prefix}: marketplace not added")
                     continue
-                if not holds(client, run(executable, client.plugins, env)):
+                if not holds(
+                    client,
+                    run(
+                        executable,
+                        client.plugins,
+                        env=env,
+                        timeout=READ_TIMEOUT,
+                    ),
+                ):
                     lines.append(f"{prefix}: plugin {PLUGIN} not installed")
                     continue
             except Failed as error:
@@ -436,6 +454,107 @@ def status(home: Path | None = None) -> list[str]:
     return lines
 
 
+def inspection() -> dict:
+    """Reports every adapter, keeping installation separate from activation.
+
+    Native plugin listings are the existing read-only Claude/Codex probes.
+    Other platforms use launch adapters rather than this marketplace, so
+    their native loading and lane-specific settings remain unknown here.
+
+    Returns:
+        Adapter capabilities and installation observations with explicit
+        limits. No configuration, hook or native session is changed.
+    """
+    listings = {line.split(":", 1)[0]: line for line in status()}
+    native = {client.name for client in CLIENTS}
+    platforms = []
+    warnings = []
+    for adapter in roster.ADAPTERS:
+        command = roster.PRESETS[adapter]["command"]
+        observed = listings.get(adapter)
+        missing = roster.unavailable_hooks(adapter)
+        gaps = [event for event in roster.REQUIRED_HOOKS if event in missing]
+        configured = None
+        if observed is not None:
+            if observed.endswith(f"plugin {PLUGIN} installed"):
+                configured = True
+            elif (
+                "not installed" in observed
+                or "marketplace not added" in observed
+            ):
+                configured = False
+            elif "unknown" in observed:
+                warnings.append({"adapter": adapter, "error": observed})
+        platforms.append(
+            {
+                "adapter": adapter,
+                "mechanism": "native marketplace plugin"
+                if adapter in native
+                else "lane launch adapter",
+                "executable_detected": bool(shutil.which(command)),
+                "native_plugin_supported": adapter in native,
+                "configured": configured,
+                "configuration_scope": "current native CLI plugin listing"
+                if observed is not None
+                else "lane-specific; use agents status --json",
+                "verified": None,
+                "active": None,
+                "observation": observed,
+                "delivery": roster.delivery_path(adapter),
+                "unavailable_hooks": missing,
+                "required_hook_gaps": gaps,
+                "launch_supported": not gaps,
+                "protocol": protocol.PROTOCOL,
+                "remedy": "This adapter lacks required lifecycle guards; "
+                "choose a supported adapter with provider show."
+                if gaps
+                else "Use agents status --json for per-lane receipts and "
+                "native observations; doctor and wiring check compatibility.",
+            }
+        )
+    return {
+        "read_only": True,
+        "platforms": platforms,
+        "warnings": warnings,
+        "evidence_limit": "Installation listings and declared adapter "
+        "contracts; no runtime activation, task ACK or model response proved.",
+    }
+
+
+def preview() -> dict:
+    """Prepares marketplace installation commands without executing them.
+
+    Returns:
+        Existing client commands, preserving native approvals. A refresh
+        or installation still requires an explicit operator invocation.
+    """
+    operations = []
+    for client, executable in detected():
+        operations.append(
+            {
+                "adapter": client.name,
+                "read_before_write": [
+                    [executable, *client.marketplaces],
+                    [executable, *client.plugins],
+                ],
+                "if_marketplace_missing": [executable, *client.add_marketplace],
+                "if_marketplace_present": [
+                    executable,
+                    *client.refresh_marketplace,
+                ],
+                "if_plugin_missing": [executable, *client.install],
+                "if_plugin_installed": [executable, *client.update]
+                if client.update
+                else None,
+            }
+        )
+    return {
+        "preview": True,
+        "changed": False,
+        "operations": operations,
+        "effect": "Changes native marketplace/plugin configuration when "
+        "explicitly installed; existing sessions may need reopening.",
+    }
 def install_one(
     client: Client,
     executable: str,

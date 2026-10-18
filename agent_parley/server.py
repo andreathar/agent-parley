@@ -172,12 +172,45 @@ FLAG = {"type": "boolean"}
 RETRY_KEY = {
     "type": "string",
     "maxLength": retries.KEY_CHARACTERS,
-    "description": "Optional. Reuse on a retry; the repeat changes nothing.",
+    "description": "Retry key.",
 }
 TOOLS = [
     _tool(
+        "reserve_host_resources",
+        "Exclusive advisory SCHEME:NAME keys across projects/homes; all or "
+        "none. No expiry; explicitly release IDs.",
+        {
+            "resources": {
+                "type": "array",
+                "items": TEXT,
+                "minItems": 1,
+                "maxItems": 16,
+            }
+        },
+        ["resources"],
+    ),
+    _tool(
+        "release_host_resources",
+        "Release your exact host lease IDs. Stale IDs do nothing.",
+        {
+            "lease_ids": {
+                "type": "array",
+                "items": TEXT,
+                "minItems": 1,
+                "maxItems": 16,
+            }
+        },
+        ["lease_ids"],
+    ),
+    _tool(
+        "list_host_resources",
+        "List advisory host holdings, not device usage.",
+        {},
+        [],
+    ),
+    _tool(
         "send_message",
-        "Send a concise update. Reuse the key only on retries.",
+        "Send mail; reuse key only on retries.",
         {
             "to": {
                 "type": "array",
@@ -196,7 +229,7 @@ TOOLS = [
             "thread_id": {**TEXT, "maxLength": 80},
             "reply_to": {
                 **INTEGER,
-                "description": "Message answered; joins its thread.",
+                "description": "Message replied to.",
             },
             "topic": TEXT,
             "ack_required": FLAG,
@@ -204,21 +237,18 @@ TOOLS = [
                 "type": "number",
                 "minimum": 1,
                 "maximum": roster.MAX_DEADLINE,
-                "description": (
-                    "Seconds before it returns unanswered; omitted takes "
-                    "the default."
-                ),
+                "description": ("Ack deadline seconds."),
             },
             "decision": {
                 **FLAG,
-                "description": "Also record in the shared decision log.",
+                "description": "Record a shared decision.",
             },
         },
         ["to", "subject", "body_md", "idempotency_key"],
     ),
     _tool(
         "fetch_inbox",
-        "Read incremental mail. Bodies opt-in; page long bodies.",
+        "Incremental inbox page; bodies opt-in.",
         {
             "after_id": INTEGER,
             "limit": {**INTEGER, "minimum": 1, "maximum": 5},
@@ -231,8 +261,7 @@ TOOLS = [
     ),
     _tool(
         waits.TOOL,
-        "Await your next matching mail instead of polling or ending your "
-        "turn. Filters as fetch_inbox; an expired wait returns nothing.",
+        "Wait for mail; filters as fetch_inbox. Timeout returns nothing.",
         {
             "timeout_seconds": {
                 **INTEGER,
@@ -249,47 +278,40 @@ TOOLS = [
     ),
     _tool(
         "acknowledge_message",
-        "Explicitly acknowledge a reviewed message.",
+        "Acknowledge reviewed mail.",
         {"message_id": INTEGER, "idempotency_key": RETRY_KEY},
         ["message_id"],
     ),
     _tool(
         "mark_message_read",
-        "Mark an ordinary message reviewed; does not ack.",
+        "Mark reviewed without acknowledgement.",
         {"message_id": INTEGER, "idempotency_key": RETRY_KEY},
         ["message_id"],
     ),
     _tool(
         "file_reservation_paths",
-        "Reserve repository-relative paths, or named resources written with a "
-        "scheme such as port:5432, db:local, suite:integration or "
-        "device:android-1, atomically; conflicts grant nothing and name the "
-        "blocking owner with that owner's reason.",
+        "Reserve project paths/globs or SCHEME:NAME keys, all or none. "
+        "Conflicts name owner/reason.",
         {
             "paths": {
                 "type": "array",
                 "items": TEXT,
                 "maxItems": 16,
-                "description": (
-                    "Repository-relative paths, or named resources written "
-                    "as SCHEME:NAME. A named resource conflicts on an exact "
-                    "match only."
-                ),
+                "description": ("Repo paths/globs or SCHEME:NAME (exact)."),
             },
             "ttl_seconds": {
                 **INTEGER,
                 "minimum": 30,
                 "maximum": 3600,
                 "description": (
-                    "Optional. Past it the lease reports stale and still "
-                    "holds; omit it and the lease never reports stale."
+                    "Stale after this; still held. Omit: never stale."
                 ),
             },
             "exclusive": FLAG,
             "reason": {
                 **TEXT,
                 "maxLength": 160,
-                "description": "Declared scope, shown to peers you block.",
+                "description": "Scope shown to peers.",
             },
             "idempotency_key": RETRY_KEY,
         },
@@ -297,15 +319,14 @@ TOOLS = [
     ),
     _tool(
         "request_reservation",
-        "Reserve the same keys, and where a peer holds one, queue for it "
-        "instead of failing; the refusal names the holder and your place. "
-        "The holder's release grants it and sends you one notice.",
+        "Reserve free keys; queue held keys with owner/position. "
+        "Release grants and notifies.",
         {
             "paths": {
                 "type": "array",
                 "items": TEXT,
                 "maxItems": 16,
-                "description": "Keys as file_reservation_paths takes them.",
+                "description": "Keys as file_reservation_paths.",
             },
             "ttl_seconds": {**INTEGER, "minimum": 30, "maximum": 3600},
             "exclusive": FLAG,
@@ -316,26 +337,25 @@ TOOLS = [
     ),
     _tool(
         "cancel_reservation_request",
-        "Withdraw one queued reservation request, or every one of yours.",
+        "Cancel request_id, or all your queued requests.",
         {"request_id": INTEGER, "idempotency_key": RETRY_KEY},
         [],
     ),
     _tool(
         "release_file_reservations",
-        "Release your file reservations. A key another lane queued for is "
-        "granted to it here, and that lane is told in the same commit.",
+        "Release project leases; grant queued peers and notify atomically.",
         {"idempotency_key": RETRY_KEY},
         [],
     ),
     _tool(
         "list_participants",
-        "List the participants you can address in this project.",
+        "List this project's participants.",
         {},
         [],
     ),
     _tool(
         "read_thread",
-        "Read your mail in one thread, oldest first.",
+        "Read thread mail, oldest first.",
         {
             "thread_id": {**TEXT, "maxLength": 80},
             "after_id": INTEGER,
@@ -349,7 +369,7 @@ TOOLS = [
     ),
     _tool(
         "search_messages",
-        "Search your mail by text, newest match first.",
+        "Search your mail, newest first.",
         {
             "query": {**TEXT, "maxLength": store.MAX_QUERY_BYTES},
             "limit": {
@@ -362,7 +382,7 @@ TOOLS = [
     ),
     _tool(
         "search_decisions",
-        "Search decisions any lane recorded. Empty query lists the newest.",
+        "Search shared decisions; empty query lists newest.",
         {
             "query": {**TEXT, "maxLength": store.MAX_QUERY_BYTES},
             "limit": {
@@ -376,8 +396,7 @@ TOOLS = [
     ),
     _tool(
         "review_report",
-        "Record your verdict on a peer's report, never your own. A verdict "
-        "is your claim, not independent verification.",
+        "Review a peer report. A verdict is a claim, not verification.",
         {
             "report_id": {**TEXT, "maxLength": 32},
             "verdict": {"type": "string", "enum": list(metrics.VERDICTS)},
@@ -390,16 +409,14 @@ TOOLS = [
     ),
     _tool(
         store.RETIRE,
-        "Retire when nothing is left: releases claims, handoffs and keys. "
-        "Refused over ready or operator-blocked work. Re-admit: agent-parley "
-        "participant add.",
+        "Retire: release claims, handoffs and project leases, not host "
+        "leases. Refuses ready/operator-blocked work.",
         {},
         [],
     ),
     _tool(
         "next_issues",
-        "Rank unclaimed issues you could take next, with the reason for "
-        "each. Read this before claiming; it claims nothing.",
+        "Rank claimable issues; claims nothing.",
         {
             "limit": {
                 **INTEGER,

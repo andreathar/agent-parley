@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         protocol,
         reclaim,
         recommend,
+        roles,
         roster,
         state,
         store,
@@ -162,6 +163,7 @@ DEFERRED_MODULES = (
     "reclaim",
     "recommend",
     "retries",
+    "roles",
     "roster",
     "state",
     "store",
@@ -3197,6 +3199,9 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "decision",
             "report",
             "participant",
+            "agents",
+            "workspace",
+            "media",
             "approve",
             "reject",
         ),
@@ -3215,7 +3220,9 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "forge",
             "deadlines",
             "budget",
+            "role",
             "resources",
+            "host-resources",
             "provider",
             "credentials",
         ),
@@ -3232,6 +3239,9 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "events",
             "problems",
             "doctor",
+            "preflight",
+            "wiring",
+            "console",
             "notify",
         ),
     ),
@@ -3846,6 +3856,103 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         parser: Root parser whose epilog carries the command listing.
         commands: Index the subcommands are declared through.
     """
+    from agent_parley import agents_cli, workspace_cli
+
+    agents_cli.declare(commands)
+    workspace_cli.declare(commands)
+    inspecting = commands.add_parser(
+        "preflight",
+        help="Read launch scope and settings without initializing state.",
+    )
+    inspecting.add_argument("--repo", type=Path, default=Path.cwd())
+    inspecting.add_argument("--provider")
+    inspecting.add_argument("--credentials")
+    inspecting.add_argument("--json", action="store_true", help=JSON_HELP)
+    wiring = commands.add_parser(
+        "wiring",
+        help="Check that running lanes use the service, port and state home.",
+    )
+    wiring.add_argument("--repo", type=Path, default=Path.cwd())
+    wiring.add_argument(
+        "--require-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Environment variable every lane process must export.",
+    )
+    wiring.add_argument("--json", action="store_true", help=JSON_HELP)
+    from agent_parley import roles as role_rules
+
+    roling = commands.add_parser(
+        "role",
+        help="Show or change the role rules that limit what a lane may do.",
+    )
+    roling.add_argument("--repo", type=Path, default=Path.cwd())
+    role_actions = roling.add_subparsers(dest="action", required=True)
+    shown = role_actions.add_parser("show", help="Print the rules in force.")
+    shown.add_argument("--json", action="store_true", help=JSON_HELP)
+    defined = role_actions.add_parser(
+        "define", help="Create or replace a role."
+    )
+    defined.add_argument("name")
+    defined.add_argument("--description", default="")
+    defined.add_argument("--read-only", action="store_true")
+    defined.add_argument("--no-shell", action="store_true")
+    for flag in ("write-path", "deny-path", "deny-command", "deny-tool"):
+        defined.add_argument(
+            f"--{flag}", action="append", default=[], metavar="PATTERN"
+        )
+    imported = role_actions.add_parser(
+        "import", help="Add the roles of a rules file; assignments are ignored."
+    )
+    imported.add_argument("file", type=Path)
+    removed = role_actions.add_parser("remove", help="Delete an unused role.")
+    removed.add_argument("name")
+    applied = role_actions.add_parser(
+        "apply", help="Define a built-in template and assign it to a lane."
+    )
+    applied.add_argument("template", choices=sorted(role_rules.TEMPLATES))
+    applied.add_argument("--to", dest="lane", required=True)
+    assigned = role_actions.add_parser(
+        "assign", help="Assign a role to a lane."
+    )
+    assigned.add_argument("lane")
+    assigned.add_argument("name")
+    role_actions.add_parser(
+        "unassign", help="Remove a lane's restrictions."
+    ).add_argument("lane")
+    for verb in ("enable", "disable"):
+        toggled = role_actions.add_parser(
+            verb, help=f"{verb.capitalize()} write or shell for one lane."
+        )
+        toggled.add_argument("lane")
+        toggled.add_argument(
+            "capability", choices=sorted(role_rules.CAPABILITIES)
+        )
+    controlling = commands.add_parser(
+        "console",
+        help="Serve the loopback operator console for this state home.",
+    )
+    controlling.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Loopback port to bind; zero selects a free one.",
+    )
+    resources = commands.add_parser(
+        "host-resources",
+        help="Inspect or explicitly release shared host leases.",
+    )
+    host_actions = resources.add_subparsers(dest="action", required=True)
+    host_list = host_actions.add_parser(
+        "list", help="Read the shared registry."
+    )
+    host_list.add_argument("--json", action="store_true", help=JSON_HELP)
+    host_release = host_actions.add_parser(
+        "release", help="Operator recovery: release these exact lease IDs."
+    )
+    host_release.add_argument("lease_ids", nargs="+")
+    host_release.add_argument("--json", action="store_true", help=JSON_HELP)
     completing = commands.add_parser(
         "completion",
         help="Print a shell completion script for this command.",
@@ -4314,6 +4421,11 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Repository root or any of its worktrees to register.",
     )
     setup.add_argument(
+        "--stash",
+        action="store_true",
+        help="Explicitly stash pending tracked and untracked base work.",
+    )
+    setup.add_argument(
         "--verify",
         dest="verify_command",
         metavar="COMMAND",
@@ -4344,7 +4456,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Provider definition; defaults to the participant name.",
     )
     run.add_argument(
-        "--credentials", help="Credential profile selecting one account."
+        "--credentials",
+        help="Credential profile selecting one account. Copilot requires "
+        "a profile with its own config home; inspect credentials list first.",
     )
     run.add_argument("--repo", type=Path, default=Path.cwd(), help=REPO_HELP)
     run.add_argument(
@@ -4354,6 +4468,12 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
             "Resume the lane's last recorded native session instead of "
             "starting a new one."
         ),
+    )
+    run.add_argument(
+        "--output-task",
+        default="",
+        help="Stable derivative task ID for shared media; "
+        "required without --issue.",
     )
     run.add_argument(
         "--task",
@@ -4772,17 +4892,20 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         help="Add the plugin to each supported native CLI on PATH.",
     )
     plugin_actions = plugging.add_subparsers(dest="action", required=True)
-    plugin_actions.add_parser(
+    plugin_install = plugin_actions.add_parser(
         "install",
         help=(
             "Add the marketplace and plugin to claude and codex where "
             "missing, refreshing what is already present."
         ),
     )
-    plugin_actions.add_parser(
+    plugin_install.add_argument("--preview", action="store_true")
+    plugin_install.add_argument("--json", action="store_true", help=JSON_HELP)
+    plugin_status = plugin_actions.add_parser(
         "status",
         help="Report whether each supported CLI has the plugin; writes none.",
     )
+    plugin_status.add_argument("--json", action="store_true", help=JSON_HELP)
     triaging = commands.add_parser(
         "problems",
         help=(
@@ -6002,10 +6125,9 @@ def declare(parser: argparse.ArgumentParser, commands: CommandIndex) -> None:
         "--config-home",
         default="",
         metavar="DIR",
-        help=(
-            "Separate config directory for this account, set as the "
-            "provider's config-home variable at launch; sign in there once."
-        ),
+        help="Separate config directory for this account, set as the "
+        "provider's config-home variable at launch; sign in there once. "
+        "Copilot requires one separate from your default configuration.",
     )
     profile.add_argument(
         "--env",
@@ -6180,16 +6302,102 @@ def main() -> int:
         from agent_parley import plugins
 
         if args.action == "status":
+            if args.json:
+                plugin_reading = plugins.inspection()
+                print(views.render("plugins_status", plugin_reading))
+                return 1 if plugin_reading["warnings"] else 0
             print("\n".join(plugins.status(home)))
             return 0
+        if args.preview:
+            plugin_plan = plugins.preview()
+            print(
+                views.render("plugins_install", plugin_plan)
+                if args.json
+                else json.dumps(plugin_plan, indent=2)
+            )
+            return 0
+        try:
+            roster.require_operator(home, "Installing user-global plugins")
+        except BridgeError as error:
+            print(str(error), file=sys.stderr)
+            if args.json:
+                print(_error_document(error))
+            return 1
         outcome, succeeded = plugins.install(home)
-        print("\n".join(outcome))
+        print(
+            views.render(
+                "plugins_install",
+                {"preview": False, "succeeded": succeeded, "results": outcome},
+            )
+            if args.json
+            else "\n".join(outcome)
+        )
         return 0 if succeeded else 1
     if args.command == "demo":
         from agent_parley import demo
 
         return demo.main()
     try:
+        if args.command in {"workspace", "media"}:
+            from agent_parley import workspace_cli
+
+            result = workspace_cli.execute(home, args)
+            print(
+                views.render(f"{args.command}_{args.action}", result)
+                if args.json
+                else workspace_cli.render(result)
+            )
+            return 1 if result.get("warnings") else 0
+        if args.command == "agents":
+            from agent_parley import agents_cli
+
+            result = agents_cli.execute(home, args)
+            print(
+                views.render(f"agents_{args.action}", result)
+                if args.json
+                else agents_cli.render(result)
+            )
+            return 1 if result.get("warnings") else 0
+        if args.command == "preflight":
+            from agent_parley import preflight
+
+            print(
+                json.dumps(
+                    preflight.inspect(
+                        home, args.repo, args.provider, args.credentials
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "wiring":
+            from agent_parley import wiring
+
+            return wiring.main(home, args.repo, args.require_env, args.json)
+        if args.command == "console":
+            from agent_parley import console
+
+            roster.require_operator(home, "Serving the operator console")
+            return console.main(home, args.port)
+        if args.command == "host-resources":
+            from agent_parley import host_resources
+
+            if args.action == "release":
+                roster.require_operator(
+                    home, "Releasing another lane's host resources"
+                )
+                result = host_resources.release(args.lease_ids, owner_id="")
+            else:
+                result = host_resources.inspect()
+            print(json.dumps(result, indent=2))
+            return 0
+        if args.command in {"provider", "credentials"} and (
+            args.action in {"add", "remove"}
+            or (args.action == "budget" and budget_changes(args) is not None)
+        ):
+            roster.require_operator(
+                home, "Changing shared provider or account settings"
+            )
         bridge = Bridge(args.home)
         if args.command == "up":
             bridge.up()
@@ -6396,7 +6604,7 @@ def main() -> int:
             from agent_parley.core import suggested_gate
 
             repository = args.repo.resolve()
-            registered = bridge.setup(repository)
+            registered = bridge.setup(repository, stash=args.stash)
             if args.verify_command is not None:
                 bridge.verification(repository, args.verify_command)
             if args.init_command is not None:
@@ -6424,6 +6632,7 @@ def main() -> int:
                 resume=args.resume,
                 issue=args.issue,
                 blueprint=args.blueprint,
+                output_task=args.output_task,
             )
             if bridge.preserved and sys.stdin.isatty():
                 print(bridge.preserved, file=sys.stderr, flush=True)
@@ -7036,6 +7245,45 @@ def main() -> int:
                     )
                 )
                 unmeasured_lanes(bridge, repository, args)
+        elif args.command == "role":
+            _, directory = bridge.project(args.repo.resolve(), create=False)
+            current = roles.load(directory)
+            if args.action == "show":
+                print(
+                    json.dumps(current, indent=2)
+                    if args.json
+                    else roles.render(current, directory)
+                )
+            else:
+                operator_only(f"role {args.action}")
+                fields = {
+                    "name": getattr(args, "name", ""),
+                    "lane": getattr(args, "lane", ""),
+                    "role": getattr(args, "name", ""),
+                    "template": getattr(args, "template", ""),
+                    "capability": getattr(args, "capability", ""),
+                }
+                if args.action == "import":
+                    try:
+                        document = json.loads(args.file.read_text())
+                    except (OSError, ValueError) as exc:
+                        raise BridgeError(f"Cannot read {args.file}.") from exc
+                    if not isinstance(document, dict):
+                        raise BridgeError("The file must hold a JSON object.")
+                    fields["roles"] = document.get("roles")
+                if args.action == "define":
+                    fields.update(
+                        description=args.description,
+                        write=False if args.read_only else None,
+                        shell=False if args.no_shell else None,
+                        write_paths=args.write_path,
+                        deny_paths=args.deny_path,
+                        deny_commands=args.deny_command,
+                        deny_tools=args.deny_tool,
+                    )
+                updated, summary = roles.change(current, args.action, **fields)
+                roles.save(directory, updated)
+                print(f"{summary} Rules {roles.digest(updated)}.")
         elif args.command == "resources":
             repository = args.repo.resolve()
             if getattr(args, "json", False):
