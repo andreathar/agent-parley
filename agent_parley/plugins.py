@@ -30,7 +30,7 @@ from typing import NamedTuple
 from agent_parley import protocol, roster
 
 MARKETPLACE = "agent-parley"
-SOURCE = "/mnt/data/Projects_SSD/agent-parley"
+SOURCE = "andreathar/agent-parley"
 PLUGIN = "agent-parley@agent-parley"
 TIMEOUT = 300.0
 READ_TIMEOUT = 5.0
