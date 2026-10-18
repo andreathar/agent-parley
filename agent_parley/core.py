@@ -624,8 +624,6 @@ class BridgeCore:
         lane = Path(participant["lane"])
         branch = participant["branch"]
         if not lane.exists():
-            started = time.monotonic()
-            git(root, "worktree", "prune")
             from agent_parley import workspace
 
             selected = workspace.profile(data)
@@ -636,6 +634,9 @@ class BridgeCore:
                     "Retired lane retains a different shared-media profile; "
                     "restore the matching project profile before readmission."
                 )
+            started = time.monotonic()
+            git(root, "worktree", "prune")
+
             if selected:
                 workspace.add(
                     root,

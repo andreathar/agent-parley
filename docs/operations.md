@@ -3590,9 +3590,9 @@ does not establish that a branch is fit to merge.
 Install the CLI first, then add the repository marketplace:
 
 ```sh
-claude plugin marketplace add suneel944/agent-parley
+claude plugin marketplace add andreathar/agent-parley
 claude plugin install agent-parley@agent-parley
-codex plugin marketplace add suneel944/agent-parley
+codex plugin marketplace add andreathar/agent-parley
 codex plugin add agent-parley@agent-parley
 ```
 
